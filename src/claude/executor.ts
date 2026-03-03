@@ -1,21 +1,57 @@
-import { execSync } from 'node:child_process';
+import { execSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { AsyncQueue } from '../utils/async-queue.js';
+
+const isWindows = process.platform === 'win32';
 
 /** Resolve the Claude Code binary path at module load time. */
 function resolveClaudePath(): string {
   if (process.env.CLAUDE_EXECUTABLE_PATH) return process.env.CLAUDE_EXECUTABLE_PATH;
   try {
-    return execSync('which claude', { encoding: 'utf-8' }).trim();
+    const cmd = isWindows ? 'where claude' : 'which claude';
+    return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
   } catch {
-    return '/usr/local/bin/claude'; // last-resort fallback
+    return isWindows ? 'claude' : '/usr/local/bin/claude';
   }
 }
 
 const CLAUDE_EXECUTABLE = resolveClaudePath();
+
+/**
+ * Custom spawn function for cross-platform compatibility.
+ * - Uses process.execPath (current Node binary) to avoid PATH issues on Windows.
+ * - Filters CLAUDE* env vars to prevent "nested session" errors.
+ * - Merges process.env so child inherits system PATH, TEMP, etc.
+ */
+function customSpawn(options: SpawnOptions): SpawnedProcess {
+  const nodePath = process.execPath;
+
+  // Merge provided env with process.env for a complete environment
+  const baseEnv = options.env && Object.keys(options.env).length > 0
+    ? { ...process.env, ...options.env }
+    : { ...process.env };
+
+  // Filter out CLAUDE* vars to avoid nested session detection
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (!key.startsWith('CLAUDE') && value !== undefined) {
+      env[key] = value;
+    }
+  }
+
+  const child = spawn(nodePath, options.args, {
+    cwd: options.cwd,
+    env,
+    signal: options.signal,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  return child as unknown as SpawnedProcess;
+}
 
 export interface ApiContext {
   botName: string;
@@ -93,8 +129,11 @@ export class ClaudeExecutor {
       includePartialMessages: true,
       // Load MCP servers and settings from user/project config files
       settingSources: ['user', 'project'],
-      // Use native claude binary directly to avoid "spawn node EACCES" when
-      // node is not in PATH (e.g. nvm not initialised in non-interactive shells)
+      // Cross-platform spawn: custom spawn filters CLAUDE* env vars and uses
+      // process.execPath to avoid PATH issues on Windows; fileURLToPath converts
+      // file:// URLs to native paths for the SDK CLI entrypoint.
+      spawnClaudeCodeProcess: customSpawn,
+      executableArgs: [fileURLToPath(import.meta.resolve('@anthropic-ai/claude-agent-sdk/cli.js'))],
       pathToClaudeCodeExecutable: CLAUDE_EXECUTABLE,
     };
 

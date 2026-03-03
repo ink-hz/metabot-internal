@@ -64,11 +64,21 @@ We built MetaBot to run [XVI Robotics](https://github.com/xvirobotics) as an **a
 
 ## Install
 
+**Linux / macOS:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/xvirobotics/metabot/main/install.ps1 | iex
+```
+
 The installer walks you through: working directory → Claude auth → IM credentials → auto-start with PM2.
+
+> **Windows notes:** The PowerShell installer auto-detects `winget`/`choco`/`scoop` for Node.js installation. CLI tools (`mm`, `mb`, `metabot`, `fd`) are installed with `.cmd` wrappers and require [Git for Windows](https://git-scm.com) (provides Git Bash).
 
 <details>
 <summary><strong>Manual install</strong></summary>
@@ -81,7 +91,7 @@ cp .env.example .env              # edit global settings
 npm run dev
 ```
 
-Prerequisites: Node.js 20+, [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated.
+Prerequisites: Node.js 20+, [Claude Code CLI](https://github.com/anthropics/claude-code) installed and authenticated. Works on Linux, macOS, and Windows.
 
 </details>
 
@@ -229,7 +239,7 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 
 ## CLI Tools
 
-The installer places `metabot`, `mm`, `mb`, and `fd` (Feishu bots only) executables in `~/.local/bin/` — available immediately, no `source` needed.
+The installer places `metabot`, `mm`, `mb`, and `fd` (Feishu bots only) executables in `~/.local/bin/` (Linux/macOS) or `%USERPROFILE%\.local\bin\` with `.cmd` wrappers (Windows) — available immediately.
 
 ```bash
 # MetaBot management
