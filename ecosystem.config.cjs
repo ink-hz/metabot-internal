@@ -18,8 +18,8 @@ module.exports = {
       restart_delay: 3000,
 
       // Logs
-      error_file: 'logs/error.log',
-      out_file: 'logs/out.log',
+      error_file: path.join(__dirname, 'logs', 'error.log'),
+      out_file: path.join(__dirname, 'logs', 'out.log'),
       merge_logs: true,
       log_date_format: 'YYYY-MM-DD HH:mm:ss',
 
