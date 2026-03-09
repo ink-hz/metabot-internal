@@ -815,13 +815,6 @@ for cli in $CLI_TOOLS; do
   if [[ -f "$METABOT_HOME/bin/$cli" ]]; then
     cp "$METABOT_HOME/bin/$cli" "$LOCAL_BIN/$cli"
     chmod +x "$LOCAL_BIN/$cli"
-    # Patch secrets into the standalone script
-    if [[ -n "${API_SECRET:-}" ]]; then
-      sed_i "s|changeme|${API_SECRET}|g" "$LOCAL_BIN/$cli"
-    fi
-    if [[ -n "${API_PORT:-}" && "$cli" == "mb" ]]; then
-      sed_i "s|9100|${API_PORT}|g" "$LOCAL_BIN/$cli"
-    fi
   fi
 done
 # Ensure ~/.local/bin is in PATH (most distros include it, but not all)
