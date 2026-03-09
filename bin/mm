@@ -17,12 +17,12 @@ _find_env() {
 }
 METABOT_ENV="$(_find_env)"
 if [[ -n "$METABOT_ENV" && -f "$METABOT_ENV" ]]; then
-  _admin_token=$(grep -oP '^MEMORY_ADMIN_TOKEN=\K.*' "$METABOT_ENV" 2>/dev/null || true)
-  _reader_token=$(grep -oP '^MEMORY_TOKEN=\K.*' "$METABOT_ENV" 2>/dev/null || true)
-  _memory_secret=$(grep -oP '^MEMORY_SECRET=\K.*' "$METABOT_ENV" 2>/dev/null || true)
-  _secret=$(grep -oP '^API_SECRET=\K.*' "$METABOT_ENV" 2>/dev/null || true)
-  _memory_url=$(grep -oP '^META_MEMORY_URL=\K.*' "$METABOT_ENV" 2>/dev/null || true)
-  [[ -z "$_memory_url" ]] && _memory_url=$(grep -oP '^MEMORY_SERVER_URL=\K.*' "$METABOT_ENV" 2>/dev/null || true)
+  _admin_token=$(sed -n 's/^MEMORY_ADMIN_TOKEN=//p' "$METABOT_ENV" 2>/dev/null || true)
+  _reader_token=$(sed -n 's/^MEMORY_TOKEN=//p' "$METABOT_ENV" 2>/dev/null || true)
+  _memory_secret=$(sed -n 's/^MEMORY_SECRET=//p' "$METABOT_ENV" 2>/dev/null || true)
+  _secret=$(sed -n 's/^API_SECRET=//p' "$METABOT_ENV" 2>/dev/null || true)
+  _memory_url=$(sed -n 's/^META_MEMORY_URL=//p' "$METABOT_ENV" 2>/dev/null || true)
+  [[ -z "$_memory_url" ]] && _memory_url=$(sed -n 's/^MEMORY_SERVER_URL=//p' "$METABOT_ENV" 2>/dev/null || true)
 fi
 META_MEMORY_URL="${META_MEMORY_URL:-${_memory_url:-http://localhost:8100}}"
 
