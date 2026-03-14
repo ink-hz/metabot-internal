@@ -16,9 +16,13 @@ export interface RegisteredBot {
 /** Public DTO returned by list() — no secrets or internal refs. */
 export interface BotInfo {
   name: string;
+  description?: string;
   platform: string;
   workingDirectory: string;
-  allowedTools: string[];
+  /** Set when the bot comes from a peer instance. */
+  peerUrl?: string;
+  /** Human-readable peer identifier. */
+  peerName?: string;
 }
 
 /**
@@ -71,9 +75,9 @@ export class BotRegistry {
   list(): BotInfo[] {
     return Array.from(this.bots.values()).map((b) => ({
       name: b.name,
+      ...(b.config.description ? { description: b.config.description } : {}),
       platform: b.platform,
       workingDirectory: b.config.claude.defaultWorkingDirectory,
-      allowedTools: b.config.claude.allowedTools,
     }));
   }
 }

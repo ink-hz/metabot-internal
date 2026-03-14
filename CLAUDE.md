@@ -44,6 +44,7 @@ Feishu WSClient → EventHandler (parse, @mention filter) → MessageBridge → 
 - **`src/feishu/card-builder.ts`** — Builds Feishu interactive card JSON. Cards have color-coded headers (blue=thinking/running, green=complete, red=error), tool call lists, markdown response content, and stats (cost/duration). Content truncated at 28KB.
 - **`src/feishu/message-sender.ts`** — Feishu API wrapper for sending/updating cards, uploading/downloading images, sending text.
 - **`src/bridge/rate-limiter.ts`** — Throttles card updates to avoid Feishu API rate limits (default 1.5s interval). Keeps only the latest pending update.
+- **`src/api/peer-manager.ts`** — Manages cross-instance bot discovery and task forwarding. Polls peer MetaBot instances every 30s, caches their bot lists, supports qualified name routing (`peerName/botName`). Anti-loop via `X-MetaBot-Origin` header.
 
 ### Outputs Directory Pattern
 
@@ -96,6 +97,14 @@ Read Feishu documents (standalone docx and wiki pages) and convert them to Markd
 
 **Key module:** `src/feishu/doc-reader.ts` — `FeishuDocReader` class that fetches blocks via `docx.v1.documentBlock.list` and converts them to Markdown (reverse of `markdown-to-blocks.ts`).
 
+### Voice API (Jarvis Mode)
+
+`POST /api/voice` — Server-side STT + Agent execution + optional TTS. Accepts raw audio body (m4a, wav, webm, mp3, ogg — max 100 MB). Config via query params: `botName`, `chatId`, `language`, `stt` (doubao/whisper), `tts` (doubao/openai/elevenlabs), `ttsVoice`, `sendCards`. Defaults to Doubao for both STT and TTS when Volcengine keys are configured.
+
+**Key module:** `src/api/voice-handler.ts` — Doubao/Whisper transcription, agent execution via `bridge.executeApiTask()`, Doubao/OpenAI/ElevenLabs TTS.
+
+**Environment:** `VOLCENGINE_TTS_APPID` + `VOLCENGINE_TTS_ACCESS_KEY` (for Doubao STT + TTS, recommended), `OPENAI_API_KEY` (fallback for Whisper STT + OpenAI TTS), `ELEVENLABS_API_KEY` (optional for ElevenLabs TTS).
+
 ### Plan Mode Display
 
 When Claude enters plan mode and writes a plan to `.claude/plans/*.md`, the plan content is automatically sent to the Feishu user as a separate card message when `ExitPlanMode` is triggered. This is handled by `StreamProcessor` tracking plan file paths and `MessageBridge.sendPlanContent()` reading and sending the file.
@@ -130,7 +139,7 @@ Sessions are isolated per `chatId` with no collision between bots since each bot
 
 Knowledge persistence is handled by an external **MetaMemory server** (FastAPI + SQLite). The server stores documents as Markdown in a folder tree with full-text search (FTS5).
 
-- **Server URL**: Configured via `MEMORY_SERVER_URL` env var (default: `http://localhost:8100`)
+- **Server URL**: Configured via `META_MEMORY_URL` env var (default: `http://localhost:8100`)
 - **Claude Code Skill**: Claude autonomously reads/writes memory documents via the `metamemory` skill (installed at `~/.claude/skills/metamemory/SKILL.md`). When users say "remember this" or Claude wants to persist knowledge, it calls the memory API via curl.
 - **Feishu commands**: `/memory list`, `/memory search <query>`, `/memory status` — quick queries via `MemoryClient` without spawning Claude.
 - **Web UI**: Browse documents at `http://localhost:8100` — folder tree, markdown rendering, search.

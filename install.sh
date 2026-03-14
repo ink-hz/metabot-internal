@@ -426,7 +426,7 @@ API_TIMEOUT_MS=600000"
   API_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 64 /dev/urandom | xxd -p | tr -d '\n' | head -c 64)"
   API_PORT="9100"
   LOG_LEVEL="info"
-  MEMORY_SERVER_URL="http://localhost:8100"
+  META_MEMORY_URL="http://localhost:8100"
 
   # Claude executable path
   CLAUDE_PATH=""
@@ -470,7 +470,7 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
     fi
     echo ""
     echo "# MetaMemory"
-    echo "MEMORY_SERVER_URL=${MEMORY_SERVER_URL}"
+    echo "META_MEMORY_URL=${META_MEMORY_URL}"
   } > "$METABOT_HOME/.env"
   chmod 600 "$METABOT_HOME/.env"
   success ".env generated"
@@ -512,6 +512,12 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
     console.log(JSON.stringify(config, null, 2));
   " "$FEISHU_BOTS_JSON" "$TELEGRAM_BOTS_JSON" > "$BOTS_JSON"
   chmod 600 "$BOTS_JSON"
+
+  # Validate generated JSON
+  if ! node -e "JSON.parse(require('fs').readFileSync('$BOTS_JSON','utf-8'))" 2>/dev/null; then
+    error "Generated bots.json is invalid. Please check your bot name and credentials for special characters."
+    exit 1
+  fi
   success "bots.json generated"
 fi
 
@@ -729,7 +735,7 @@ mb() {
       fi
       curl -s -X POST "$METABOT_URL/api/tasks" \
         -H "$METABOT_AUTH" -H "Content-Type: application/json" \
-        -d "{\"botName\":\"$bot\",\"chatId\":\"$chat\",\"prompt\":\"$prompt\",\"sendCards\":false}"
+        -d "{\"botName\":\"$bot\",\"chatId\":\"$chat\",\"prompt\":\"$prompt\",\"sendCards\":true}"
       ;;
     # --- Scheduling ---
     schedule|sched|sc)
@@ -815,13 +821,6 @@ for cli in $CLI_TOOLS; do
   if [[ -f "$METABOT_HOME/bin/$cli" ]]; then
     cp "$METABOT_HOME/bin/$cli" "$LOCAL_BIN/$cli"
     chmod +x "$LOCAL_BIN/$cli"
-    # Patch secrets into the standalone script
-    if [[ -n "${API_SECRET:-}" ]]; then
-      sed_i "s|changeme|${API_SECRET}|g" "$LOCAL_BIN/$cli"
-    fi
-    if [[ -n "${API_PORT:-}" && "$cli" == "mb" ]]; then
-      sed_i "s|9100|${API_PORT}|g" "$LOCAL_BIN/$cli"
-    fi
   fi
 done
 # Ensure ~/.local/bin is in PATH (most distros include it, but not all)

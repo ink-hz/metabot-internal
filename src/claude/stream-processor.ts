@@ -4,14 +4,14 @@ import type { CardState, ToolCall, PendingQuestion } from '../feishu/card-builde
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
 
 /**
- * Tools that require user interaction in the Agent SDK.
- * These tools cause the SDK stream to pause waiting for a tool_result.
- * The bridge must detect them and respond (either by asking the user
- * or auto-responding) to prevent the stream from hanging.
+ * Tools handled by the SDK in bypassPermissions mode.
+ * The SDK auto-responds to these; we only detect them for side effects
+ * (e.g. sending plan content to the user) — we must NOT call sendAnswer
+ * or we'll create duplicate tool_results that cause API 400 errors.
  */
-const AUTO_RESPOND_TOOLS = new Set(['ExitPlanMode', 'EnterPlanMode']);
+const SDK_HANDLED_TOOLS = new Set(['ExitPlanMode', 'EnterPlanMode']);
 
-export interface AutoRespondTool {
+export interface DetectedTool {
   toolUseId: string;
   name: string;
 }
@@ -25,14 +25,14 @@ export class StreamProcessor {
   private durationMs: number | undefined;
   private _imagePaths: Set<string> = new Set();
   private _pendingQuestion: PendingQuestion | null = null;
-  private _autoRespondTools: AutoRespondTool[] = [];
+  private _sdkHandledTools: DetectedTool[] = [];
   private _planFilePath: string | null = null;
 
   constructor(private userPrompt: string) {}
 
   processMessage(message: SDKMessage): CardState {
     // Capture session_id from any message
-    if (message.session_id && !this.sessionId) {
+    if (message.session_id) {
       this.sessionId = message.session_id;
     }
 
@@ -91,8 +91,8 @@ export class StreamProcessor {
         if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
           if (block.name === 'AskUserQuestion' && block.id && block.input) {
             this.extractPendingQuestion(block.id, block.input);
-          } else if (AUTO_RESPOND_TOOLS.has(block.name) && block.id) {
-            this._autoRespondTools.push({ toolUseId: block.id, name: block.name });
+          } else if (SDK_HANDLED_TOOLS.has(block.name) && block.id) {
+            this._sdkHandledTools.push({ toolUseId: block.id, name: block.name });
           }
         }
       } else if (block.type === 'tool_result') {
@@ -138,18 +138,21 @@ export class StreamProcessor {
       tool.status = 'done';
     }
 
+    const resultText = message.result || this.responseText;
     const isError = message.subtype !== 'success';
+    // SDK sometimes wraps API errors as "success" with the error text as result
+    const isApiError = !isError && isApiErrorResult(resultText);
 
     return {
-      status: isError ? 'error' : 'complete',
+      status: (isError || isApiError) ? 'error' : 'complete',
       userPrompt: this.userPrompt,
-      responseText: message.result || this.responseText,
+      responseText: isApiError ? '' : resultText,
       toolCalls: [...this.toolCalls],
       costUsd: this.costUsd,
       durationMs: this.durationMs,
       errorMessage: isError
         ? (message.errors?.join('; ') || `Ended with: ${message.subtype}`)
-        : undefined,
+        : isApiError ? resultText : undefined,
     };
   }
 
@@ -215,15 +218,33 @@ export class StreamProcessor {
   }
 
   /**
-   * Get and clear any tools that need auto-response (e.g. ExitPlanMode).
-   * These tools cause the SDK stream to pause; we must push a tool_result
-   * to unblock them.
+   * Get and clear any SDK-handled tools detected in the stream.
+   * These tools are auto-responded to by the SDK in bypassPermissions mode;
+   * the bridge should NOT call sendAnswer for them, only perform side effects
+   * like sending plan content to the user.
    */
-  drainAutoRespondTools(): AutoRespondTool[] {
-    if (this._autoRespondTools.length === 0) return [];
-    const tools = [...this._autoRespondTools];
-    this._autoRespondTools = [];
+  drainSdkHandledTools(): DetectedTool[] {
+    if (this._sdkHandledTools.length === 0) return [];
+    const tools = [...this._sdkHandledTools];
+    this._sdkHandledTools = [];
     return tools;
+  }
+
+  /** Return the current card state without processing a new message. */
+  getCurrentState(): CardState {
+    const hasActiveTools = this.toolCalls.some((t) => t.status === 'running');
+    const status = this._pendingQuestion
+      ? 'waiting_for_input'
+      : hasActiveTools ? 'running' : this.responseText ? 'running' : 'thinking';
+    return {
+      status,
+      userPrompt: this.userPrompt,
+      responseText: this.responseText,
+      toolCalls: [...this.toolCalls],
+      costUsd: this.costUsd,
+      durationMs: this.durationMs,
+      pendingQuestion: this._pendingQuestion || undefined,
+    };
   }
 
   getSessionId(): string | undefined {
@@ -297,4 +318,10 @@ function shortenPath(filePath: string): string {
 function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return text.slice(0, max) + '...';
+}
+
+/** Detect API error responses that the SDK wraps as successful results */
+function isApiErrorResult(text: string): boolean {
+  if (!text) return false;
+  return /^API Error:\s*\d{3}\s/i.test(text);
 }
