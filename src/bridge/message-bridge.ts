@@ -24,6 +24,8 @@ const MAX_QUEUE_SIZE = 5; // max queued messages per chat
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
 const FINAL_CARD_RETRIES = 3;
 const FINAL_CARD_BASE_DELAY_MS = 2000;
+const TASK_TIMEOUT_MESSAGE = 'Task timed out (24 hour limit)';
+const IDLE_TIMEOUT_MESSAGE = 'Task aborted: no activity for 1 hour';
 
 interface RunningTask {
   abortController: AbortController;
@@ -221,6 +223,16 @@ export class MessageBridge {
     task.executionHandle.sendAnswer(pending.toolUseId, sessionId, answerJson);
 
     this.logger.info({ chatId, answer: answerText, toolUseId: pending.toolUseId }, 'Sent user answer to Claude');
+
+    // Update the card: remove question UI, show "running" with answer confirmation
+    const currentState = task.processor.getCurrentState();
+    await this.sender.updateCard(task.cardMessageId, {
+      ...currentState,
+      status: 'running',
+      responseText: currentState.responseText
+        ? currentState.responseText + `\n\n> **Reply:** ${answerText}\n\n_Continuing..._`
+        : `> **Reply:** ${answerText}\n\n_Continuing..._`,
+    });
   }
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
@@ -324,7 +336,7 @@ export class MessageBridge {
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
-        this.logger.warn({ chatId, userId }, 'Task idle timeout (5min no stream), aborting');
+        this.logger.warn({ chatId, userId }, 'Task idle timeout (1h no stream), aborting');
         idledOut = true;
         executionHandle.finish();
         abortController.abort();
@@ -370,19 +382,15 @@ export class MessageBridge {
           continue;
         }
 
-        // Auto-respond to interactive tools that don't need user input (ExitPlanMode, etc.)
-        const autoTools = processor.drainAutoRespondTools();
-        for (const tool of autoTools) {
-          const sid = processor.getSessionId() || '';
-          const response = getAutoResponse(tool.name);
-          this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Auto-responding to interactive tool');
-
-          // ExitPlanMode: send plan content to user before auto-responding
+        // Detect SDK-handled tools for side effects (plan content display).
+        // Do NOT call sendAnswer — the SDK auto-responds in bypassPermissions mode.
+        // Sending a duplicate tool_result causes API 400 errors.
+        const sdkTools = processor.drainSdkHandledTools();
+        for (const tool of sdkTools) {
+          this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
             await this.sendPlanContent(chatId, processor, state);
           }
-
-          executionHandle.sendAnswer(tool.toolUseId, sid, response);
         }
 
         // If we just got a message after answering a question, clear timeout state
@@ -407,9 +415,9 @@ export class MessageBridge {
       // Force terminal state if stream ended without one
       if (lastState.status !== 'complete' && lastState.status !== 'error') {
         if (timedOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: 'Task timed out (1 hour limit)' };
+          lastState = { ...lastState, status: 'error', errorMessage: TASK_TIMEOUT_MESSAGE };
         } else if (idledOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: 'Task aborted: no activity for 5 minutes' };
+          lastState = { ...lastState, status: 'error', errorMessage: IDLE_TIMEOUT_MESSAGE };
         } else if (abortController.signal.aborted) {
           lastState = { ...lastState, status: 'error', errorMessage: 'Task was stopped' };
         } else {
@@ -420,6 +428,33 @@ export class MessageBridge {
             errorMessage: lastState.responseText ? undefined : 'Claude session ended unexpectedly',
           };
         }
+      }
+
+      // Auto-retry with fresh session when Claude can't find the conversation
+      if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
+        this.logger.info({ chatId }, 'Stale session detected, retrying with fresh session');
+        this.sessionManager.resetSession(chatId);
+        lastState = { ...lastState, status: 'running', errorMessage: undefined };
+        await this.sender.updateCard(messageId, { ...lastState, responseText: '_Session expired, retrying..._' });
+
+        // Retry execution without sessionId
+        const retryHandle = this.executor.startExecution({
+          prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext,
+        });
+        executionHandle.finish();
+        runningTask.executionHandle = retryHandle;
+
+        for await (const message of retryHandle.stream) {
+          if (abortController.signal.aborted) break;
+          resetIdleTimer();
+          const state = processor.processMessage(message);
+          lastState = state;
+          const newSid = processor.getSessionId();
+          if (newSid) this.sessionManager.setSessionId(chatId, newSid);
+          if (state.status === 'complete' || state.status === 'error') break;
+          rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+        }
+        await rateLimiter.cancelAndWait();
       }
 
       await this.sendFinalCard(messageId, lastState, chatId);
@@ -445,6 +480,51 @@ export class MessageBridge {
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'Claude execution error');
+
+      // Auto-retry with fresh session when Claude can't find the conversation
+      const errMsg: string = err.message || '';
+      if (isStaleSessionError(errMsg) && session.sessionId) {
+        this.logger.info({ chatId }, 'Stale session detected in catch, retrying with fresh session');
+        this.sessionManager.resetSession(chatId);
+        await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: '_Session expired, retrying..._' });
+
+        try {
+          const retryHandle = this.executor.startExecution({
+            prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext,
+          });
+          executionHandle.finish();
+          runningTask.executionHandle = retryHandle;
+
+          for await (const message of retryHandle.stream) {
+            if (abortController.signal.aborted) break;
+            resetIdleTimer();
+            const state = processor.processMessage(message);
+            lastState = state;
+            const newSid = processor.getSessionId();
+            if (newSid) this.sessionManager.setSessionId(chatId, newSid);
+            if (state.status === 'complete' || state.status === 'error') break;
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+          }
+          await rateLimiter.cancelAndWait();
+          await this.sendFinalCard(messageId, lastState, chatId);
+
+          const durationMs = Date.now() - startTime;
+          this.audit.log({
+            event: lastState.status === 'error' ? 'task_error' : 'task_complete',
+            botName: this.config.name, chatId, userId, prompt: text,
+            durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
+          });
+          this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
+          metrics.incCounter('metabot_tasks_total');
+          metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
+
+          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+          return; // skip the normal error handling below
+        } catch (retryErr: any) {
+          this.logger.error({ err: retryErr, chatId }, 'Retry after stale session also failed');
+          lastState = { ...lastState, status: 'error', errorMessage: retryErr.message || 'Retry failed' };
+        }
+      }
 
       const durationMs = Date.now() - startTime;
       this.audit.log({
@@ -552,7 +632,7 @@ export class MessageBridge {
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
-        this.logger.warn({ chatId, userId }, 'API task idle timeout (5min no stream), aborting');
+        this.logger.warn({ chatId, userId }, 'API task idle timeout (1h no stream), aborting');
         idledOut = true;
         executionHandle.finish();
         abortController.abort();
@@ -589,18 +669,13 @@ export class MessageBridge {
           continue;
         }
 
-        // Auto-respond to interactive tools (ExitPlanMode, etc.)
-        const autoTools = processor.drainAutoRespondTools();
-        for (const tool of autoTools) {
-          const sid = processor.getSessionId() || '';
-          const response = getAutoResponse(tool.name);
-          this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: auto-responding to interactive tool');
-
+        // Detect SDK-handled tools for side effects only (no sendAnswer).
+        const sdkTools = processor.drainSdkHandledTools();
+        for (const tool of sdkTools) {
+          this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode' && sendCards) {
             await this.sendPlanContent(chatId, processor, state);
           }
-
-          executionHandle.sendAnswer(tool.toolUseId, sid, response);
         }
 
         if (state.status === 'complete' || state.status === 'error') {
@@ -618,9 +693,9 @@ export class MessageBridge {
 
       if (lastState.status !== 'complete' && lastState.status !== 'error') {
         if (timedOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: 'Task timed out (1 hour limit)' };
+          lastState = { ...lastState, status: 'error', errorMessage: TASK_TIMEOUT_MESSAGE };
         } else if (idledOut) {
-          lastState = { ...lastState, status: 'error', errorMessage: 'Task aborted: no activity for 5 minutes' };
+          lastState = { ...lastState, status: 'error', errorMessage: IDLE_TIMEOUT_MESSAGE };
         } else if (abortController.signal.aborted) {
           lastState = { ...lastState, status: 'error', errorMessage: 'Task was stopped' };
         } else {
@@ -630,6 +705,35 @@ export class MessageBridge {
             errorMessage: lastState.responseText ? undefined : 'Claude session ended unexpectedly',
           };
         }
+      }
+
+      // Auto-retry with fresh session when Claude can't find the conversation
+      if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
+        this.logger.info({ chatId }, 'API task: stale session detected, retrying with fresh session');
+        this.sessionManager.resetSession(chatId);
+        if (sendCards && messageId) {
+          await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: '_Session expired, retrying..._' });
+        }
+
+        const retryHandle = this.executor.startExecution({
+          prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext,
+        });
+        executionHandle.finish();
+        runningTask.executionHandle = retryHandle;
+
+        for await (const message of retryHandle.stream) {
+          if (abortController.signal.aborted) break;
+          resetIdleTimer();
+          const state = processor.processMessage(message);
+          lastState = state;
+          const newSid = processor.getSessionId();
+          if (newSid) this.sessionManager.setSessionId(chatId, newSid);
+          if (state.status === 'complete' || state.status === 'error') break;
+          if (sendCards && messageId) {
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+          }
+        }
+        await rateLimiter.cancelAndWait();
       }
 
       if (sendCards && messageId) {
@@ -658,6 +762,56 @@ export class MessageBridge {
       };
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'API task execution error');
+
+      // Auto-retry with fresh session when Claude can't find the conversation
+      const errMsg: string = err.message || '';
+      if (isStaleSessionError(errMsg) && session.sessionId) {
+        this.logger.info({ chatId }, 'API task: stale session in catch, retrying with fresh session');
+        this.sessionManager.resetSession(chatId);
+        if (sendCards && messageId) {
+          await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: '_Session expired, retrying..._' });
+        }
+
+        try {
+          const retryHandle = this.executor.startExecution({
+            prompt, cwd, sessionId: undefined, abortController, outputsDir, apiContext,
+          });
+          executionHandle.finish();
+          runningTask.executionHandle = retryHandle;
+
+          for await (const message of retryHandle.stream) {
+            if (abortController.signal.aborted) break;
+            resetIdleTimer();
+            const state = processor.processMessage(message);
+            lastState = state;
+            const newSid = processor.getSessionId();
+            if (newSid) this.sessionManager.setSessionId(chatId, newSid);
+            if (state.status === 'complete' || state.status === 'error') break;
+            if (sendCards && messageId) {
+              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+            }
+          }
+          await rateLimiter.cancelAndWait();
+
+          if (sendCards && messageId) {
+            await this.sendFinalCard(messageId, lastState, chatId);
+          }
+
+          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+
+          return {
+            success: lastState.status === 'complete',
+            responseText: lastState.responseText,
+            sessionId: processor.getSessionId(),
+            costUsd: lastState.costUsd,
+            durationMs: lastState.durationMs,
+            error: lastState.errorMessage,
+          };
+        } catch (retryErr: any) {
+          this.logger.error({ err: retryErr, chatId }, 'API task retry after stale session also failed');
+          // Fall through to normal error handling
+        }
+      }
 
       if (sendCards && messageId) {
         const errorState: CardState = {
@@ -751,17 +905,8 @@ export class MessageBridge {
   }
 }
 
-/**
- * Generate auto-response content for interactive tools that the bridge
- * handles without user input (plan mode, etc.).
- */
-function getAutoResponse(toolName: string): string {
-  switch (toolName) {
-    case 'ExitPlanMode':
-      return 'User approved the plan. Proceed with implementation.';
-    case 'EnterPlanMode':
-      return 'Plan mode approved. Explore the codebase and design your approach.';
-    default:
-      return 'Approved. Please continue.';
-  }
+export function isStaleSessionError(errorMessage?: string): boolean {
+  if (!errorMessage) return false;
+  return /no conversation found|conversation not found|session id|invalid session|multiple.*tool_result.*blocks|each tool_use must have a single result/i.test(errorMessage);
 }
+

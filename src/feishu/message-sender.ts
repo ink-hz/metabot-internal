@@ -164,6 +164,20 @@ export class MessageSender {
     return true;
   }
 
+  async getChatMemberCount(chatId: string): Promise<number | undefined> {
+    try {
+      const resp: any = await this.client.im.v1.chat.get({
+        path: { chat_id: chatId },
+      });
+      const userCount = parseInt(resp?.data?.user_count, 10) || 0;
+      const botCount = parseInt(resp?.data?.bot_count, 10) || 0;
+      return userCount + botCount;
+    } catch (err) {
+      this.logger.error({ err, chatId }, 'Failed to get chat member count');
+      return undefined;
+    }
+  }
+
   async sendText(chatId: string, text: string): Promise<void> {
     try {
       await this.client.im.v1.message.create({

@@ -13,7 +13,8 @@
     "lint": "eslint src/ tests/",
     "lint:fix": "eslint src/ tests/ --fix",
     "format": "prettier --write 'src/**/*.ts' 'tests/**/*.ts'",
-    "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts'"
+    "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts'",
+    "update-cli": "for cli in mb mm metabot fd; do [ -f bin/$cli ] && cp bin/$cli ~/.local/bin/$cli && chmod +x ~/.local/bin/$cli && echo \"Updated: $cli\"; done"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.0",
@@ -23,6 +24,7 @@
     "dotenv": "^16.4.0",
     "grammy": "^1.40.0",
     "https-proxy-agent": "^7.0.6",
+    "openai": "^6.29.0",
     "pino": "^9.0.0",
     "pino-pretty": "^11.0.0"
   },
@@ -33,7 +35,7 @@
     "eslint": "^10.0.2",
     "prettier": "^3.8.1",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0",
+    "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.1",
     "vitest": "^3.1.1"
   }
