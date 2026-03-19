@@ -2,12 +2,15 @@
 
 通过 AirPods 和 Siri 免手免屏与任意 MetaBot Agent 语音交流。无需安装 App，只用 iOS 快捷指令。
 
-## 两种模式
+## 三种模式
 
 | 模式 | STT | TTS | 质量 | 配置时间 |
 |------|-----|-----|------|---------|
+| **Web 电话模式** | 豆包 / Whisper | 豆包 / OpenAI / ElevenLabs | 高质量 | 5 分钟 |
 | **简单模式**（Siri STT） | Siri 内置 | Siri 朗读 | 基础 | 5 分钟 |
 | **Pro 模式**（服务端 STT） | 豆包 / Whisper | 豆包 / OpenAI / ElevenLabs | 高质量 | 10 分钟 |
+
+**新功能：Web 电话模式** — 无需 iOS 快捷指令。打开 Web UI，点击电话图标即可开始对话。VAD 自动检测说完。详见 [Web UI — 电话语音模式](web-ui.md#电话语音模式)。
 
 **推荐：Pro 模式** — 服务端 STT（豆包或 Whisper）语音识别效果远优于 Siri，尤其是中文和中英混合输入。配置火山引擎密钥后默认使用豆包。
 
@@ -112,6 +115,7 @@
 | `tts` | `doubao` | TTS 服务：`doubao`、`openai` 或 `elevenlabs`（根据已配置的密钥自动选择） |
 | `ttsVoice` | （按服务商） | TTS 声音（豆包: speaker ID；OpenAI: alloy/echo/fable/onyx/nova/shimmer；ElevenLabs: voice ID） |
 | `sendCards` | `false` | 同时发送到飞书 |
+| `voiceMode` | `false` | 启用语音模式（简短回复，`maxTurns=1`） |
 
 ---
 
@@ -232,6 +236,44 @@
 | `VOLCENGINE_TTS_RESOURCE_ID` | 豆包 TTS 资源 ID（默认: `volc.service_type.10029`） |
 | `OPENAI_API_KEY` | Whisper STT 和 OpenAI TTS 备选 |
 | `ELEVENLABS_API_KEY` | ElevenLabs TTS 必需 |
+| `VOICE_MODEL` | 语音模式使用的 Claude 模型（可选覆盖） |
+
+### POST `/api/tts`
+
+轻量级文字转语音端点 — 无 STT，无 Agent 执行。纯文本输入，音频输出。
+
+**请求：**
+
+```bash
+curl -X POST http://localhost:9100/api/tts \
+  -H "Authorization: Bearer YOUR_API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "你好世界", "provider": "doubao", "voice": "zh_female_wanqudashu_moon_bigtts"}'
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `text` | 是 | 要转换的文本 |
+| `provider` | 否 | `doubao`、`openai` 或 `elevenlabs`（根据已配置密钥自动选择） |
+| `voice` | 否 | 声音/音色 ID（各服务商有默认值） |
+
+**响应：** `audio/mpeg` 二进制数据，附带响应头：
+
+- `X-Text-Length`：原始文本长度
+- `X-Provider`：使用的 TTS 服务商
+- `X-Voice`：使用的声音 ID
+
+**CLI 快捷命令：**
+
+```bash
+mb voice "你好世界"                   # 生成 MP3，输出文件路径
+mb voice "你好" --play               # 生成并播放音频
+mb voice "你好" -o greeting.mp3      # 保存到指定文件
+echo "长文本" | mb voice             # 从标准输入读取
+mb voice "你好" --provider openai --voice nova  # 指定服务商/声音
+```
+
+详见 [mb CLI — 语音](../reference/cli-mb.md#语音) 完整 CLI 参考。
 
 ## 限制
 

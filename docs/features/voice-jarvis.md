@@ -2,12 +2,15 @@
 
 Talk to any MetaBot agent hands-free using AirPods and Siri. No app needed — just an iOS Shortcut.
 
-## Two Modes
+## Three Modes
 
 | Mode | STT | TTS | Quality | Setup |
 |------|-----|-----|---------|-------|
+| **Web Call** | Doubao / Whisper | Doubao / OpenAI / ElevenLabs | High | 5 min |
 | **Simple** (Siri STT) | Siri built-in | Siri Speak Text | Basic | 5 min |
 | **Pro** (Server STT) | Doubao / Whisper | Doubao / OpenAI / ElevenLabs | High | 10 min |
+
+**New: Web Call Mode** — No iOS Shortcut needed. Open the Web UI, tap the phone icon, and start talking. VAD auto-detects when you finish speaking. See [Web UI — Phone Call Mode](web-ui.md#phone-call-mode) for details.
 
 **Recommended: Pro mode** — Server-side STT (Doubao or Whisper) has much better speech recognition, especially for Chinese + mixed-language input. Doubao is the default when Volcengine keys are configured.
 
@@ -110,6 +113,7 @@ Search and add **Play Sound**:
 | `tts` | `doubao` | TTS provider: `doubao`, `openai`, or `elevenlabs` (auto-selects based on available keys) |
 | `ttsVoice` | (per provider) | TTS voice (Doubao: speaker ID; OpenAI: alloy/echo/fable/onyx/nova/shimmer; ElevenLabs: voice ID) |
 | `sendCards` | `false` | Also send response to Feishu |
+| `voiceMode` | `false` | Enable voice mode (brief responses, `maxTurns=1`) |
 
 ---
 
@@ -228,6 +232,44 @@ Server-side STT (Doubao or Whisper) + Agent execution + optional TTS. Defaults t
 | `VOLCENGINE_TTS_RESOURCE_ID` | Doubao TTS resource ID (default: `volc.service_type.10029`) |
 | `OPENAI_API_KEY` | Fallback for Whisper STT and OpenAI TTS |
 | `ELEVENLABS_API_KEY` | Required for ElevenLabs TTS |
+| `VOICE_MODEL` | Override Claude model for voice mode (optional) |
+
+### POST `/api/tts`
+
+Lightweight text-to-speech endpoint — no STT, no agent. Just text in, audio out.
+
+**Request:**
+
+```bash
+curl -X POST http://localhost:9100/api/tts \
+  -H "Authorization: Bearer YOUR_API_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "provider": "doubao", "voice": "zh_female_wanqudashu_moon_bigtts"}'
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `text` | Yes | Text to convert to speech |
+| `provider` | No | `doubao`, `openai`, or `elevenlabs` (auto-selects based on available keys) |
+| `voice` | No | Voice/speaker ID (defaults per provider) |
+
+**Response:** `audio/mpeg` binary with headers:
+
+- `X-Text-Length`: original text length
+- `X-Provider`: TTS provider used
+- `X-Voice`: voice/speaker ID used
+
+**CLI shortcut:**
+
+```bash
+mb voice "Hello world"              # generate MP3, print file path
+mb voice "Hello" --play             # generate and play audio
+mb voice "Hello" -o greeting.mp3    # save to specific file
+echo "Long text" | mb voice         # read from stdin
+mb voice "Hello" --provider openai --voice nova  # override provider/voice
+```
+
+See [mb CLI — Voice](../reference/cli-mb.md#voice) for full CLI reference.
 
 ## Limitations
 
