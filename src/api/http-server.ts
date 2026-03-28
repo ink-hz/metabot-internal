@@ -9,7 +9,7 @@ import { addBot, removeBot, getBotEntry } from './bots-config-writer.js';
 import { installSkillsToWorkDir } from './skills-installer.js';
 import { metrics } from '../utils/metrics.js';
 import type { PeerManager } from './peer-manager.js';
-import { handleVoiceRequest, doubaoTTS, openaiTTS, elevenlabsTTS, resolveTTSProvider, resolveTTSVoice } from './voice-handler.js';
+import { handleVoiceRequest, doubaoTTS, openaiTTS, elevenlabsTTS, edgeTTS, resolveTTSProvider, resolveTTSVoice } from './voice-handler.js';
 
 interface ApiServerOptions {
   port: number;
@@ -120,6 +120,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           audioBuffer = await elevenlabsTTS(ttsText, voice);
         } else if (provider === 'doubao') {
           audioBuffer = await doubaoTTS(ttsText, voice);
+        } else if (provider === 'edge') {
+          audioBuffer = await edgeTTS(ttsText, voice);
         } else {
           audioBuffer = await openaiTTS(ttsText, voice);
         }
