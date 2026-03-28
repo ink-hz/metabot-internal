@@ -604,7 +604,16 @@ elif [[ "$SKIP_CONFIG" == "true" && -f "$METABOT_HOME/bots.json" ]]; then
 fi
 
 # Install lark-cli and AI Agent skills — only when Feishu is configured
+SETUP_LARK_CLI=false
 if [[ "$HAS_FEISHU" == "true" ]]; then
+  echo ""
+  info "lark-cli provides 19 AI Agent skills for Feishu (docs, sheets, calendar, IM, etc.)"
+  if prompt_yn "Install lark-cli and Feishu AI Agent skills?" "y"; then
+    SETUP_LARK_CLI=true
+  fi
+fi
+
+if [[ "$SETUP_LARK_CLI" == "true" ]]; then
   info "Installing lark-cli (Feishu official CLI)..."
   if command -v lark-cli &>/dev/null; then
     success "lark-cli already installed ($(lark-cli --version 2>/dev/null || echo 'unknown'))"
@@ -644,12 +653,12 @@ if [[ "$HAS_FEISHU" == "true" ]]; then
   else
     warn "lark-cli skills install failed — you can run manually: npx skills add larksuite/cli --all -y -g"
   fi
+fi
 
-  # Clean up old feishu-doc skill if present
-  if [[ -d "$SKILLS_DIR/feishu-doc" ]]; then
-    rm -rf "$SKILLS_DIR/feishu-doc"
-    info "Removed legacy feishu-doc skill (replaced by lark-cli skills)"
-  fi
+# Clean up old feishu-doc skill if present
+if [[ -d "$SKILLS_DIR/feishu-doc" ]]; then
+  rm -rf "$SKILLS_DIR/feishu-doc"
+  info "Removed legacy feishu-doc skill (replaced by lark-cli skills)"
 fi
 
 # Determine working directory
@@ -674,7 +683,7 @@ if [[ -n "${DEPLOY_WORK_DIR:-}" ]]; then
 
   # Copy skills (common + lark-cli skills if Feishu)
   DEPLOY_SKILLS="metaskill metamemory metabot voice"
-  if [[ "$HAS_FEISHU" == "true" ]]; then
+  if [[ "$SETUP_LARK_CLI" == "true" ]]; then
     for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
       [[ -d "$SKILLS_DIR/$lark_skill" ]] && DEPLOY_SKILLS="$DEPLOY_SKILLS $lark_skill"
     done

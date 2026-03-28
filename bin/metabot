@@ -86,57 +86,10 @@ cmd_update() {
     info "Removed legacy feishu-doc skill"
   fi
 
-  # Detect Feishu bots and install/update lark-cli skills
-  local has_feishu=false
-  if [[ -f "$METABOT_HOME/bots.json" ]] && command -v node &>/dev/null; then
-    if node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); process.exit((c.feishuBots||[]).length>0?0:1)" 2>/dev/null; then
-      has_feishu=true
-    fi
-  fi
-
-  if [[ "$has_feishu" == "true" ]]; then
-    # Install/update lark-cli if not present
-    if ! command -v lark-cli &>/dev/null; then
-      info "Installing lark-cli..."
-      if npm install -g @larksuite/cli 2>/dev/null; then
-        success "lark-cli installed globally"
-      else
-        mkdir -p "$HOME/.npm-global"
-        npm config set prefix "$HOME/.npm-global" 2>/dev/null || true
-        npm install -g @larksuite/cli 2>/dev/null && \
-          success "lark-cli installed to ~/.npm-global/bin" || \
-          error "lark-cli install failed — run manually: npm install -g @larksuite/cli"
-        if ! echo "$PATH" | grep -q "$HOME/.npm-global/bin"; then
-          export PATH="$HOME/.npm-global/bin:$PATH"
-        fi
-      fi
-    fi
-
-    # Configure lark-cli if not configured
-    if [[ ! -f "$HOME/.lark-cli/config.json" && -f "$METABOT_HOME/bots.json" ]]; then
-      local app_id app_secret
-      app_id=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppId||'')" 2>/dev/null)
-      app_secret=$(node -e "const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8')); console.log((c.feishuBots||[])[0]?.feishuAppSecret||'')" 2>/dev/null)
-      if [[ -n "$app_id" && -n "$app_secret" ]]; then
-        echo "$app_secret" | lark-cli config init --app-id "$app_id" --app-secret-stdin --brand feishu 2>/dev/null && \
-          success "lark-cli configured with app $app_id" || \
-          info "lark-cli config skipped (run manually: lark-cli config init)"
-      fi
-    fi
-
-    # Install/update lark-cli AI Agent skills
-    local lark_skills_missing=false
-    if [[ ! -d "$SKILLS_DIR/lark-doc" ]]; then
-      lark_skills_missing=true
-    fi
-    if [[ "$lark_skills_missing" == "true" ]]; then
-      info "Installing lark-cli AI Agent skills..."
-      if npx skills add larksuite/cli --all -y -g 2>/dev/null; then
-        success "lark-cli AI Agent skills installed"
-      else
-        info "lark-cli skills install failed — run manually: npx skills add larksuite/cli --all -y -g"
-      fi
-    fi
+  # Update lark-cli skills only if previously installed (opt-in via install.sh)
+  local has_lark_skills=false
+  if [[ -d "$SKILLS_DIR/lark-doc" ]]; then
+    has_lark_skills=true
   fi
   success "Skills updated"
 
@@ -159,8 +112,8 @@ cmd_update() {
           cp -r "$SKILLS_DIR/$skill/." "$ws_skills_dir/$skill/"
         fi
       done
-      # Copy lark-cli skills for Feishu
-      if [[ "$has_feishu" == "true" ]]; then
+      # Copy lark-cli skills if previously installed
+      if [[ "$has_lark_skills" == "true" ]]; then
         for lark_skill in lark-base lark-calendar lark-contact lark-doc lark-drive lark-event lark-im lark-mail lark-minutes lark-openapi-explorer lark-shared lark-sheets lark-skill-maker lark-task lark-vc lark-whiteboard lark-wiki lark-workflow-meeting-summary lark-workflow-standup-report; do
           if [[ -d "$SKILLS_DIR/$lark_skill" ]]; then
             mkdir -p "$ws_skills_dir/$lark_skill"
