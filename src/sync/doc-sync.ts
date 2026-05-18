@@ -6,11 +6,9 @@
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
-import { proxyFetch } from '../utils/http.js';
 import type { MemoryClient, FolderTreeNode } from '../memory/memory-client.js';
 import { SyncStore } from './sync-store.js';
 import { markdownToBlocks, batchBlocks, contentHash } from './markdown-to-blocks.js';
-import { memoryEvents, type MemoryChangeEvent } from '../memory/memory-events.js';
 
 /** Full document with content (returned by GET /api/documents/:id). */
 export interface FullDocument {
@@ -58,7 +56,6 @@ export class DocSync {
   private throttleMs: number;
   private wikiSpaceName: string;
   private syncing = false;
-  private autoSyncCleanup?: () => void;
 
   constructor(
     private config: DocSyncConfig,
@@ -569,34 +566,9 @@ export class DocSync {
     return undefined;
   }
 
-  /** Fetch full document content from MetaMemory API. */
+  /** Fetch full document content from the central metabot-core service. */
   private async fetchDocument(docId: string): Promise<FullDocument | null> {
-    try {
-      const url = `${(this.memoryClient as any).baseUrl}/api/documents/${docId}`;
-      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      const secret = (this.memoryClient as any).secret;
-      if (secret) {
-        headers['Authorization'] = `Bearer ${secret}`;
-      }
-      const res = await proxyFetch(url, { headers });
-      if (!res.ok) return null;
-      const data = await res.json() as any;
-      // Unwrap if nested
-      const doc = data.document || data;
-      return {
-        id: doc.id,
-        title: doc.title,
-        folder_id: doc.folder_id,
-        path: doc.path,
-        content: doc.content || '',
-        tags: Array.isArray(doc.tags) ? doc.tags : [],
-        created_by: doc.created_by || '',
-        created_at: doc.created_at || '',
-        updated_at: doc.updated_at || '',
-      };
-    } catch {
-      return null;
-    }
+    return this.memoryClient.getDocument(docId);
   }
 
   private async throttle(): Promise<void> {
@@ -605,75 +577,8 @@ export class DocSync {
     }
   }
 
-  /**
-   * Subscribe to MetaMemory change events and auto-sync to Feishu Wiki.
-   * Changes are debounced: multiple rapid writes are coalesced into one sync.
-   */
-  startAutoSync(debounceMs = 5000): void {
-    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-    const pendingDocIds = new Set<string>();
-    let pendingFolderChange = false;
-
-    const handler = (event: MemoryChangeEvent) => {
-      if (event.type === 'folder_created' || event.type === 'folder_deleted') {
-        pendingFolderChange = true;
-      }
-      if (event.documentId) {
-        if (event.type === 'document_deleted') {
-          // For deletions, just remove the mapping immediately (cheap, no API call)
-          this.store.deleteDocMapping(event.documentId);
-          this.logger.info({ docId: event.documentId }, 'Auto-sync: removed mapping for deleted document');
-          return;
-        }
-        pendingDocIds.add(event.documentId);
-      }
-
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(async () => {
-        if (this.syncing) {
-          this.logger.debug('Auto-sync skipped: sync already in progress');
-          return;
-        }
-
-        // Folder changes or many doc changes → full sync
-        if (pendingFolderChange || pendingDocIds.size > 10) {
-          const count = pendingDocIds.size;
-          pendingDocIds.clear();
-          pendingFolderChange = false;
-          this.logger.info({ pendingChanges: count, folderChange: pendingFolderChange }, 'Auto-sync: triggering full sync');
-          this.syncAll().catch((err) => this.logger.error({ err }, 'Auto-sync full sync failed'));
-          return;
-        }
-
-        // Incremental: sync only changed documents
-        const docIds = Array.from(pendingDocIds);
-        pendingDocIds.clear();
-        pendingFolderChange = false;
-        if (docIds.length === 0) return;
-
-        this.logger.info({ docIds }, 'Auto-sync: syncing changed documents');
-        for (const docId of docIds) {
-          try {
-            await this.syncDocument(docId);
-          } catch (err) {
-            this.logger.error({ err, docId }, 'Auto-sync: failed to sync document');
-          }
-        }
-      }, debounceMs);
-    };
-
-    memoryEvents.onChange(handler);
-    this.autoSyncCleanup = () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      memoryEvents.removeListener('change', handler);
-    };
-
-    this.logger.info({ debounceMs }, 'Auto wiki sync enabled');
-  }
-
-  /** Close the sync store and stop auto-sync. */
+  /** Close the sync store. */
   destroy(): void {
-    if (this.autoSyncCleanup) this.autoSyncCleanup();
     this.store.close();
   }
 }

@@ -16,7 +16,7 @@ export async function handleBotRoutes(
   method: string,
   url: string,
 ): Promise<boolean> {
-  const { registry, logger, botsConfigPath, peerManager, memoryServerUrl, memoryAuthToken, ws } = ctx;
+  const { registry, logger, botsConfigPath, peerManager, ws } = ctx;
 
   // GET /api/bots/:name/profile — detailed bot profile with stats
   if (method === 'GET' && /^\/api\/bots\/[^/]+\/profile$/.test(url)) {
@@ -142,8 +142,7 @@ export async function handleBotRoutes(
       if (platform === 'web') {
         const config = webBotFromJson(entry as any);
         const sender = new NullSender();
-        const bridge = new MessageBridge(config, logger, sender,
-          memoryServerUrl || 'http://localhost:8100', memoryAuthToken);
+        const bridge = new MessageBridge(config, logger, sender);
         registry.register({ name, platform: 'web', config, bridge, sender });
         activated = true;
         logger.info({ name }, 'Web bot activated immediately');

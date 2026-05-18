@@ -15,7 +15,6 @@ import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
-import { startMemoryServer } from './memory/memory-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
 
@@ -30,7 +29,7 @@ interface FeishuBotHandle {
   feishuClient: lark.Client;
 }
 
-async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServerUrl: string, memorySecret?: string): Promise<FeishuBotHandle> {
+async function startFeishuBot(botConfig: BotConfig, logger: Logger): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
   botLogger.info('Starting Feishu bot...');
@@ -59,7 +58,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServer
   // Create sender and bridge (FeishuSenderAdapter wraps the Feishu-specific MessageSender)
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
-  const bridge = new MessageBridge(botConfig, botLogger, sender, memoryServerUrl, memorySecret);
+  const bridge = new MessageBridge(botConfig, botLogger, sender);
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -103,15 +102,10 @@ async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
 
-  // Ensure MEMORY_SECRET env var is available for Claude subprocesses (used by metamemory skill)
-  if (appConfig.memory.secret && !process.env.MEMORY_SECRET) {
-    process.env.MEMORY_SECRET = appConfig.memory.secret;
-  }
-
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;
   const wechatCount = appConfig.wechatBots.length;
-  logger.info({ feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount, memoryServerUrl: appConfig.memoryServerUrl }, 'Starting MetaBot bridge...');
+  logger.info({ feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount }, 'Starting MetaBot bridge...');
 
   // Create bot registry
   const registry = new BotRegistry();
@@ -121,7 +115,7 @@ async function main() {
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startFeishuBot(bot, logger),
       logger,
       'feishu',
     )
@@ -130,7 +124,7 @@ async function main() {
   const telegramHandles = telegramCount > 0
     ? await startBotsSafely(
       appConfig.telegramBots,
-      (bot) => startTelegramBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startTelegramBot(bot, logger),
       logger,
       'telegram',
     )
@@ -139,7 +133,7 @@ async function main() {
   const wechatHandles = wechatCount > 0
     ? await startBotsSafely(
       appConfig.wechatBots,
-      (bot) => startWechatBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startWechatBot(bot, logger),
       logger,
       'wechat',
     )
@@ -171,7 +165,7 @@ async function main() {
   for (const webConfig of appConfig.webBots) {
     const botLogger = logger.child({ bot: webConfig.name });
     const sender = new NullSender();
-    const bridge = new MessageBridge(webConfig, botLogger, sender, appConfig.memoryServerUrl, appConfig.memory.secret || undefined);
+    const bridge = new MessageBridge(webConfig, botLogger, sender);
     registry.register({ name: webConfig.name, platform: 'web', config: webConfig, bridge, sender });
   }
 
@@ -206,19 +200,6 @@ async function main() {
     logger.info({ peerCount: statuses.length, healthyPeers: healthyCount }, 'Peer manager initialized');
   }
 
-  // Start embedded MetaMemory server
-  let memoryServer: ReturnType<typeof startMemoryServer> | undefined;
-  if (appConfig.memory.enabled) {
-    memoryServer = startMemoryServer({
-      port: appConfig.memory.port,
-      databaseDir: appConfig.memory.databaseDir,
-      secret: appConfig.memory.secret || undefined,
-      adminToken: appConfig.memory.adminToken,
-      readerToken: appConfig.memory.readerToken,
-      logger,
-    });
-  }
-
   // Create a dedicated Feishu service client for wiki sync & doc reader
   let feishuServiceClient: lark.Client | undefined;
   if (appConfig.feishuService) {
@@ -233,12 +214,15 @@ async function main() {
   // Initialize wiki sync service (uses dedicated service app credentials)
   let docSync: DocSync | undefined;
   if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
-    const syncMemoryClient = new MemoryClient(appConfig.memoryServerUrl, logger, appConfig.memory.secret || undefined);
+    const syncMemoryClient = new MemoryClient(logger);
+    const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
+      ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
+      : path.join(process.cwd(), 'data');
     docSync = new DocSync(
       {
         feishuAppId: appConfig.feishuService.appId,
         feishuAppSecret: appConfig.feishuService.appSecret,
-        databaseDir: appConfig.memory.databaseDir,
+        databaseDir: syncStateDir,
         wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
         wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
         throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
@@ -250,14 +234,7 @@ async function main() {
     for (const handle of feishuHandles) {
       handle.bridge.setDocSync(docSync);
     }
-    // Enable auto wiki sync on MetaMemory changes (debounced)
-    if (process.env.WIKI_AUTO_SYNC !== 'false') {
-      const debounceMs = process.env.WIKI_AUTO_SYNC_DEBOUNCE_MS
-        ? parseInt(process.env.WIKI_AUTO_SYNC_DEBOUNCE_MS, 10)
-        : 5000;
-      docSync.startAutoSync(debounceMs);
-    }
-    logger.info('Wiki sync service initialized (auto-sync enabled, /sync for manual trigger)');
+    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
   }
 
   // Initialize cross-platform session registry
@@ -284,8 +261,6 @@ async function main() {
     docSync,
     feishuServiceClient,
     peerManager,
-    memoryServerUrl: appConfig.memoryServerUrl,
-    memoryAuthToken: appConfig.memory.adminToken || appConfig.memory.readerToken || appConfig.memory.secret || undefined,
     sessionRegistry,
   });
 
@@ -301,10 +276,6 @@ async function main() {
       docSync.destroy();
     }
     sessionRegistry.close();
-    if (memoryServer) {
-      memoryServer.server.close();
-      memoryServer.storage.close();
-    }
     for (const handle of feishuHandles) {
       handle.bridge.destroy();
     }

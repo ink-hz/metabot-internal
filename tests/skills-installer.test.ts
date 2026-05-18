@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installSkillFromHub, installSkillsToWorkDir } from '../src/api/skills-installer.js';
+import { installSkillsToWorkDir } from '../src/api/skills-installer.js';
 
 const logger = {
   debug: () => {},
@@ -25,14 +25,6 @@ function tempDir(prefix: string): string {
 }
 
 describe('skills installer', () => {
-  it('installs hub skills to both Claude and Codex project skill directories', () => {
-    const workDir = tempDir('metabot-work-');
-    installSkillFromHub(workDir, 'demo-skill', '---\nname: demo-skill\ndescription: Demo\n---\n', undefined, logger);
-
-    expect(readFileSync(join(workDir, '.claude/skills/demo-skill/SKILL.md'), 'utf-8')).toContain('demo-skill');
-    expect(readFileSync(join(workDir, '.codex/skills/demo-skill/SKILL.md'), 'utf-8')).toContain('demo-skill');
-  });
-
   it('mirrors bundled skills into Claude and Codex project directories and deploys AGENTS.md', () => {
     const priorHome = process.env.HOME;
     const home = tempDir('metabot-home-');
@@ -54,6 +46,11 @@ describe('skills installer', () => {
       // into the default install.
       expect(() => readFileSync(join(workDir, '.claude/skills/metaskill/SKILL.md'), 'utf-8')).toThrow();
       expect(() => readFileSync(join(workDir, '.claude/skills/metaschedule/SKILL.md'), 'utf-8')).toThrow();
+
+      // `metamemory` and `skill-hub` now live in metabot-core and are NOT
+      // bundled here. Confirm the install does not produce them.
+      expect(() => readFileSync(join(workDir, '.claude/skills/metamemory/SKILL.md'), 'utf-8')).toThrow();
+      expect(() => readFileSync(join(workDir, '.claude/skills/skill-hub/SKILL.md'), 'utf-8')).toThrow();
     } finally {
       if (priorHome === undefined) delete process.env.HOME;
       else process.env.HOME = priorHome;

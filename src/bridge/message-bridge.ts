@@ -262,8 +262,6 @@ export class MessageBridge {
     private config: BotConfigBase,
     private logger: Logger,
     private sender: IMessageSender,
-    memoryServerUrl: string,
-    memorySecret?: string,
   ) {
     this.engine = createEngine(config, logger);
     this.executor = this.engine.createExecutor();
@@ -274,7 +272,7 @@ export class MessageBridge {
     this.audit = new AuditLogger(logger);
     this.costTracker = new CostTracker();
 
-    const memoryClient = new MemoryClient(memoryServerUrl, logger, memorySecret);
+    const memoryClient = new MemoryClient(logger);
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,

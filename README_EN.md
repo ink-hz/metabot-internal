@@ -184,7 +184,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | **Persistent Sessions & Goal Loops** | One Claude process per chat — `/goal` keeps the agent auto-driving across turns until a condition is met; teammates and background tasks survive between turns |
 | **Agent Teams** | A lead agent spawns specialist teammates in parallel, routes tasks between them, and aggregates results — all in one Feishu chat |
 | **CC-Native Scheduling** | Use Claude Code's built-in `CronCreate` and `/loop` directly — zero MetaBot setup, runs in-session |
-| **MetaMemory** | Embedded SQLite knowledge store with full-text search, Web UI, auto-syncs to Feishu Wiki |
+| **MetaMemory** | Shared knowledge store hosted by central [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) with full-text search; MetaBot reads/writes via `/api/memory/*` and auto-syncs to Feishu Wiki |
 | **IM Bridge** | Chat with any agent from Feishu, Telegram, or WeChat (including mobile). Streaming cards + tool call tracking |
 | **Agent Bus** | Agents talk to each other via `mb talk`. Create/remove bots at runtime |
 | **MetaSchedule (opt-in)** | Persistent server-side scheduler — cron + one-shot, survives restarts, exposes HTTP API + `mb schedule` CLI. Not installed by default; enable with `cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/` |
@@ -377,17 +377,14 @@ Supported: text, images (Claude multimodal), files (PDF/code/docs), rich text (P
 |----------|---------|-------------|
 | `API_PORT` | 9100 | HTTP API port |
 | `API_SECRET` | — | Bearer token auth (protects API + Web UI). Generate one with `openssl rand -hex 32` |
-| `MEMORY_ENABLED` | true | Enable MetaMemory |
-| `MEMORY_PORT` | 8100 | MetaMemory port |
-| `MEMORY_ADMIN_TOKEN` | — | Admin token (full access) |
-| `MEMORY_TOKEN` | — | Reader token (shared folders only) |
+| `METABOT_CORE_URL` | `https://metabot.xvirobotics.com/core` | Central metabot-core service URL (MetaMemory + Skill Hub) |
+| `METABOT_CORE_TOKEN` | reads `~/.metabot-core/token` | Bearer token for metabot-core |
 | `WIKI_SYNC_ENABLED` | true | Enable MetaMemory→Wiki sync |
 | `WIKI_SPACE_NAME` | MetaMemory | Wiki space name |
-| `WIKI_AUTO_SYNC` | true | Auto-sync on changes |
+| `WIKI_SYNC_STATE_DIR` | `./data` | Directory holding the wiki-sync mapping SQLite |
 | `VOLCENGINE_TTS_APPID` | — | Doubao voice (TTS + STT) |
 | `VOLCENGINE_TTS_ACCESS_KEY` | — | Doubao voice key |
 | `METABOT_URL` | `http://localhost:9100` | MetaBot API URL. Default is local HTTP; for remote access prefer HTTPS or a private-network address |
-| `META_MEMORY_URL` | `http://localhost:8100` | MetaMemory server URL. Default is local HTTP; for remote access prefer HTTPS or a private-network address |
 | `METABOT_PEERS` | — | Peer MetaBot URLs (comma-separated). Prefer HTTPS for internet-reachable peers |
 | `LOG_LEVEL` | info | Log level |
 
@@ -424,8 +421,8 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 - Claude has full read/write/execute access to the working directory
 - Control access via IM platform settings (app visibility, group membership)
 - Use `maxBudgetUsd` to cap cost per request
-- `API_SECRET` enables Bearer auth on API server and MetaMemory
-- MetaMemory supports folder-level ACL (Admin/Reader dual-role)
+- `API_SECRET` enables Bearer auth on API server
+- MetaMemory is hosted by the central metabot-core service; auth and folder ACLs are managed there
 
 </details>
 
@@ -478,7 +475,7 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 <details>
 <summary><strong>CLI Tools</strong></summary>
 
-The installer places `metabot`, `mm`, `mb` in `~/.local/bin/` — available immediately.
+The installer places `metabot`, `mb` in `~/.local/bin/` — available immediately. `mm` (MetaMemory CLI) and `mh` (Skill Hub CLI) ship with [metabot-core](https://gitlab.xvirobotics.com/xvirobotics/metabot-core) and are installed separately.
 
 ```bash
 # MetaBot management
@@ -486,7 +483,7 @@ metabot update                      # pull latest, rebuild, restart
 metabot start / stop / restart      # PM2 management
 metabot logs                        # view live logs
 
-# MetaMemory
+# MetaMemory (mm/mh CLIs ship with metabot-core)
 mm search "deployment guide"        # full-text search
 mm list                             # list documents
 mm folders                          # folder tree
@@ -516,7 +513,7 @@ mb skills install <skill> <bot>       # install skill to a bot
 mb voice "Hello world" --play
 ```
 
-CLI supports connecting to remote MetaBot/MetaMemory servers — configure `METABOT_URL` and `META_MEMORY_URL` in `~/.metabot/.env`.
+CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` in `~/.metabot/.env`. The MetaMemory CLI is configured separately; see the metabot-core README.
 
 </details>
 
