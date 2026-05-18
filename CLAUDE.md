@@ -72,7 +72,7 @@ Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
 
 ### Operational notes
 
-- **Silent-idle pattern**: teammates sometimes go idle without sending a completion message. Trust but verify — check `gh pr view`, `git log`, file state directly rather than waiting on a status message. Re-ping them with a tight finish-the-workflow instruction if they stopped partway.
+- **Silent-idle pattern**: teammates sometimes go idle without sending a completion message. Trust but verify — query the GitLab MR via API or check `git log` / file state directly rather than waiting on a status message. Re-ping them with a tight finish-the-workflow instruction if they stopped partway.
 - **Team-panel UX is broken** on SDK 0.2.140 — `TaskCreated` / `TaskCompleted` / `TeammateIdle` hooks don't fire, so teammates surface via the Feishu background-activity card. Functional, not visual. Known bug; don't debug.
 - **Peek at teammate progress** without disturbing them via `~/.claude/projects/<projDir>/<sessionId>/subagents/agent-*.{jsonl,meta.json}`.
 - **Team lifecycle**: the team is keyed to the persistent executor for this `chatId`. `/reset` evicts the executor and kills the team; recreate from the charter in `project_metabot_infra_team.md`.
@@ -120,10 +120,16 @@ For every feature or bug fix, unless the user says otherwise:
 1. **Build & Test** — `npm run build`, `npm test`, `npm run lint`. Fix failures before proceeding.
 2. **Update docs** — README.md, README_zh.md, CLAUDE.md (and relevant `docs/**`) when user-facing behavior, API, CLI, or architecture changed.
 3. **Commit** — descriptive commit on the current branch.
-4. **Push & PR** — `gh pr create` against `main`.
-5. **CI** — `gh pr checks --watch`, fix failures.
-6. **Merge** — `gh pr merge --squash --delete-branch` once green.
+4. **Push & MR** — push to internal GitLab `origin`; open MR against `main` via the GitLab REST API using `~/.gitlab-token` (PAT) — `POST /api/v4/projects/xvirobotics%2Fmetabot/merge_requests`.
+5. **CI** — poll `GET /api/v4/projects/.../pipelines/<id>/jobs` until all jobs are `success`.
+6. **Merge** — `PUT /api/v4/projects/.../merge_requests/<iid>/merge?squash=true&should_remove_source_branch=true`.
 7. **Sync dev** — `git checkout dev && git merge main && git push`.
+
+## Repo / Remotes
+
+- Primary upstream: **internal GitLab** at `ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git` (set as `origin`).
+- GitHub `xvirobotics/metabot` remains as a **read-only mirror** named `github` — don't push there as part of normal workflow.
+- GitLab API token: `~/.gitlab-token` (PAT). SSH push uses `~/.ssh/id_ed25519` (mapped to user `floodsung`).
 
 ## Metamemory Hygiene
 
