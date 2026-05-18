@@ -1,5 +1,4 @@
 import * as http from 'node:http';
-import * as path from 'node:path';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 import type { BotRegistry } from './bot-registry.js';
@@ -17,7 +16,6 @@ import { VoiceMeetingService } from './voice-meeting.js';
 import { VoiceIdentityStore } from './voice-identity.js';
 import { RtcVoiceChatService } from './rtc-voice-chat.js';
 import { ActivityStore } from './activity-store.js';
-import { SkillHubStore } from './skill-hub-store.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
@@ -30,7 +28,6 @@ import {
   handleSyncRoutes,
   handleRtcRoutes,
   handleSessionRoutes,
-  handleSkillHubRoutes,
   handleExecutorRoutes,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
@@ -45,8 +42,6 @@ interface ApiServerOptions {
   docSync?: DocSync;
   feishuServiceClient?: lark.Client;
   peerManager?: PeerManager;
-  memoryServerUrl?: string;
-  memoryAuthToken?: string;
   circuitBreaker?: CircuitBreaker;
   budgetManager?: BudgetManager;
   teamManager?: TeamManager;
@@ -58,7 +53,7 @@ const startTime = Date.now();
 (globalThis as any).__metabot_start_time = startTime;
 
 export function startApiServer(options: ApiServerOptions): http.Server {
-  const { port, secret, registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient, peerManager, memoryServerUrl, memoryAuthToken } = options;
+  const { port, secret, registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient, peerManager } = options;
   const host = secret ? '0.0.0.0' : '127.0.0.1';
 
   // Initialize shared services
@@ -70,7 +65,6 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
-  const skillHubStore = new SkillHubStore(path.join(process.cwd(), 'data'), logger);
   const rtcService = new RtcVoiceChatService(logger);
   if (rtcService.isConfigured()) {
     logger.info('RTC voice chat service enabled');
@@ -81,14 +75,13 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   // Build route context (shared across all route handlers)
   const ctx: RouteContext = {
     registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient,
-    peerManager, memoryServerUrl, memoryAuthToken,
+    peerManager,
     asyncTaskStore, intentRouter, circuitBreaker, budgetManager,
     teamManager, meetingService, voiceIdentityStore,
     rtcService: rtcService.isConfigured() ? rtcService : undefined,
     ws,
     sessionRegistry: options.sessionRegistry,
     activityStore,
-    skillHubStore,
   };
 
   // Route handlers in priority order
@@ -101,7 +94,6 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleSyncRoutes,
     handleRtcRoutes,
     handleSessionRoutes,
-    handleSkillHubRoutes,
     handleExecutorRoutes,
   ];
 
@@ -109,8 +101,8 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     const method = req.method || 'GET';
     const url = req.url || '/';
 
-    // Auth check (exempt /web/, /memory/, /api/files/)
-    if (secret && !url.startsWith('/web') && !url.startsWith('/memory') && !url.startsWith('/api/files/')) {
+    // Auth check (exempt /web/, /api/files/)
+    if (secret && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const urlToken = url.includes('token=') ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token') : null;
       if (auth !== `Bearer ${secret}` && urlToken !== secret) {

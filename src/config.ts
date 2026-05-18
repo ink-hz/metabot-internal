@@ -122,18 +122,9 @@ export interface AppConfig {
   log: {
     level: string;
   };
-  memoryServerUrl: string;
   api: {
     port: number;
     secret?: string;
-  };
-  memory: {
-    enabled: boolean;
-    port: number;
-    databaseDir: string;
-    secret: string;
-    adminToken?: string;
-    readerToken?: string;
   };
   /** Peer MetaBot instances for cross-instance bot discovery and task delegation. */
   peers: PeerConfig[];
@@ -516,8 +507,6 @@ export function loadAppConfig(): AppConfig {
     }
   }
 
-  const memoryServerUrl = (process.env.META_MEMORY_URL || process.env.MEMORY_SERVER_URL || 'http://localhost:8100').replace(/\/+$/, '');
-
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
   const apiSecret = process.env.API_SECRET || undefined;
 
@@ -540,13 +529,6 @@ export function loadAppConfig(): AppConfig {
       appSecret: feishuBots[0].feishu.appSecret,
     };
   }
-
-  const memoryEnabled = process.env.MEMORY_ENABLED !== 'false';
-  const memoryPort = process.env.MEMORY_PORT ? parseInt(process.env.MEMORY_PORT, 10) : 8100;
-  const memoryDatabaseDir = process.env.MEMORY_DATABASE_DIR || './data';
-  const memorySecret = process.env.MEMORY_SECRET || process.env.API_SECRET || '';
-  const memoryAdminToken = process.env.MEMORY_ADMIN_TOKEN || undefined;
-  const memoryReaderToken = process.env.MEMORY_TOKEN || undefined;
 
   // Parse peers from JSON config and/or env vars
   const peers: PeerConfig[] = [];
@@ -580,18 +562,9 @@ export function loadAppConfig(): AppConfig {
     log: {
       level: process.env.LOG_LEVEL || 'info',
     },
-    memoryServerUrl,
     api: {
       port: apiPort,
       secret: apiSecret,
-    },
-    memory: {
-      enabled: memoryEnabled,
-      port: memoryPort,
-      databaseDir: memoryDatabaseDir,
-      secret: memorySecret,
-      adminToken: memoryAdminToken,
-      readerToken: memoryReaderToken,
     },
     peers,
   };

@@ -17,7 +17,6 @@ import type { RtcVoiceChatService } from '../rtc-voice-chat.js';
 import type { WebSocketHandle } from '../../web/ws-server.js';
 import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
-import type { SkillHubStore } from '../skill-hub-store.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -27,8 +26,6 @@ export interface RouteContext {
   docSync?: DocSync;
   feishuServiceClient?: lark.Client;
   peerManager?: PeerManager;
-  memoryServerUrl?: string;
-  memoryAuthToken?: string;
   asyncTaskStore: AsyncTaskStore;
   intentRouter: IntentRouter;
   circuitBreaker: CircuitBreaker;
@@ -40,7 +37,6 @@ export interface RouteContext {
   ws: { handle?: WebSocketHandle };
   sessionRegistry?: SessionRegistry;
   activityStore?: ActivityStore;
-  skillHubStore?: SkillHubStore;
 }
 
 /**
