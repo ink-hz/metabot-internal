@@ -126,7 +126,7 @@ cmd_update() {
   # remain opt-in; sources still ship in src/skills/* for manual copy.
   for skill in metabot voice; do
     case "$skill" in
-      metabot) src="$METABOT_HOME/src/skills/metabot" ;;
+      metabot) src="$METABOT_HOME/packages/skills/metabot" ;;
       voice)   src="$METABOT_HOME/src/skills/voice" ;;
       *)       src="" ;;
     esac
@@ -338,11 +338,17 @@ cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
-# Order: explicit override > sibling workspace > npm-global on PATH.
+# Order: explicit override > in-tree monorepo > sibling workspace > npm-global on PATH.
 _resolve_core_cli() {
   if [[ -n "${METABOT_CORE_CLI:-}" && -x "$METABOT_CORE_CLI" ]]; then
     echo "$METABOT_CORE_CLI"; return 0
   fi
+  # In-tree (monorepo): packages/cli is shipped alongside this script.
+  local intree="$METABOT_HOME/packages/cli/bin/metabot"
+  if [[ -f "$intree" ]]; then
+    echo "$intree"; return 0
+  fi
+  # Sibling workspace (legacy two-repo layout — kept during migration).
   local ws="$METABOT_HOME/../metabot-workspace/metabot-core/packages/cli/bin/metabot"
   if [[ -f "$ws" ]]; then
     echo "$ws"; return 0
@@ -359,8 +365,8 @@ cmd_delegate() {
   if ! core_cli="$(_resolve_core_cli)"; then
     error "'metabot $1' needs the metabot-core CLI, which isn't installed here."
     echo "  Fix one of:" >&2
-    echo "    - Build the workspace:  cd \"$METABOT_HOME/../metabot-workspace/metabot-core\" && npm install && npm run build" >&2
-    echo "    - Or point at it:       export METABOT_CORE_CLI=/path/to/metabot-core/packages/cli/bin/metabot" >&2
+    echo "    - Build the in-tree CLI: cd \"$METABOT_HOME\" && npm ci && npx tsc -b" >&2
+    echo "    - Or point at it:        export METABOT_CORE_CLI=/path/to/packages/cli/bin/metabot" >&2
     exit 1
   fi
   # Feed METABOT_CORE_URL / METABOT_CORE_TOKEN from the bridge .env WITHOUT

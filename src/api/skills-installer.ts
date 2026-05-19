@@ -138,6 +138,7 @@ function bundledSkillSource(skill: string): string | undefined {
     ],
     metabot: [
       path.join(thisDir, '..', 'skills', 'metabot'),
+      path.join(thisDir, '..', '..', 'packages', 'skills', 'metabot'),
       path.join(thisDir, '..', '..', 'src', 'skills', 'metabot'),
     ],
     voice: [

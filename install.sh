@@ -361,9 +361,23 @@ success "MetaBot code ready at ${METABOT_HOME}"
 step "Phase 3: Installing dependencies"
 
 cd "$METABOT_HOME"
-info "Running npm install..."
-npm install --production=false
-success "npm dependencies installed"
+# Bridge hosts only need:
+#   - root bridge runtime + devDeps (tsx for PM2, tsc for build, vitest)
+#   - @xvirobotics/cli + cli-core + metamemory + skill-hub (the four thin CLI
+#     workspaces — @xvirobotics/cli depends on the other three)
+# The heavy workspaces — @xvirobotics/metabot-core-server (better-sqlite3) and
+# @xvirobotics/metabot-core-web-ui (react, react-dom, react-router-dom, …) —
+# run on the central ECS, not bot hosts. Excluding them here keeps deployed
+# bot installs lean and avoids the better-sqlite3 native rebuild on hosts
+# that never query the central DB.
+info "Running npm install (bridge runtime + CLI workspaces; server/web-ui excluded)..."
+npm install --include=dev \
+  --workspace=@xvirobotics/cli \
+  --workspace=@xvirobotics/cli-core \
+  --workspace=@xvirobotics/metamemory \
+  --workspace=@xvirobotics/skill-hub \
+  --include-workspace-root
+success "npm dependencies installed (CLI workspaces, no server/web-ui)"
 
 # Helper: npm install -g with sudo fallback
 npm_install_global() {
@@ -780,7 +794,7 @@ mkdir -p "$SKILLS_DIR"
 # Sanity check: bundled skill tree must exist in the checked-out repo.
 # If it's missing, the user's checkout is stale (predates the skill bundling
 # commits) — fail with a clear message instead of cryptic cp errors.
-SKILL_SENTINEL="$METABOT_HOME/src/skills/metabot/SKILL.md"
+SKILL_SENTINEL="$METABOT_HOME/packages/skills/metabot/SKILL.md"
 if [[ ! -f "$SKILL_SENTINEL" ]]; then
   error "Bundled skill source not found at: $SKILL_SENTINEL"
   error "Your $METABOT_HOME checkout appears to be stale or incomplete."
@@ -806,11 +820,11 @@ for legacy in metamemory skill-hub memory; do
   fi
 done
 
-# Install metabot skill (bundled in src/skills/metabot/) — single unified skill
-# covering memory / skills / agents / t5t via the metabot-core CLI.
+# Install metabot skill (bundled in packages/skills/metabot/) — single unified
+# skill covering memory / skills / agents / t5t via the metabot-core CLI.
 info "Installing metabot skill..."
 mkdir -p "$SKILLS_DIR/metabot"
-cp "$METABOT_HOME/src/skills/metabot/SKILL.md" "$SKILLS_DIR/metabot/SKILL.md"
+cp "$METABOT_HOME/packages/skills/metabot/SKILL.md" "$SKILLS_DIR/metabot/SKILL.md"
 success "metabot skill installed → $SKILLS_DIR/metabot"
 
 # Install voice skill (bundled in src/skills/voice/)
