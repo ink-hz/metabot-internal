@@ -384,7 +384,7 @@ print(json.dumps({'botName': sys.argv[1], 'source': sys.argv[2]}))
     for skill in metamemory metabot voice phone-call skill-hub; do
       case "$skill" in
         metamemory)  src="$METABOT_SRC/src/memory/skill" ;;
-        metabot)     src="$METABOT_SRC/src/skills/metabot" ;;
+        metabot)     src="$METABOT_SRC/packages/skills/metabot" ;;
         voice)       src="$METABOT_SRC/src/skills/voice" ;;
         phone-call)  src="$METABOT_SRC/src/skills/phone-call" ;;
         skill-hub)   src="$METABOT_SRC/src/skills/skill-hub" ;;
