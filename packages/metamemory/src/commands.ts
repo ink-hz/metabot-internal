@@ -60,6 +60,27 @@ function encodeIdOrPath(s: string): string {
   return encodeURIComponent(s);
 }
 
+function slugify(title: string): string {
+  return title.toLowerCase().trim().replace(/[^a-z0-9-_]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+interface Whoami {
+  botName: string;
+  role: string;
+}
+
+/**
+ * Resolve the caller's identity via GET /api/whoami.
+ *
+ * Used lazily by `create`/`mkdir` to default a write into the caller's own
+ * namespace (`/users/<botName>/...`). Root is not in a member credential's
+ * writableNamespaces, so without this defaulting every member write 403s.
+ */
+async function whoami(cfg: Config): Promise<Whoami> {
+  const body = await request<Whoami>(cfg, { path: '/api/whoami' });
+  return body;
+}
+
 // ---- Commands ----
 
 export async function cmdSearch(cfg: Config, args: ParsedArgs): Promise<void> {
@@ -115,13 +136,26 @@ export async function cmdCreate(cfg: Config, args: ParsedArgs): Promise<void> {
     content = await readStdin();
   }
   const contentType = resolveContentTypeFlag(args.flags);
+  const folderId = typeof args.flags.folder === 'string' ? args.flags.folder : undefined;
+  let docPath = typeof args.flags.path === 'string' ? args.flags.path : undefined;
+  // No explicit target → default the write into the caller's own namespace.
+  // Root is not in a member's writableNamespaces, so without this the POST
+  // would 403. Admins keep the legacy root default. whoami is lazy — only
+  // called when neither --folder nor --path was given.
+  if (docPath === undefined && folderId === undefined) {
+    const me = await whoami(cfg);
+    if (me.role !== 'admin') {
+      docPath = `/users/${me.botName}/${slugify(title)}`;
+    }
+  }
   const body = await request(cfg, {
     method: 'POST',
     path: '/api/memory/documents',
     body: {
       title,
       content,
-      folder_id: typeof args.flags.folder === 'string' ? args.flags.folder : undefined,
+      path: docPath,
+      folder_id: folderId,
       tags: parseTags(args.flags.tags),
       created_by: typeof args.flags.by === 'string' ? args.flags.by : undefined,
       content_type: contentType,
@@ -156,10 +190,19 @@ export async function cmdMkdir(cfg: Config, args: ParsedArgs): Promise<void> {
   const name = args.positional[0];
   if (!name) throw new Error('mkdir: <folder-name> required');
   const parent_id = args.positional[1];
+  let folderPath = typeof args.flags.path === 'string' ? args.flags.path : undefined;
+  // No explicit target (no --path, no parent_id) → default into the caller's
+  // own namespace. Members can't write root; admins keep the root default.
+  if (folderPath === undefined && parent_id === undefined) {
+    const me = await whoami(cfg);
+    if (me.role !== 'admin') {
+      folderPath = `/users/${me.botName}/${name}`;
+    }
+  }
   const body = await request(cfg, {
     method: 'POST',
     path: '/api/memory/folders',
-    body: { name, parent_id },
+    body: { name, parent_id, path: folderPath },
   });
   print(body);
 }
@@ -191,11 +234,12 @@ Commands:
   path </abs/path/to/doc>
   list [folder_id]            [--limit N] [--offset N]
   folders
-  create <title> [content]    [--folder <id>] [--tags a,b,c] [--by <name>]
+  create <title> [content]    [--folder <id>] [--path </abs/path>]
+                              [--tags a,b,c] [--by <name>]
                               [--html | --content-type <mime>]
   update <doc_id> [content]   [--title <t>] [--tags a,b,c]
                               [--html | --content-type <mime>]
-  mkdir <name> [parent_id]
+  mkdir <name> [parent_id]    [--path </abs/path>]
   delete <doc_id>
   health
   help
@@ -209,6 +253,13 @@ Stdin: 'create' and 'update' read content from stdin if no content arg given.
 Content type:
   Documents default to 'text/markdown'. Pass --html (sugar) or
   --content-type text/html to store HTML natively. Using both → exit 2.
+
+Write target (create / mkdir):
+  Pass --path </absolute/path> to write at an explicit path; the server
+  ACL-checks it and auto-creates ancestor folders. With neither --folder
+  nor --path (nor a parent_id for mkdir), the write defaults into your own
+  namespace /users/<botName>/... — members can't write root. Admins keep
+  the root default.
 `,
   );
 }

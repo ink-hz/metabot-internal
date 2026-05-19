@@ -26,15 +26,32 @@ Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first 
 Most-used:
 
 ```bash
-metabot memory list [--folder <path>]               # browse the tree
-metabot memory search "<query>" [--folder <path>]   # full-text search
-metabot memory get <id|path>                        # read a doc (JSON metadata + content)
-metabot memory create --folder <path> --title "<t>" --content "<md>"
-metabot memory update <id> [--title …] [--content …] [--tags a,b,c]
+metabot memory list [folder_id]                      # browse the tree
+metabot memory search "<query>"                      # full-text search
+metabot memory get <id|path>                         # read a doc (JSON metadata + content)
+metabot memory create "<title>" ["<content>"]        # create a doc (content also via stdin)
+metabot memory mkdir "<name>"                        # create a folder
+metabot memory update <id> [content] [--title …] [--tags a,b,c]
 metabot memory health
 ```
 
 (Replaces the former standalone `mm` CLI — same wire calls, same behavior, single binary.)
+
+**Write target — `create` / `mkdir`.** Both accept an explicit `--path </absolute/path>`:
+
+```bash
+metabot memory create "Smoke note" "..." --path /users/<botName>/smoke-note
+metabot memory mkdir "smoke-folder"   --path /users/<botName>/smoke-folder
+```
+
+When `--path` is given the server ACL-checks it and auto-creates any missing
+ancestor folders. With **neither** `--path` nor `--folder` (nor a `parent_id`
+for `mkdir`), the write **defaults into your own namespace** —
+`/users/<botName>/<slug-of-title>` for `create`, `/users/<botName>/<name>` for
+`mkdir` — resolved via `GET /api/whoami`. This is the fix for the old member
+`403 forbidden`: members cannot write the root namespace, so a bare
+`create`/`mkdir` previously failed. Admin tokens keep the legacy root default.
+`--folder <id>` still targets an explicit existing folder as before.
 
 ## `metabot skills` — skill registry
 

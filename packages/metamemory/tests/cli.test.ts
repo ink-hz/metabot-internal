@@ -1,10 +1,10 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
-import { parseArgs, resolveContentTypeFlag } from '../src/commands.js';
+import { parseArgs, resolveContentTypeFlag, cmdCreate, cmdMkdir } from '../src/commands.js';
 
 describe('parseArgs', () => {
   it('splits positional and flags', () => {
@@ -145,5 +145,111 @@ describe('request', () => {
       fakeFetch,
     );
     expect(captured).toBe('http://x/api/memory/search?q=hello&limit=5');
+  });
+});
+
+describe('cmdCreate / cmdMkdir — write target', () => {
+  const cfg = { url: 'http://x', token: 't' };
+
+  interface Call {
+    url: string;
+    init: RequestInit;
+  }
+
+  /**
+   * Stub global fetch. `whoami` controls the GET /api/whoami response;
+   * every other call is recorded and answered with a 201.
+   */
+  function stubFetch(whoami?: { botName: string; role: string }): Call[] {
+    const calls: Call[] = [];
+    const fake = (async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      if (url.endsWith('/api/whoami')) {
+        return new Response(JSON.stringify(whoami ?? { botName: 'bot-x', role: 'member' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fake);
+    return calls;
+  }
+
+  function bodyOf(call: Call): Record<string, unknown> {
+    return JSON.parse(call.init.body as string);
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('create: --path is passed through verbatim, no whoami call', async () => {
+    const calls = stubFetch();
+    await cmdCreate(cfg, parseArgs(['My Doc', 'hello', '--path', '/users/bot-x/my-doc']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/my-doc');
+    expect(bodyOf(post).folder_id).toBeUndefined();
+  });
+
+  it('create: --folder still works, no path, no whoami call', async () => {
+    const calls = stubFetch();
+    await cmdCreate(cfg, parseArgs(['My Doc', 'hello', '--folder', 'fld-1']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).folder_id).toBe('fld-1');
+    expect(bodyOf(post).path).toBeUndefined();
+  });
+
+  it('create: bare invocation by a member defaults into /users/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member' });
+    await cmdCreate(cfg, parseArgs(['Smoke Test CLI', 'hello']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-test-cli');
+  });
+
+  it('create: bare invocation by an admin keeps the root default (no path)', async () => {
+    const calls = stubFetch({ botName: 'admin-bot', role: 'admin' });
+    await cmdCreate(cfg, parseArgs(['Smoke Test CLI', 'hello']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBeUndefined();
+  });
+
+  it('mkdir: --path is passed through verbatim, no whoami call', async () => {
+    const calls = stubFetch();
+    await cmdMkdir(cfg, parseArgs(['smoke-folder', '--path', '/users/bot-x/smoke-folder']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-folder');
+  });
+
+  it('mkdir: parent_id form still works, no whoami call', async () => {
+    const calls = stubFetch();
+    await cmdMkdir(cfg, parseArgs(['smoke-folder', 'parent-1']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).parent_id).toBe('parent-1');
+    expect(bodyOf(post).path).toBeUndefined();
+  });
+
+  it('mkdir: bare invocation by a member defaults into /users/<botName>', async () => {
+    const calls = stubFetch({ botName: 'bot-x', role: 'member' });
+    await cmdMkdir(cfg, parseArgs(['smoke-folder']));
+    expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-folder');
+  });
+
+  it('mkdir: bare invocation by an admin keeps the root default (no path)', async () => {
+    const calls = stubFetch({ botName: 'admin-bot', role: 'admin' });
+    await cmdMkdir(cfg, parseArgs(['smoke-folder']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
+    expect(bodyOf(post).path).toBeUndefined();
   });
 });
