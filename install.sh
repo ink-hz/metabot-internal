@@ -1140,6 +1140,8 @@ for cli in $CLI_TOOLS; do
 done
 # Clean up legacy fd CLI if present
 [[ -f "$LOCAL_BIN/fd" ]] && rm -f "$LOCAL_BIN/fd"
+# Clean up temp mbcore shim (superseded by `metabot` dispatcher)
+[[ -f "$LOCAL_BIN/mbcore" ]] && rm -f "$LOCAL_BIN/mbcore"
 # Ensure ~/.local/bin is in PATH (most distros include it, but not all)
 if ! echo "$PATH" | grep -q "$LOCAL_BIN"; then
   echo "export PATH=\"$LOCAL_BIN:\$PATH\"" >> "$HOME/.bashrc"
