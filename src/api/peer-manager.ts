@@ -31,6 +31,12 @@ export interface PeerStatus {
   error?: string;
 }
 
+/** Minimal shape PeerManager needs to register a local bot. */
+export interface LocalBotEntry {
+  name: string;
+  visible?: boolean;
+}
+
 interface PeerState {
   config: PeerConfig;
   healthy: boolean;
@@ -74,11 +80,15 @@ export class PeerManager {
   private agentBusUrl?: string;
   private agentBusToken?: string;
   private selfUrl?: string;
-  private selfTalkSecret?: string;
+  /** Local bots from bots.json — every entry is bulk-registered at boot. */
+  private localBots: LocalBotEntry[] = [];
+  /** Names that successfully landed in the registry (heartbeat targets). */
+  private registeredBotNames: Set<string> = new Set();
   private agentBusFailureCount = 0;
 
-  constructor(configs: PeerConfig[], logger: Logger) {
+  constructor(configs: PeerConfig[], localBots: LocalBotEntry[], logger: Logger) {
     this.logger = logger.child({ module: 'peers' });
+    this.localBots = localBots;
 
     for (const config of configs) {
       const normalizedUrl = config.url.replace(/\/+$/, '');
@@ -97,12 +107,11 @@ export class PeerManager {
       this.agentBusUrl = rawBus.replace(/\/+$/, '');
       this.agentBusToken = loadMetabotCoreToken();
       this.selfUrl = process.env.METABOT_AGENT_SELF_URL?.trim();
-      this.selfTalkSecret = process.env.METABOT_AGENT_TALK_SECRET?.trim();
 
       if (configs.length > 0) {
         this.logger.warn(
           { staticPeers: configs.map((c) => c.name) },
-          'METABOT_CORE_AGENT_BUS_URL is set — static peer configs will be shadowed by registry entries with matching URL+talkSecret',
+          'METABOT_CORE_AGENT_BUS_URL is set — static peer configs will be shadowed by registry entries',
         );
       }
       if (!this.agentBusToken) {
@@ -111,13 +120,18 @@ export class PeerManager {
           'Registry mode enabled but no METABOT_CORE_TOKEN / ~/.metabot-core/token found — agent-bus calls will fail with 401',
         );
       }
-      if (!this.selfUrl || !this.selfTalkSecret) {
+      if (!this.selfUrl) {
         this.logger.warn(
-          'Registry mode enabled but METABOT_AGENT_SELF_URL or METABOT_AGENT_TALK_SECRET is unset — self-register will be skipped',
+          'Registry mode enabled but METABOT_AGENT_SELF_URL is unset — bulk register will be skipped',
+        );
+      } else if (this.localBots.length === 0) {
+        this.logger.warn(
+          { agentBusUrl: this.agentBusUrl, selfUrl: this.selfUrl },
+          'Registry mode enabled but no local bots configured — bulk register will be skipped',
         );
       } else {
-        this.selfRegisterWithRetry().catch((err) => {
-          this.logger.error({ err }, 'Self-register loop terminated unexpectedly');
+        this.bulkRegisterWithRetry().catch((err) => {
+          this.logger.error({ err }, 'Bulk-register loop terminated unexpectedly');
         });
         this.heartbeatTimer = setInterval(() => {
           this.sendHeartbeat().catch((err) => {
@@ -145,9 +159,8 @@ export class PeerManager {
 
   /**
    * One poll tick: if registry mode is on, fetch /api/agents to rebuild the
-   * peers map (preserving cached bots/skills/healthy for entries whose
-   * url+talkSecret are unchanged); then run refreshAll() against whatever
-   * peers we ended up with.
+   * peers map (preserving cached bots/skills/healthy for entries whose url is
+   * unchanged); then run refreshAll() against whatever peers we ended up with.
    */
   private async runPollTick(): Promise<void> {
     if (this.agentBusUrl) {
@@ -173,26 +186,32 @@ export class PeerManager {
   }
 
   /**
-   * Self-register on boot with exponential backoff (1s, 2s, 4s, … capped at
-   * 30s). Single best-effort loop kicked off from the constructor — failures
-   * never crash the bridge.
+   * Bulk-register all local bots on boot with exponential backoff (1s, 2s, 4s,
+   * … capped at 30s). Single best-effort loop kicked off from the constructor —
+   * failures never crash the bridge.
    */
-  private async selfRegisterWithRetry(): Promise<void> {
+  private async bulkRegisterWithRetry(): Promise<void> {
     let delayMs = REGISTER_RETRY_INITIAL_MS;
     let attempt = 0;
     while (true) {
       attempt++;
       try {
-        await this.postSelfRegister();
+        const result = await this.postBulkRegister();
         this.logger.info(
-          { agentBusUrl: this.agentBusUrl, selfUrl: this.selfUrl, attempt },
-          'registered with agent bus',
+          {
+            agentBusUrl: this.agentBusUrl,
+            selfUrl: this.selfUrl,
+            attempt,
+            registered: result.registered,
+            total: this.localBots.length,
+          },
+          'bulk-registered with agent bus',
         );
         return;
       } catch (err: any) {
         this.logger.warn(
           { agentBusUrl: this.agentBusUrl, attempt, err: err?.message, nextDelayMs: delayMs },
-          'self-register failed, retrying',
+          'bulk-register failed, retrying',
         );
         await new Promise((r) => setTimeout(r, delayMs));
         delayMs = Math.min(delayMs * 2, REGISTER_RETRY_MAX_MS);
@@ -200,33 +219,61 @@ export class PeerManager {
     }
   }
 
-  private async postSelfRegister(): Promise<void> {
-    if (!this.agentBusUrl || !this.selfUrl || !this.selfTalkSecret) return;
+  /**
+   * POST /api/agents/bulk with every local bot. Visibility flag is passed
+   * through so toggling `visible:false` in bots.json hides the row at the next
+   * restart. Per-entry name-squat errors are logged but don't fail the batch
+   * (server returns them in `results[i].status === 403`).
+   */
+  private async postBulkRegister(): Promise<{ registered: number }> {
+    if (!this.agentBusUrl || !this.selfUrl || this.localBots.length === 0) {
+      return { registered: 0 };
+    }
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.agentBusToken) headers['Authorization'] = `Bearer ${this.agentBusToken}`;
-    const resp = await proxyFetch(`${this.agentBusUrl}/api/agents`, {
+    const payload = {
+      bots: this.localBots.map((b) => ({
+        botName: b.name,
+        url: this.selfUrl,
+        visible: b.visible !== false,
+      })),
+    };
+    const resp = await proxyFetch(`${this.agentBusUrl}/api/agents/bulk`, {
       method: 'POST',
       headers,
-      body: JSON.stringify({
-        url: this.selfUrl,
-        talkSecret: this.selfTalkSecret,
-        visible: true,
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) {
       throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
     }
+    const data = (await resp.json()) as {
+      registered: number;
+      results: Array<{ botName: string; status: number; error?: string }>;
+    };
+    this.registeredBotNames = new Set(
+      (data.results || []).filter((r) => r.status === 201 || r.status === 200).map((r) => r.botName),
+    );
+    for (const r of data.results || []) {
+      if (r.status >= 400) {
+        this.logger.warn(
+          { botName: r.botName, status: r.status, error: r.error },
+          'bulk-register entry rejected',
+        );
+      }
+    }
+    return { registered: data.registered ?? this.registeredBotNames.size };
   }
 
   private async sendHeartbeat(): Promise<void> {
     if (!this.agentBusUrl) return;
+    if (this.registeredBotNames.size === 0) return;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (this.agentBusToken) headers['Authorization'] = `Bearer ${this.agentBusToken}`;
     const resp = await proxyFetch(`${this.agentBusUrl}/api/agents/heartbeat`, {
       method: 'POST',
       headers,
-      body: '{}',
+      body: JSON.stringify({ botNames: Array.from(this.registeredBotNames) }),
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
     });
     if (!resp.ok) {
@@ -246,39 +293,46 @@ export class PeerManager {
       throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
     }
     const data = (await resp.json()) as {
-      agents: Array<{ botName: string; url: string; talkSecret: string }>;
+      agents: Array<{ botName: string; url: string; visible?: boolean; lastSeenAt?: string }>;
     };
 
     const next = new Map<string, PeerState>();
+    const selfUrlNorm = this.selfUrl?.replace(/\/+$/, '');
     for (const entry of data.agents || []) {
       if (!entry.botName || !entry.url) continue;
-      // Skip our own row — we don't talk to ourselves over the peer RPC.
-      if (this.selfUrl && entry.url.replace(/\/+$/, '') === this.selfUrl.replace(/\/+$/, '')) {
-        continue;
-      }
       const normalizedUrl = entry.url.replace(/\/+$/, '');
-      const newConfig: PeerConfig = {
-        name: entry.botName,
-        url: normalizedUrl,
-        ...(entry.talkSecret ? { secret: entry.talkSecret } : {}),
-      };
+      // Skip our own rows — we don't talk to ourselves over the peer RPC.
+      if (selfUrlNorm && normalizedUrl === selfUrlNorm) continue;
+
+      const newConfig: PeerConfig = { name: entry.botName, url: normalizedUrl };
       const prev = this.peers.get(entry.botName);
-      const unchanged =
-        prev &&
-        prev.config.url === normalizedUrl &&
-        prev.config.secret === entry.talkSecret;
-      next.set(entry.botName, unchanged
-        ? prev
-        : {
-            config: newConfig,
-            healthy: false,
-            lastChecked: 0,
-            lastHealthy: 0,
-            bots: [],
-            skills: [],
-          });
+      const unchanged = prev && prev.config.url === normalizedUrl;
+      next.set(
+        entry.botName,
+        unchanged
+          ? prev
+          : {
+              config: newConfig,
+              healthy: false,
+              lastChecked: 0,
+              lastHealthy: 0,
+              bots: [],
+              skills: [],
+            },
+      );
     }
     this.peers = next;
+  }
+
+  /**
+   * Pick the outbound Authorization for a cross-bridge call. In registry mode
+   * we always use the caller's metabot-core token — the peer verifies it via
+   * `GET /api/whoami`. In static-peer-only mode we fall back to the legacy
+   * per-peer shared secret.
+   */
+  private resolveOutboundAuth(peer: PeerConfig): string | undefined {
+    if (this.agentBusUrl) return this.agentBusToken;
+    return peer.secret;
   }
 
   async refreshAll(): Promise<void> {
@@ -293,8 +347,9 @@ export class PeerManager {
     const headers: Record<string, string> = {
       'X-MetaBot-Origin': 'peer',
     };
-    if (config.secret) {
-      headers['Authorization'] = `Bearer ${config.secret}`;
+    const auth = this.resolveOutboundAuth(config);
+    if (auth) {
+      headers['Authorization'] = `Bearer ${auth}`;
     }
 
     try {
@@ -433,8 +488,9 @@ export class PeerManager {
       'Content-Type': 'application/json',
       'X-MetaBot-Origin': 'peer',
     };
-    if (peer.secret) {
-      headers['Authorization'] = `Bearer ${peer.secret}`;
+    const auth = this.resolveOutboundAuth(peer);
+    if (auth) {
+      headers['Authorization'] = `Bearer ${auth}`;
     }
 
     const response = await proxyFetch(url, {
@@ -467,8 +523,9 @@ export class PeerManager {
     const headers: Record<string, string> = {
       'X-MetaBot-Origin': 'peer',
     };
-    if (config.secret) {
-      headers['Authorization'] = `Bearer ${config.secret}`;
+    const auth = this.resolveOutboundAuth(config);
+    if (auth) {
+      headers['Authorization'] = `Bearer ${auth}`;
     }
 
     try {

@@ -11,7 +11,6 @@ const REGISTRY_ENV_KEYS = [
   'METABOT_CORE_AGENT_BUS_URL',
   'METABOT_CORE_TOKEN',
   'METABOT_AGENT_SELF_URL',
-  'METABOT_AGENT_TALK_SECRET',
 ] as const;
 
 function clearRegistryEnv() {
@@ -29,7 +28,7 @@ describe('PeerManager', () => {
   });
 
   it('initializes with empty peer bots', () => {
-    manager = new PeerManager([], createLogger());
+    manager = new PeerManager([], [], createLogger());
     expect(manager.getPeerBots()).toEqual([]);
     expect(manager.getPeerStatuses()).toEqual([]);
   });
@@ -49,7 +48,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'alice', url: 'http://localhost:9200' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -72,7 +71,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'bob', url: 'http://unreachable:9999' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -91,7 +90,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'locked', url: 'http://locked:9100' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -116,7 +115,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'alice', url: 'http://localhost:9200' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -135,7 +134,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'alice', url: 'http://localhost:9200', secret: 'sec' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -153,7 +152,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'alice', url: 'http://localhost:9200' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
     expect(manager.findBotPeer('nonexistent')).toBeUndefined();
@@ -176,7 +175,7 @@ describe('PeerManager', () => {
     manager = new PeerManager([
       { name: 'alice', url: 'http://localhost:9200' },
       { name: 'bob', url: 'http://localhost:9300' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -195,7 +194,7 @@ describe('PeerManager', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    manager = new PeerManager([], createLogger());
+    manager = new PeerManager([], [], createLogger());
 
     const result = await manager.forwardTask(
       { name: 'alice', url: 'http://localhost:9200', secret: 'sec' },
@@ -224,7 +223,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'secure-peer', url: 'http://remote:9100', secret: 'my-secret' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -245,7 +244,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'local-peer', url: 'http://localhost:9200' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -265,7 +264,7 @@ describe('PeerManager', () => {
 
     manager = new PeerManager([
       { name: 'trailing', url: 'http://localhost:9200///' },
-    ], createLogger());
+    ], [], createLogger());
 
     await manager.refreshAll();
 
@@ -275,81 +274,109 @@ describe('PeerManager', () => {
 
   // ---------------------------------------------------------------------------
   // Registry mode (METABOT_CORE_AGENT_BUS_URL set) — discovery via central
-  // /api/agents endpoint.
+  // /api/agents endpoint + visibility-is-the-permission (no talkSecret).
   // ---------------------------------------------------------------------------
 
   describe('registry mode (METABOT_CORE_AGENT_BUS_URL)', () => {
-    it('self-registers on construct when registry env is configured', async () => {
+    it('bulk-registers all local bots on construct with visibility passthrough', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
       process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
-      process.env.METABOT_AGENT_TALK_SECRET = 'self-talk-secret';
 
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({
+          registered: 2,
+          results: [
+            { botName: 'visible-bot', status: 201 },
+            { botName: 'hidden-bot', status: 201 },
+          ],
+        }),
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      manager = new PeerManager([], createLogger());
+      manager = new PeerManager(
+        [],
+        [
+          { name: 'visible-bot' },                  // visible undefined → defaults true
+          { name: 'hidden-bot', visible: false },
+        ],
+        createLogger(),
+      );
 
-      // Let the unawaited selfRegisterWithRetry() microtask run.
+      // Let the unawaited bulkRegisterWithRetry() microtask run.
       await new Promise((r) => setImmediate(r));
 
-      const registerCall = fetchMock.mock.calls.find(
-        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents') && c[1]?.method === 'POST',
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
       );
-      expect(registerCall, 'expected POST /api/agents from self-register').toBeDefined();
-      const [registerUrl, registerInit] = registerCall!;
-      expect(registerUrl).toBe('https://metabot.example.com/core/api/agents');
-      expect((registerInit as RequestInit).headers).toMatchObject({
+      expect(bulkCall, 'expected POST /api/agents/bulk from bulk-register').toBeDefined();
+      const [bulkUrl, bulkInit] = bulkCall!;
+      expect(bulkUrl).toBe('https://metabot.example.com/core/api/agents/bulk');
+      expect((bulkInit as RequestInit).headers).toMatchObject({
         'Authorization': 'Bearer core-bearer',
         'Content-Type': 'application/json',
       });
-      expect(JSON.parse((registerInit as RequestInit).body as string)).toEqual({
-        url: 'http://self.example:9100',
-        talkSecret: 'self-talk-secret',
-        visible: true,
+      const body = JSON.parse((bulkInit as RequestInit).body as string);
+      expect(body).toEqual({
+        bots: [
+          { botName: 'visible-bot', url: 'http://self.example:9100', visible: true },
+          { botName: 'hidden-bot', url: 'http://self.example:9100', visible: false },
+        ],
       });
+      // No legacy talkSecret field anywhere in the wire payload.
+      expect((bulkInit as RequestInit).body as string).not.toMatch(/talkSecret/);
     });
 
-    it('emits POST /api/agents/heartbeat every 60s', async () => {
+    it('emits batch POST /api/agents/heartbeat with registered bot names', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
       process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
-      process.env.METABOT_AGENT_TALK_SECRET = 'self-talk-secret';
 
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({}),
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'self-bot', status: 201 }],
+        }),
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      vi.useFakeTimers();
-      manager = new PeerManager([], createLogger());
+      manager = new PeerManager(
+        [],
+        [{ name: 'self-bot' }],
+        createLogger(),
+      );
 
-      // Drain the immediate self-register POST.
-      await vi.advanceTimersByTimeAsync(0);
+      // Drain the unawaited bulk-register promise chain so registeredBotNames
+      // is populated before we trigger the heartbeat.
+      await new Promise((r) => setImmediate(r));
+      await new Promise((r) => setImmediate(r));
       fetchMock.mockClear();
 
-      // Tick forward by the heartbeat interval.
-      await vi.advanceTimersByTimeAsync(60_000);
+      // Trigger the heartbeat directly (avoids fake-timer interaction with
+      // AbortSignal.timeout in the bulk-register fetch).
+      await (manager as any).sendHeartbeat();
 
       const heartbeatCall = fetchMock.mock.calls.find(
         (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/heartbeat'),
       );
-      expect(heartbeatCall, 'expected POST /api/agents/heartbeat after 60s').toBeDefined();
+      expect(heartbeatCall, 'expected POST /api/agents/heartbeat').toBeDefined();
       const [, hbInit] = heartbeatCall!;
       expect((hbInit as RequestInit).method).toBe('POST');
       expect((hbInit as RequestInit).headers).toMatchObject({
         'Authorization': 'Bearer core-bearer',
+        'Content-Type': 'application/json',
+      });
+      expect(JSON.parse((hbInit as RequestInit).body as string)).toEqual({
+        botNames: ['self-bot'],
       });
     });
 
-    it('drives peer list from GET /api/agents response', async () => {
+    it('drives peer list from GET /api/agents (no talkSecret in response)', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
-      // SELF_URL deliberately unset → no self-register, no heartbeat — keeps
+      // SELF_URL deliberately unset → no bulk-register, no heartbeat — keeps
       // this test focused on the registry-discovery path.
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
@@ -358,7 +385,7 @@ describe('PeerManager', () => {
             ok: true,
             json: () => Promise.resolve({
               agents: [
-                { botName: 'alice', url: 'http://alice:9100', talkSecret: 'sec-a', visible: true, lastSeenAt: 'now' },
+                { botName: 'alice', url: 'http://alice:9100', visible: true, lastSeenAt: 'now' },
               ],
             }),
           });
@@ -379,7 +406,7 @@ describe('PeerManager', () => {
       });
       vi.stubGlobal('fetch', fetchMock);
 
-      manager = new PeerManager([], createLogger());
+      manager = new PeerManager([], [], createLogger());
 
       // Drive one poll tick manually (the timer interval is 30s; we trigger
       // the same code path directly via the private method).
@@ -395,6 +422,44 @@ describe('PeerManager', () => {
       expect(bots).toHaveLength(1);
       expect(bots[0].name).toBe('alice-bot');
       expect(bots[0].peerName).toBe('alice');
+    });
+
+    it('cross-bridge call carries METABOT_CORE_TOKEN as Bearer (not legacy peer.secret)', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url === 'https://metabot.example.com/core/api/agents') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              agents: [{ botName: 'alice', url: 'http://alice:9100', visible: true }],
+            }),
+          });
+        }
+        if (url === 'http://alice:9100/api/bots') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ bots: [] }) });
+        }
+        if (url === 'http://alice:9100/api/skills') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
+        }
+        return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [], createLogger());
+
+      await (manager as any).runPollTick();
+
+      const peerBotCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0] === 'http://alice:9100/api/bots',
+      );
+      expect(peerBotCall, 'expected cross-bridge GET /api/bots').toBeDefined();
+      const [, peerInit] = peerBotCall!;
+      expect((peerInit as RequestInit).headers).toMatchObject({
+        'Authorization': 'Bearer core-bearer',
+        'X-MetaBot-Origin': 'peer',
+      });
     });
 
     it('falls back to static configs when GET /api/agents fails', async () => {
@@ -423,6 +488,7 @@ describe('PeerManager', () => {
       const logger = createLogger();
       manager = new PeerManager(
         [{ name: 'static', url: 'http://static-peer:9100' }],
+        [],
         logger,
       );
 

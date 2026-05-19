@@ -15,6 +15,18 @@ export interface BotConfigBase {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  /**
+   * Visibility in the metabot-core agent bus. When true (default), the bridge
+   * registers this bot in the central agent registry so other bridges/CLIs
+   * can discover and talk to it. When false, the bot is local-only — its
+   * row is either absent from the registry or marked hidden, and peers
+   * cannot resolve its URL via `GET /api/agents`.
+   *
+   * Replaces the previous per-bot `talkSecret` — visibility itself is the
+   * permission (only registered bots are reachable, ownership of the
+   * credential controls who can register/hide them).
+   */
+  visible?: boolean;
   /** Agent engine. Defaults to 'claude' for backward compatibility. */
   engine?: EngineName;
   claude: {
@@ -188,6 +200,8 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  /** See BotConfigBase.visible — defaults to true if omitted. */
+  visible?: boolean;
   feishuAppId: string;
   feishuAppSecret: string;
   defaultWorkingDirectory: string;
@@ -211,6 +225,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
@@ -233,6 +248,8 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  /** See BotConfigBase.visible — defaults to true if omitted. */
+  visible?: boolean;
   telegramBotToken: string;
   defaultWorkingDirectory: string;
   maxTurns?: number;
@@ -253,6 +270,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -273,6 +291,8 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  /** See BotConfigBase.visible — defaults to true if omitted. */
+  visible?: boolean;
   defaultWorkingDirectory: string;
   maxTurns?: number;
   maxBudgetUsd?: number;
@@ -291,6 +311,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
@@ -303,6 +324,8 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
 export interface WechatBotJsonEntry extends EngineJsonFields {
   name: string;
   description?: string;
+  /** See BotConfigBase.visible — defaults to true if omitted. */
+  visible?: boolean;
   ilinkBaseUrl?: string;
   wechatBotToken?: string;
   defaultWorkingDirectory: string;
@@ -319,6 +342,7 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
   return {
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
+    ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),

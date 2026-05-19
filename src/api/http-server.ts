@@ -52,6 +52,57 @@ const startTime = Date.now();
 // Expose start time for metrics route
 (globalThis as any).__metabot_start_time = startTime;
 
+const WHOAMI_VERIFY_TIMEOUT_MS = 5_000;
+
+/**
+ * Is this a talk route? POST /api/talk + POST /api/tasks (deprecated alias)
+ * + GET /api/talk/:taskId. The dual-auth gate (local secret OR metabot-core
+ * /api/whoami verification) applies only to these routes — every other API
+ * stays single-secret as before.
+ */
+function isTalkRoute(method: string, url: string): boolean {
+  if (method === 'POST' && (url === '/api/talk' || url.startsWith('/api/talk?'))) return true;
+  if (method === 'POST' && (url === '/api/tasks' || url.startsWith('/api/tasks?'))) return true;
+  if (method === 'GET' && url.startsWith('/api/talk/')) return true;
+  return false;
+}
+
+function metabotCoreBaseUrl(): string | undefined {
+  const candidates = [process.env.METABOT_CORE_AGENT_BUS_URL, process.env.METABOT_CORE_URL];
+  for (const raw of candidates) {
+    const trimmed = raw?.trim();
+    if (trimmed) return trimmed.replace(/\/+$/, '');
+  }
+  return undefined;
+}
+
+/**
+ * Verify a Bearer header against metabot-core `GET /api/whoami`. Returns true
+ * only on HTTP 200. Fails closed on any error (network, non-200, timeout).
+ */
+async function verifyBearerViaMetabotCore(
+  authHeader: string,
+  logger: Logger,
+): Promise<boolean> {
+  const base = metabotCoreBaseUrl();
+  if (!base) {
+    logger.warn(
+      'cross-bridge talk attempted but METABOT_CORE_AGENT_BUS_URL/METABOT_CORE_URL is unset — cannot verify',
+    );
+    return false;
+  }
+  try {
+    const resp = await fetch(`${base}/api/whoami`, {
+      headers: { Authorization: authHeader },
+      signal: AbortSignal.timeout(WHOAMI_VERIFY_TIMEOUT_MS),
+    });
+    return resp.ok;
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, 'whoami verification failed');
+    return false;
+  }
+}
+
 export function startApiServer(options: ApiServerOptions): http.Server {
   const { port, secret, registry, scheduler, logger, botsConfigPath, docSync, feishuServiceClient, peerManager } = options;
   const host = secret ? '0.0.0.0' : '127.0.0.1';
@@ -101,13 +152,31 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     const method = req.method || 'GET';
     const url = req.url || '/';
 
-    // Auth check (exempt /web/, /api/files/)
+    // Auth check (exempt /web/, /api/files/).
+    //
+    // /api/talk and /api/tasks routes accept dual auth: the local secret
+    // (mb shortcut, local cross-bot dispatch) OR any Bearer that metabot-core
+    // `GET /api/whoami` validates (cross-bridge peer calls, `metabot agents
+    // talk` from any user with a metabot-core token). Every other API stays
+    // single-secret.
     if (secret && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
-      const urlToken = url.includes('token=') ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token') : null;
-      if (auth !== `Bearer ${secret}` && urlToken !== secret) {
-        jsonResponse(res, 401, { error: 'Unauthorized' });
-        return;
+      const urlToken = url.includes('token=')
+        ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token')
+        : null;
+      const localOk = auth === `Bearer ${secret}` || urlToken === secret;
+
+      if (!localOk) {
+        const canCrossVerify = isTalkRoute(method, url) && typeof auth === 'string' && /^Bearer\s+/i.test(auth);
+        if (!canCrossVerify) {
+          jsonResponse(res, 401, { error: 'Unauthorized' });
+          return;
+        }
+        const verified = await verifyBearerViaMetabotCore(auth!, logger);
+        if (!verified) {
+          jsonResponse(res, 401, { error: 'Unauthorized' });
+          return;
+        }
       }
     }
 
