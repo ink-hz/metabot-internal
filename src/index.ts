@@ -193,10 +193,19 @@ async function main() {
   // Initialize peer manager for cross-instance bot discovery.
   // Registry mode (env METABOT_CORE_AGENT_BUS_URL) lets the bridge boot
   // peerManager even with zero static peers — it discovers them via the
-  // central /api/agents endpoint on the first poll tick.
+  // central /api/agents endpoint on the first poll tick. The local bot list
+  // is the full set of bots configured in bots.json; visibility (per bot)
+  // is passed through to the bulk-register call so `visible:false` rows are
+  // hidden in the registry.
+  const localBotsForRegistry = [
+    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible })),
+    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible })),
+    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible })),
+    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible })),
+  ];
   let peerManager: PeerManager | undefined;
   if (appConfig.peers.length > 0 || process.env.METABOT_CORE_AGENT_BUS_URL) {
-    peerManager = new PeerManager(appConfig.peers, logger);
+    peerManager = new PeerManager(appConfig.peers, localBotsForRegistry, logger);
     await peerManager.refreshAll();
     const statuses = peerManager.getPeerStatuses();
     const healthyCount = statuses.filter((s) => s.healthy).length;
