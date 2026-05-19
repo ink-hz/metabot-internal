@@ -73,6 +73,8 @@ cmd_update() {
         chmod +x "$LOCAL_BIN/$cli"
       fi
     done
+    # Clean up temp mbcore shim (superseded by `metabot` dispatcher)
+    [[ -f "$LOCAL_BIN/mbcore" ]] && rm -f "$LOCAL_BIN/mbcore"
     success "CLI tools updated"
   fi
 
@@ -269,21 +271,71 @@ cmd_restart() { pm2 restart metabot; }
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
-case "${1:-help}" in
+# Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
+# Order: explicit override > sibling workspace > npm-global on PATH.
+_resolve_core_cli() {
+  if [[ -n "${METABOT_CORE_CLI:-}" && -x "$METABOT_CORE_CLI" ]]; then
+    echo "$METABOT_CORE_CLI"; return 0
+  fi
+  local ws="$METABOT_HOME/../metabot-workspace/metabot-core/packages/cli/bin/metabot"
+  if [[ -f "$ws" ]]; then
+    echo "$ws"; return 0
+  fi
+  # npm-linked global: a `metabot-core` bin on PATH (NOT this script).
+  local g
+  g="$(command -v metabot-core 2>/dev/null || true)"
+  if [[ -n "$g" ]]; then echo "$g"; return 0; fi
+  return 1
+}
+
+cmd_delegate() {
+  local core_cli
+  if ! core_cli="$(_resolve_core_cli)"; then
+    error "'metabot $1' needs the metabot-core CLI, which isn't installed here."
+    echo "  Fix one of:" >&2
+    echo "    - Build the workspace:  cd \"$METABOT_HOME/../metabot-workspace/metabot-core\" && npm install && npm run build" >&2
+    echo "    - Or point at it:       export METABOT_CORE_CLI=/path/to/metabot-core/packages/cli/bin/metabot" >&2
+    exit 1
+  fi
+  # Feed METABOT_CORE_URL / METABOT_CORE_TOKEN from the bridge .env WITHOUT
+  # clobbering values already set in the environment.
+  local envf="$METABOT_HOME/.env"
+  if [[ -f "$envf" ]]; then
+    local k
+    for k in METABOT_CORE_URL METABOT_CORE_TOKEN; do
+      if [[ -z "${!k:-}" ]]; then
+        local line
+        line="$(grep -E "^${k}=" "$envf" | tail -n1 || true)"
+        if [[ -n "$line" ]]; then
+          export "${k}=$(printf '%s' "${line#${k}=}" | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'\$//")"
+        fi
+      fi
+    done
+  fi
+  exec node "$core_cli" "$@"
+}
+
+print_help() {
+  echo -e "${BOLD}metabot${NC} - MetaBot management CLI"
+  echo ""
+  echo "  metabot update     Pull latest, rebuild, and restart"
+  echo "  metabot start      Start MetaBot with PM2"
+  echo "  metabot stop       Stop MetaBot"
+  echo "  metabot restart    Restart MetaBot"
+  echo "  metabot logs       View live logs (pass -n 100 etc.)"
+  echo "  metabot status     Show PM2 process status"
+  echo ""
+  echo "  Feature subcommands (delegated to metabot-core):"
+  echo "    metabot t5t … | agents … | memory … | skills …"
+}
+
+case "${1:-}" in
   update|up)    cmd_update ;;
   start)        cmd_start ;;
   stop)         cmd_stop ;;
   restart|rs)   cmd_restart ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
-  *)
-    echo -e "${BOLD}metabot${NC} - MetaBot management CLI"
-    echo ""
-    echo "  metabot update     Pull latest, rebuild, and restart"
-    echo "  metabot start      Start MetaBot with PM2"
-    echo "  metabot stop       Stop MetaBot"
-    echo "  metabot restart    Restart MetaBot"
-    echo "  metabot logs       View live logs (pass -n 100 etc.)"
-    echo "  metabot status     Show PM2 process status"
-    ;;
+  ""|help|--help|-h) print_help ;;
+  *)            cmd_delegate "$@" ;;
 esac
