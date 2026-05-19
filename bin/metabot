@@ -203,6 +203,10 @@ cmd_update() {
       if [[ -n "$lark_src" ]]; then
         for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
           mkdir -p "$dst_root/$lark_skill"
+          # Skip when src and dst already resolve to the same inode
+          # (lark-cli installs ~/.agents/skills/* and symlinks them into
+          # ~/.claude/skills + ~/.codex/skills — cp would error on same-file).
+          [[ "$lark_src" -ef "$dst_root/$lark_skill" ]] && continue
           if [[ "$lark_src" != "$dst_root/$lark_skill" ]]; then
             cp -r "$lark_src/." "$dst_root/$lark_skill/"
           fi
@@ -265,6 +269,7 @@ cmd_update() {
           if [[ -n "$lark_src" ]]; then
             for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
               mkdir -p "$dst_root/$lark_skill"
+              [[ "$lark_src" -ef "$dst_root/$lark_skill" ]] && continue
               cp -r "$lark_src/." "$dst_root/$lark_skill/"
             done
           fi
