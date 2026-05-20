@@ -10,9 +10,8 @@
 
 MetaBot 安装器自动安装到 `~/.local/bin/metabot`。
 
-> 旧的 `mb` 命令现在是一个薄薄的弃用兼容壳，转发到 `metabot`。`mb skills`
-> 映射到 `metabot bot-skills`，其余命令原样转发。请将脚本更新为直接调用
-> `metabot`。
+> 旧的 `mb` 命令现在是一个薄薄的弃用兼容壳，原样转发到 `metabot`（stderr 会
+> 打印弃用提示）。请将脚本更新为直接调用 `metabot`。
 
 ## 1. bridge 进程控制
 
@@ -107,17 +106,6 @@ TTS 参数：
 | `-o FILE` | 保存到指定文件（默认: `/tmp/metabot-voice-<时间戳>.mp3`） |
 | `--provider NAME` | TTS 服务商: `doubao`、`openai`、`elevenlabs` |
 | `--voice ID` | 声音/音色 ID（各服务商不同） |
-
-### 每个 Bot 的 Skill Hub
-
-```bash
-metabot bot-skills list                          # 列出所有技能（本地 + peer）
-metabot bot-skills search <query>                # 按关键词搜索技能
-metabot bot-skills get <name>                    # 获取技能详情
-metabot bot-skills publish <botName> <skillName> # 发布 Bot 的技能到 hub
-metabot bot-skills install <skillName> <botName> # 安装技能到 Bot
-metabot bot-skills remove <name>                 # 取消发布技能
-```
 
 ## 3. metabot-core 转发
 

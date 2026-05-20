@@ -23,7 +23,7 @@ Use the `metabot` CLI for quick operations:
 metabot bots                                    # List all bots (local + peer)
 metabot talk <botName> <chatId> <prompt>        # Delegate task to a bot
 metabot peers                                   # List peers and their status
-metabot bot-skills list                         # Per-bot Skill Hub
+metabot skills list                             # List published skills (central Skill Hub)
 metabot health                                  # Health check
 ```
 

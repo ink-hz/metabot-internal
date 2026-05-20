@@ -129,36 +129,9 @@ When Claude enters plan mode and writes a plan to `.claude/plans/*.md`, the plan
 
 ## Skill Hub (Cross-Bot Skill Sharing)
 
-A centralized skill registry that allows bots to publish, discover, and install skills across MetaBot instances.
+Skill Hub is **owned by metabot-core**, not by the bridge. The centralized registry — publish, search, install, and the supporting `/api/skills` REST surface — lives in `packages/server/` and is reached via the unified `metabot skills` CLI (delegated to `packages/cli/`). The bridge keeps a thin local helper, `src/api/skills-installer.ts`, that writes a SKILL.md (and any `references/` bundle) into a bot's `.claude/skills/` directory when an install request is dispatched. There is no bridge-side `/api/skills` endpoint, no SQLite skill store in the bridge, and no per-bot `bot-skills` CLI anymore.
 
-**Architecture**: SQLite + FTS5 store (same pattern as MetaMemory/SyncStore). Skills are stored with SKILL.md content + optional `references/` tar bundle. Cross-instance discovery via PeerManager polling.
-
-**Key modules:**
-- **`src/api/skill-hub-store.ts`** — `SkillHubStore` class with SQLite backend. FTS5 full-text search across name, description, tags, and content. Methods: `publish()` (upsert, bumps version), `get()`, `list()`, `search()`, `remove()`, `getContent()`.
-- **`src/api/routes/skill-hub-routes.ts`** — REST API endpoints for skill CRUD, publish-from-bot, install, and search.
-- **`src/api/skills-installer.ts`** — `installSkillFromHub()` writes SKILL.md + extracts references tar to a bot's `.claude/skills/` directory.
-- **`src/skills/skill-hub/SKILL.md`** — Bot-facing skill for autonomous skill discovery and installation.
-
-**API endpoints:**
-- `GET /api/skills` — List all skills (local + peer)
-- `GET /api/skills/search?q=` — Full-text search
-- `GET /api/skills/:name` — Get skill details (falls back to peers)
-- `POST /api/skills` — Publish a skill directly (with skillMd in body)
-- `POST /api/skills/:name/publish-from-bot` — Publish from a bot's working directory
-- `POST /api/skills/:name/install` — Install a skill to a bot
-- `DELETE /api/skills/:name` — Remove a skill
-
-**CLI (`metabot bot-skills`):**
-```bash
-metabot bot-skills list                            # List all skills
-metabot bot-skills search <query>                  # Search by keyword
-metabot bot-skills get <name>                      # Get skill details
-metabot bot-skills publish <botName> <skillName>   # Publish a bot's skill
-metabot bot-skills install <skillName> <botName>   # Install to a bot
-metabot bot-skills remove <name>                   # Unpublish
-```
-
-**Cross-instance**: PeerManager fetches skills alongside bots during 30s polling. Peer skills appear in list/search results with `peerName`/`peerUrl` fields. Install from peer: `metabot bot-skills install <skill> <bot> peer:<peerName>`.
+CLI surface: `metabot skills list|search|get|publish|install|remove` (see `docs/reference/cli-metabot.md`).
 
 ## Session Isolation
 

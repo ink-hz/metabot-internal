@@ -15,7 +15,7 @@ metabot t5t    <cmd>   # daily team status portal
 metabot help           # top-level help (also --help, -h, bare invocation)
 ```
 
-`metabot` is the **single** CLI binary. Beyond the four metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`bot-skills`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm` and `mh` bins were removed in P4-MR4; `mb` is now a thin deprecation wrapper that forwards to `metabot` (`mb skills` → `metabot bot-skills`). Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
+`metabot` is the **single** CLI binary. Beyond the four metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm`, `mh`, and per-bot `bot-skills` surfaces were removed in P4-MR4 and the follow-on cleanup; `mb` is now a thin deprecation wrapper that forwards to `metabot`. Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
 
 Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first line). Server URL is `METABOT_CORE_URL`, default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since the P4-MR6 pivot — no `/core` path prefix, no shared multi-tenant host). CLIs explicitly configured against the legacy `https://metabot.xvirobotics.com/core` keep working unchanged — the multi-tenant `/core` sub-handle is untouched.
 
@@ -167,7 +167,6 @@ metabot peers                             # list peers and status
 metabot stats                             # cost & usage statistics
 metabot metrics                           # Prometheus metrics
 metabot voice call|transcript|list|config|tts …       # RTC voice call + TTS
-metabot bot-skills list|search|get|publish|install|remove …  # per-bot Skill Hub
 metabot health                            # health check
 ```
 
@@ -177,9 +176,9 @@ agents talk` (above) is the **central-registry** P2P path that resolves a peer
 via the metabot-core agent bus. They are not aliases — pick by which registry
 you want.
 
-**`bot-skills` vs `skills`.** `metabot bot-skills` is the **per-bot, bridge-local**
-Skill Hub (`/api/skills` on `localhost:9100`). `metabot skills` (above) is the
-**central** metabot-core Skill Hub. Distinct registries, distinct commands.
+The per-bot bridge-local Skill Hub (`metabot bot-skills`) has been retired —
+all skill publishing/installing now goes through the central `metabot skills`
+surface above.
 
 ## Env vars
 
@@ -200,7 +199,7 @@ call site to the unified form:
 |---|---|
 | `mm <cmd>` (removed) | `metabot memory <cmd>` |
 | `mh <cmd>` (removed) | `metabot skills <cmd>` |
-| `mb skills <cmd>` (wrapper) | `metabot bot-skills <cmd>` |
+| `mb skills <cmd>` (wrapper, was → `bot-skills`) | `metabot skills <cmd>` (central Skill Hub) |
 | `mb talk <bot> <chatId> "<msg>"` (wrapper) | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`) |
 | `mb bots / schedule / voice / stats / peers / metrics / health` (wrapper) | `metabot <same subcommand>` |
 | (n/a) | `metabot agents talk <peer>[/<bot>] <chatId> "<msg>"` (central-registry P2P variant) |

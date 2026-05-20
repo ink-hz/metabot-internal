@@ -93,7 +93,6 @@ plugins:
             - 参考:
               - REST API: reference/api.md
               - metabot CLI: reference/cli-metabot.md
-              - mm CLI (MetaMemory): reference/cli-mm.md
             - 部署:
               - 生产部署: deployment/production.md
             - 开发:
@@ -146,7 +145,6 @@ nav:
   - Reference:
     - REST API: reference/api.md
     - metabot CLI: reference/cli-metabot.md
-    - mm CLI (MetaMemory): reference/cli-mm.md
   - Deployment:
     - Production: deployment/production.md
   - Development:
