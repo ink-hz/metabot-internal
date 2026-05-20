@@ -247,6 +247,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+// Memory routes accept either a UUID id or a slash-prefixed path. UUIDs never
+// contain `/`, so we can branch on that. Paths are encoded per-segment so the
+// `/` separators remain literal — single-segment encodeURIComponent would
+// emit `%2F`, which oauth2-proxy v7 silently decodes back to `/` upstream,
+// stripping the leading `/` and turning the lookup into an id-miss.
+function encodeIdOrPath(idOrPath: string): string {
+  if (idOrPath.includes('/')) {
+    return idOrPath.split('/').map(encodeURIComponent).join('/');
+  }
+  return encodeURIComponent(idOrPath);
+}
+
 export const api = {
   manifest: () => request<Manifest>('/api/manifest'),
   health: () => request<{ ok: true; uptime: number; version: string }>('/health'),
@@ -259,10 +271,10 @@ export const api = {
       `/api/memory/documents?folder_id=${encodeURIComponent(folderId)}&limit=${limit}`,
     ),
   getDocument: (idOrPath: string) =>
-    request<DocumentFull>(`/api/memory/documents/${encodeURIComponent(idOrPath)}`),
+    request<DocumentFull>(`/api/memory/documents/${encodeIdOrPath(idOrPath)}`),
   getFolder: (idOrPath: string) =>
     request<{ id: string; name: string; path: string; parent_id: string | null }>(
-      `/api/memory/folders/${encodeURIComponent(idOrPath)}`,
+      `/api/memory/folders/${encodeIdOrPath(idOrPath)}`,
     ),
   searchMemory: (q: string, limit = 20) =>
     request<{ results: SearchResult[] }>(

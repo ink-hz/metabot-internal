@@ -114,4 +114,55 @@ describe('E2E flow', () => {
     });
     expect(denied.status).toBe(403);
   });
+
+  // Regression: oauth2-proxy v7 decodes %2F → / upstream, and Caddy collapses
+  // // → /. Both layers strip the leading slash of a path-style lookup, so the
+  // server must treat any slice containing an interior `/` as a path even
+  // when the leading `/` is missing. CJK segments must also survive the
+  // single decodeURIComponent at the route layer.
+  it('memory routes resolve path-style lookups after oauth2-proxy/Caddy strip the leading slash', async () => {
+    kit = await startTestServer('e2e-path-strip');
+    const { baseUrl, adminToken } = kit;
+
+    const ascii = await call(baseUrl, 'POST', '/api/memory/documents', adminToken, {
+      path: '/shared/weekly-updates/2026-05-20',
+      title: '2026-05-20',
+      content: 'ascii body',
+    });
+    expect(ascii.status).toBe(201);
+    const asciiFolder = await call(baseUrl, 'POST', '/api/memory/folders', adminToken, {
+      path: '/shared/cjk-zone/技术文档',
+    });
+    expect(asciiFolder.status).toBe(201);
+    const cjkDoc = await call(baseUrl, 'POST', '/api/memory/documents', adminToken, {
+      path: '/shared/cjk-zone/技术文档/笔记',
+      title: '笔记',
+      content: 'cjk body',
+    });
+    expect(cjkDoc.status).toBe(201);
+
+    // Browser path AFTER oauth2-proxy/Caddy stripped the leading slash.
+    const docStripped = await call(baseUrl, 'GET', '/api/memory/documents/shared/weekly-updates/2026-05-20', adminToken);
+    expect(docStripped.status).toBe(200);
+    expect(docStripped.body.content).toBe('ascii body');
+
+    const folderStripped = await call(baseUrl, 'GET', '/api/memory/folders/shared/cjk-zone', adminToken);
+    expect(folderStripped.status).toBe(200);
+    expect(folderStripped.body.path).toBe('/shared/cjk-zone');
+
+    // CJK: single-encoded per segment, leading slash stripped → still resolves.
+    const cjkEncoded = encodeURIComponent('技术文档');
+    const cjkFolder = await call(baseUrl, 'GET', `/api/memory/folders/shared/cjk-zone/${cjkEncoded}`, adminToken);
+    expect(cjkFolder.status).toBe(200);
+    expect(cjkFolder.body.path).toBe('/shared/cjk-zone/技术文档');
+
+    const cjkDocRes = await call(baseUrl, 'GET', `/api/memory/documents/shared/cjk-zone/${cjkEncoded}/${encodeURIComponent('笔记')}`, adminToken);
+    expect(cjkDocRes.status).toBe(200);
+    expect(cjkDocRes.body.content).toBe('cjk body');
+
+    // UUID lookup (no interior slash) must NOT get a leading slash prepended.
+    const byId = await call(baseUrl, 'GET', `/api/memory/documents/${ascii.body.id}`, adminToken);
+    expect(byId.status).toBe(200);
+    expect(byId.body.id).toBe(ascii.body.id);
+  });
 });
