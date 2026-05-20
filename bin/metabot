@@ -3,7 +3,7 @@
 # Three command categories:
 #   1. Bridge process control: update | start | stop | restart | logs | status
 #   2. Bridge daemon API (localhost:9100): bots | bot | talk | schedule |
-#      peers | stats | metrics | voice | bot-skills | health
+#      peers | stats | metrics | voice | health
 #   3. metabot-core delegation: t5t | agents | memory | skills
 
 set -euo pipefail
@@ -628,61 +628,6 @@ print(json.dumps(body))
           ;;
       esac
       ;;
-    bot-skills)
-      local subcmd="${1:-list}"; shift 2>/dev/null || true
-      case "$subcmd" in
-        list|ls)
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills" | _json
-          ;;
-        search|s)
-          local query="$*"
-          if [[ -z "${query:-}" ]]; then echo "Usage: metabot bot-skills search <query>"; exit 1; fi
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills/search?q=$(python3 -c 'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))' "$query")" | _json
-          ;;
-        get|g)
-          if [[ -z "${1:-}" ]]; then echo "Usage: metabot bot-skills get <name>"; exit 1; fi
-          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/skills/$1" | _json
-          ;;
-        publish|pub)
-          local bot="${1:-}" skill="${2:-}"
-          if [[ -z "$bot" || -z "$skill" ]]; then
-            echo "Usage: metabot bot-skills publish <botName> <skillName>"
-            exit 1
-          fi
-          curl -s -X POST "$METABOT_URL/api/skills/$skill/publish-from-bot" \
-            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
-            -d "{\"botName\":\"$bot\"}" | _json
-          ;;
-        install|i)
-          local skill="${1:-}" bot="${2:-}"
-          if [[ -z "$skill" || -z "$bot" ]]; then
-            echo "Usage: metabot bot-skills install <skillName> <botName>"
-            exit 1
-          fi
-          local source="${3:-local}"
-          python3 -c "
-import json, sys
-print(json.dumps({'botName': sys.argv[1], 'source': sys.argv[2]}))
-" "$bot" "$source" | \
-          curl -s -X POST "$METABOT_URL/api/skills/$skill/install" \
-            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
-            -d @- | _json
-          ;;
-        remove|rm)
-          if [[ -z "${1:-}" ]]; then echo "Usage: metabot bot-skills remove <name>"; exit 1; fi
-          curl -s -X DELETE "$METABOT_URL/api/skills/$1" -H "$METABOT_AUTH" | _json
-          ;;
-        *)
-          echo "metabot bot-skills - Per-bot Skill Hub (bridge-local skill registry)"
-          echo "  metabot bot-skills list                               - List all skills (local + peer)"
-          echo "  metabot bot-skills search <query>                     - Search skills by keyword"
-          echo "  metabot bot-skills get <name>                         - Get skill details"
-          echo "  metabot bot-skills publish <botName> <skillName>      - Publish a bot's skill to the hub"
-          echo "  metabot bot-skills install <skillName> <botName>      - Install a skill to a bot"
-          echo "  metabot bot-skills remove <name>                      - Unpublish a skill"
-          ;;
-      esac
-      ;;
     health|h)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/health" | _json
       ;;
@@ -709,7 +654,6 @@ print_help() {
   echo "    metabot stats                      Cost & usage stats"
   echo "    metabot metrics                    Prometheus metrics"
   echo "    metabot voice …                    RTC voice call + TTS (call/transcript/list/config/tts)"
-  echo "    metabot bot-skills …               Per-bot Skill Hub (list/search/get/publish/install/remove)"
   echo "    metabot health                     Health check"
   echo ""
   echo "  Feature subcommands (delegated to metabot-core):"
@@ -723,7 +667,7 @@ case "${1:-}" in
   restart|rs)   cmd_restart ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
-  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|bot-skills|health|h)
+  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
   *)            cmd_delegate "$@" ;;

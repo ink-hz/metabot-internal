@@ -212,7 +212,7 @@ Full-featured browser-based chat interface. Access at `https://your-server/web/`
 | **MetaSchedule (opt-in)** | Persistent server-side scheduler — cron + one-shot, survives restarts, exposes HTTP API + `metabot schedule` CLI. Not installed by default; enable with `cp src/skills/metaschedule/SKILL.md ~/.claude/skills/metaschedule/` |
 | **MetaSkill (opt-in)** | Agent factory. `/metaskill` generates portable agent teams. Not installed by default; enable with `cp -r src/skills/metaskill ~/.claude/skills/` |
 | **Feishu Lark CLI** | 200+ commands covering docs, messaging, calendar, tasks, and 8 more domains. 19 AI Agent Skills |
-| **Skill Hub** | Cross-instance skill sharing registry. `metabot bot-skills` to publish, discover, and install skills with FTS5 search |
+| **Skill Hub** | Centralized skill sharing registry. `metabot skills` to publish, discover, and install skills with FTS5 search (provided by metabot-core) |
 | **Peers** | Cross-instance bot discovery and task routing. `metabot talk alice/backend-bot` routes automatically |
 | **Voice Assistant** | Jarvis mode -- "Hey Siri, Jarvis" from AirPods for hands-free agent control |
 
@@ -497,7 +497,7 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 <details>
 <summary><strong>CLI Tools</strong></summary>
 
-The installer places `metabot` in `~/.local/bin/` — available immediately. `metabot` is the **single CLI binary** with three command categories: (1) bridge process control (`update` / `start` / `stop` / `restart` / `logs` / `status`); (2) bridge daemon API (`bots` / `talk` / `schedule` / `peers` / `stats` / `voice` / `bot-skills` / `health`, which curl the local bridge at `localhost:9100`); (3) everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mb` command is now a thin deprecation wrapper that forwards to `metabot`; the `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
+The installer places `metabot` in `~/.local/bin/` — available immediately. `metabot` is the **single CLI binary** with three command categories: (1) bridge process control (`update` / `start` / `stop` / `restart` / `logs` / `status`); (2) bridge daemon API (`bots` / `talk` / `schedule` / `peers` / `stats` / `voice` / `health`, which curl the local bridge at `localhost:9100`); (3) everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mb` command is now a thin deprecation wrapper that forwards to `metabot`; the `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
 
 ```bash
 # 1. MetaBot process management (handled in-script by bin/metabot)
@@ -528,12 +528,6 @@ metabot skills list                 # skill registry (central Skill Hub)
 lark-cli docs +fetch --doc <feishu-url>
 lark-cli im +messages-send --chat-id oc_xxx --text "Hi"
 lark-cli calendar +agenda --as user
-
-# Per-bot Skill Hub (bridge-local)
-metabot bot-skills list               # list all skills
-metabot bot-skills search <query>     # search skills
-metabot bot-skills publish <bot> <skill> # publish a bot's skill
-metabot bot-skills install <skill> <bot> # install skill to a bot
 ```
 
 CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` in `~/.metabot/.env`. MetaMemory / Skill Hub / Agents / T5T all live in central metabot-core inside this monorepo at `packages/server/`; configure `METABOT_CORE_URL` + `METABOT_CORE_TOKEN`, get a token at `<METABOT_CORE_URL>/cli`.

@@ -698,7 +698,7 @@ New-Item -ItemType Directory -Path $LocalBin -Force | Out-Null
 
 $HasBash = Test-Command "bash"
 
-$cliTools = @("mm", "mb", "metabot")
+$cliTools = @("mb", "metabot")
 if ($HasFeishu) { $cliTools += "fd" }
 
 if ($HasBash) {
@@ -854,10 +854,7 @@ Write-Host "  Commands:" -ForegroundColor White
 Write-Host "    pm2 logs metabot          # View MetaBot logs"
 Write-Host "    pm2 restart metabot       # Restart MetaBot"
 Write-Host "    pm2 stop metabot          # Stop MetaBot"
-if ($MetamemoryInstalled) {
-    Write-Host "    mm search <query>         # Search MetaMemory"
-    Write-Host "    mm folders                # Browse knowledge tree"
-}
+Write-Host "    metabot memory search ... # Search MetaMemory (via metabot-core)"
 
 Write-Host ""
 if (-not $SkipConfig) {

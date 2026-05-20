@@ -34,7 +34,7 @@ export function Home() {
         {err && <div className="state err">{err}</div>}
         {!err && !docs && <div className="state"><span className="cursor">loading</span></div>}
         {!err && docs && docs.length === 0 && (
-          <div className="state">no documents yet · create one with <code>mm create</code></div>
+          <div className="state">no documents yet · create one with <code>metabot memory create</code></div>
         )}
         {!err && docs && docs.map((d, i) => <DocRow key={d.id} doc={d} index={i} />)}
       </div>

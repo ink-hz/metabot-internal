@@ -11,8 +11,8 @@
 Installed automatically by the MetaBot installer to `~/.local/bin/metabot`.
 
 > The legacy `mb` command is now a thin deprecation wrapper that forwards to
-> `metabot`. `mb skills` maps to `metabot bot-skills`; everything else forwards
-> verbatim. Update your scripts to call `metabot` directly.
+> `metabot` verbatim (with a stderr deprecation notice). Update your scripts to
+> call `metabot` directly.
 
 ## 1. Bridge process control
 
@@ -107,17 +107,6 @@ TTS flags:
 | `-o FILE` | Save to specific file (default: `/tmp/metabot-voice-<timestamp>.mp3`) |
 | `--provider NAME` | TTS provider: `doubao`, `openai`, or `elevenlabs` |
 | `--voice ID` | Voice/speaker ID (provider-specific) |
-
-### Per-bot Skill Hub
-
-```bash
-metabot bot-skills list                          # list all skills (local + peer)
-metabot bot-skills search <query>                # search skills by keyword
-metabot bot-skills get <name>                    # get skill details
-metabot bot-skills publish <botName> <skillName> # publish a bot's skill to the hub
-metabot bot-skills install <skillName> <botName> # install a skill to a bot
-metabot bot-skills remove <name>                 # unpublish a skill
-```
 
 ## 3. metabot-core delegation
 

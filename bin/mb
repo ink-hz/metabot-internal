@@ -2,10 +2,5 @@
 # mb — DEPRECATED. Use `metabot <command>` instead. Forwards for now; removed in a future release.
 set -euo pipefail
 sub="${1:-help}"
-if [[ "$sub" == "skills" || "$sub" == "sk" ]]; then
-  shift
-  echo "[mb] 'mb skills' is now 'metabot bot-skills' — please update your scripts." >&2
-  exec metabot bot-skills "$@"
-fi
 echo "[mb] 'mb' is deprecated — use 'metabot ${sub}' instead." >&2
 exec metabot "$@"
