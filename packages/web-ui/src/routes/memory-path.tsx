@@ -16,8 +16,14 @@ type View =
 export function MemoryPath() {
   const loc = useLocation();
   // /memory/foo/bar  → path '/foo/bar'   ;  /memory → '/'
+  // react-router-dom returns the URL-encoded pathname, so CJK segments arrive
+  // as `%XX` sequences. Decode each segment before handing the path to api.*,
+  // which re-encodes via encodeIdOrPath — double-encoding would produce
+  // `%25XX` upstream and miss the SQLite lookup.
   const raw = loc.pathname.replace(/^\/memory/, '');
-  const path = raw && raw !== '/' ? raw : '/';
+  const path = raw
+    ? raw.split('/').map((seg) => (seg ? decodeURIComponent(seg) : seg)).join('/') || '/'
+    : '/';
 
   const [view, setView] = useState<View>({ kind: 'loading' });
 

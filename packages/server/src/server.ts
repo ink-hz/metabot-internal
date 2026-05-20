@@ -232,6 +232,19 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
   return false;
 }
 
+/**
+ * Resolve a memory `idOrPath` slice from a URL pathname. UUIDs never contain
+ * `/`, so an interior `/` reliably marks a path lookup. oauth2-proxy v7
+ * decodes `%2F` → `/` upstream and Caddy collapses `//` → `/`, so the leading
+ * `/` of a path-style lookup is stripped by the time we slice it off the URL.
+ * Re-add it so `findFolderByPath` / path-based document lookups still hit.
+ */
+function decodeMemoryIdOrPath(slice: string): string {
+  const decoded = decodeURIComponent(slice);
+  if (decoded.includes('/') && !decoded.startsWith('/')) return '/' + decoded;
+  return decoded;
+}
+
 function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname.startsWith('/admin/')) return 'admin';
   if (pathname === '/api/memory/search' || pathname === '/api/skills/search') return 'search';
@@ -466,11 +479,11 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, memoryRoutes.createFolder(memoryStore, body, cred));
       }
       if (pathname.startsWith('/api/memory/folders/') && method === 'GET') {
-        const idOrPath = decodeURIComponent(pathname.slice('/api/memory/folders/'.length));
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.getFolder(memoryStore, idOrPath, cred));
       }
       if (pathname.startsWith('/api/memory/folders/') && method === 'DELETE') {
-        const idOrPath = decodeURIComponent(pathname.slice('/api/memory/folders/'.length));
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/folders/'.length));
         return jsonResult(res, memoryRoutes.deleteFolder(memoryStore, idOrPath, cred));
       }
 
@@ -485,16 +498,16 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, memoryRoutes.createDocument(memoryStore, body, cred));
       }
       if (pathname.startsWith('/api/memory/documents/') && method === 'GET') {
-        const idOrPath = decodeURIComponent(pathname.slice('/api/memory/documents/'.length));
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/documents/'.length));
         return jsonResult(res, memoryRoutes.getDocument(memoryStore, idOrPath, cred));
       }
       if (pathname.startsWith('/api/memory/documents/') && (method === 'PATCH' || method === 'PUT')) {
-        const idOrPath = decodeURIComponent(pathname.slice('/api/memory/documents/'.length));
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/documents/'.length));
         const body = await parseJsonBody(req);
         return jsonResult(res, memoryRoutes.updateDocument(memoryStore, idOrPath, body, cred));
       }
       if (pathname.startsWith('/api/memory/documents/') && method === 'DELETE') {
-        const idOrPath = decodeURIComponent(pathname.slice('/api/memory/documents/'.length));
+        const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/documents/'.length));
         return jsonResult(res, memoryRoutes.deleteDocument(memoryStore, idOrPath, cred));
       }
 
