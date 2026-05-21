@@ -150,6 +150,12 @@ describe('E2E flow', () => {
     expect(folderStripped.status).toBe(200);
     expect(folderStripped.body.path).toBe('/shared/cjk-zone');
 
+    // Top-level folder: leading slash stripped AND no interior slash → must
+    // still resolve as a path, not be mistaken for a UUID id.
+    const topFolder = await call(baseUrl, 'GET', '/api/memory/folders/shared', adminToken);
+    expect(topFolder.status).toBe(200);
+    expect(topFolder.body.path).toBe('/shared');
+
     // CJK: single-encoded per segment, leading slash stripped → still resolves.
     const cjkEncoded = encodeURIComponent('技术文档');
     const cjkFolder = await call(baseUrl, 'GET', `/api/memory/folders/shared/cjk-zone/${cjkEncoded}`, adminToken);

@@ -239,10 +239,18 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
  * `/` of a path-style lookup is stripped by the time we slice it off the URL.
  * Re-add it so `findFolderByPath` / path-based document lookups still hit.
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 function decodeMemoryIdOrPath(slice: string): string {
   const decoded = decodeURIComponent(slice);
-  if (decoded.includes('/') && !decoded.startsWith('/')) return '/' + decoded;
-  return decoded;
+  if (decoded.startsWith('/')) return decoded;
+  // The browser cookie path (oauth2-proxy/Caddy) collapses the `//` boundary
+  // between the route prefix and a slash-prefixed path, stripping the path's
+  // leading slash. A genuine UUID id has no slash either, so we can't branch
+  // on "contains a slash" — a top-level folder like `shared` would be missed.
+  // Disambiguate by shape: anything not UUID-shaped is a path missing its `/`.
+  if (UUID_RE.test(decoded)) return decoded;
+  return '/' + decoded;
 }
 
 function deriveOp(method: string, pathname: string): AuditOp | string {
