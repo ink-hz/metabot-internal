@@ -241,16 +241,57 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
  */
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function decodeMemoryIdOrPath(slice: string): string {
-  const decoded = decodeURIComponent(slice);
-  if (decoded.startsWith('/')) return decoded;
+/**
+ * Decode a URL slice into either a memory UUID or a logical `/`-prefixed path.
+ *
+ * We loop `decodeURIComponent` until the value stops changing (cap 5
+ * iterations) instead of a single decode pass.
+ *
+ * Why decode-until-stable: the cookie-auth request path traverses
+ * Caddy + oauth2-proxy v7, which re-encodes already-percent-encoded bytes
+ * (`%XX` → `%25XX`) on every hop because oauth2-proxy reads `URL.Path`
+ * instead of `URL.RawPath` before forwarding. CJK segments like
+ * `%E6%8A%80%E6%9C%AF%E6%96%87%E6%A1%A3` arrive at this server as
+ * `%25E6%258A%2580%25E6%259C%25AF%25E6%2596%2587%25E6%25A1%25A3`, so a
+ * single `decodeURIComponent` peels just one of two layers and the resulting
+ * string never matches the stored path. The Bearer-bypass route in Caddy
+ * (`@bearer`) is unaffected because it routes verbatim through
+ * `httputil.ReverseProxy` and skips oauth2-proxy entirely. MR !17 fixed the
+ * pchar-literal case (`@`, sub-delims) by sending literal bytes the proxy
+ * can't mangle, but CJK has no literal-alternative encoding, so we must
+ * normalize on the server.
+ *
+ * This is lossless: memory paths never contain a literal `%` (slug
+ * normalization strips it; emails don't include it; CJK is non-ASCII), and
+ * the proxy chain is monotonic (only ever adds `%25`, never removes), so
+ * iterating to a fixed point converges to the canonical logical path. Mirrors
+ * the client-side `fullyDecodeSegment` shipped in MR !16
+ * (`packages/web-ui/src/routes/memory-path.tsx`), applied symmetrically here.
+ *
+ * Malformed `%`-sequences (e.g. `%ZZ`) make `decodeURIComponent` throw; we
+ * trap and return the last valid value so a hand-crafted URL can't 500.
+ */
+export function decodeMemoryIdOrPath(slice: string): string {
+  let current = slice;
+  for (let i = 0; i < 5; i++) {
+    let next: string;
+    try {
+      next = decodeURIComponent(current);
+    } catch {
+      // Malformed percent-encoding — stick with the last decodable value.
+      break;
+    }
+    if (next === current) break;
+    current = next;
+  }
+  if (current.startsWith('/')) return current;
   // The browser cookie path (oauth2-proxy/Caddy) collapses the `//` boundary
   // between the route prefix and a slash-prefixed path, stripping the path's
   // leading slash. A genuine UUID id has no slash either, so we can't branch
   // on "contains a slash" — a top-level folder like `shared` would be missed.
   // Disambiguate by shape: anything not UUID-shaped is a path missing its `/`.
-  if (UUID_RE.test(decoded)) return decoded;
-  return '/' + decoded;
+  if (UUID_RE.test(current)) return current;
+  return '/' + current;
 }
 
 function deriveOp(method: string, pathname: string): AuditOp | string {
