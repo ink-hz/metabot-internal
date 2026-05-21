@@ -252,11 +252,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 // `/` separators remain literal — single-segment encodeURIComponent would
 // emit `%2F`, which oauth2-proxy v7 silently decodes back to `/` upstream,
 // stripping the leading `/` and turning the lookup into an id-miss.
+//
+// `encodePathSegment` then un-encodes characters that are RFC-3986-safe in
+// path segments (pchar sub-delims + `@` + `:`). The cookie-auth chain
+// (Caddy → oauth2-proxy v7 → backend) re-encodes every `%XX` it sees to
+// `%25XX` (Caddy sends pre-escaped Path without RawPath; downstream
+// re-escapes the literal `%`). Audit-log evidence: only `%25` ever reaches
+// the backend over cookie auth, no other `%XX`. Sending literal `@` for
+// emails dodges the mangle entirely; Bearer-bypass path is unaffected.
+function encodePathSegment(seg: string): string {
+  return encodeURIComponent(seg)
+    .replace(/%40/g, '@')
+    .replace(/%3A/g, ':')
+    .replace(/%24/g, '$')
+    .replace(/%26/g, '&')
+    .replace(/%2B/g, '+')
+    .replace(/%2C/g, ',')
+    .replace(/%3B/g, ';')
+    .replace(/%3D/g, '=')
+    .replace(/%21/g, '!')
+    .replace(/%27/g, "'")
+    .replace(/%28/g, '(')
+    .replace(/%29/g, ')')
+    .replace(/%2A/g, '*');
+}
+
 function encodeIdOrPath(idOrPath: string): string {
   if (idOrPath.includes('/')) {
-    return idOrPath.split('/').map(encodeURIComponent).join('/');
+    return idOrPath.split('/').map(encodePathSegment).join('/');
   }
-  return encodeURIComponent(idOrPath);
+  return encodePathSegment(idOrPath);
 }
 
 export const api = {
