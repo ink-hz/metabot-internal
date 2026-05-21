@@ -19,10 +19,13 @@ export function MemoryPath() {
   // react-router-dom returns the URL-encoded pathname, so CJK segments arrive
   // as `%XX` sequences. Decode each segment before handing the path to api.*,
   // which re-encodes via encodeIdOrPath — double-encoding would produce
-  // `%25XX` upstream and miss the SQLite lookup.
+  // `%25XX` upstream and miss the SQLite lookup. Decode-until-stable per
+  // segment self-heals address-bar values stuck at `%2540` (over-encoded `@`)
+  // left over from earlier broken roundtrips; memory paths never contain a
+  // literal `%`, so iterating is safe.
   const raw = loc.pathname.replace(/^\/memory/, '');
   const path = raw
-    ? raw.split('/').map((seg) => (seg ? decodeURIComponent(seg) : seg)).join('/') || '/'
+    ? raw.split('/').map((seg) => (seg ? fullyDecodeSegment(seg) : seg)).join('/') || '/'
     : '/';
 
   const [view, setView] = useState<View>({ kind: 'loading' });
@@ -49,6 +52,18 @@ export function MemoryPath() {
       </div>
     </div>
   );
+}
+
+function fullyDecodeSegment(seg: string): string {
+  let cur = seg;
+  for (let i = 0; i < 5; i++) {
+    let next: string;
+    try { next = decodeURIComponent(cur); }
+    catch { return cur; }
+    if (next === cur) return cur;
+    cur = next;
+  }
+  return cur;
 }
 
 async function resolve(path: string): Promise<View> {
