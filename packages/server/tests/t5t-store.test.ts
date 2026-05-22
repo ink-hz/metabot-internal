@@ -340,6 +340,29 @@ describe('T5tStore — append-only invariant', () => {
     expect(projects[0].name).toBe('v3');
   });
 
+  it('killProject appends a status=killed doc preserving prior fields; idempotent', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({
+      slug: 'doomed', name: 'Doomed', leaderEmail: 'ameng@xvi',
+      allowedUsers: ['bob@xvi'], status: 'yellow',
+      killCriteria: 'sunset if no users by Q3',
+    }, cred);
+    const killed = store.killProject('doomed', cred);
+    expect(killed.status).toBe('killed');
+    expect(killed.name).toBe('Doomed');
+    expect(killed.leaderEmail).toBe('ameng@xvi');
+    expect(killed.allowedUsers).toEqual(['bob@xvi']);
+    expect(killed.killCriteria).toBe('sunset if no users by Q3');
+    // Idempotent — a second call still returns a killed summary.
+    const again = store.killProject('doomed', cred);
+    expect(again.status).toBe('killed');
+  });
+
+  it('killProject throws 404 when slug is unknown', () => {
+    const cred = mkCred('ameng');
+    expect(() => store.killProject('no-such-thing', cred)).toThrow(/project_not_found/);
+  });
+
   it('recentEntries respects limit and orders newest-first', async () => {
     const cred = mkCred('motion');
     store.appendProject({ slug: 'p' }, cred);

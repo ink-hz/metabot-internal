@@ -330,4 +330,10 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+  killT5tProject: (slug: string) =>
+    request<ProjectSummary>(`/api/t5t/projects/${encodeURIComponent(slug)}/kill`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    }),
 };

@@ -229,6 +229,13 @@ function isWebReadableRoute(method: string, pathname: string): boolean {
 function isWebWritableRoute(method: string, pathname: string): boolean {
   if (method === 'POST' && pathname === '/api/t5t/feedback') return true;
   if (method === 'POST' && pathname === '/api/web/issue-token') return true;
+  // Project kill (soft-kill via append-only doc) — owner-auth enforced at the
+  // route layer. Matches the shape `POST /api/t5t/projects/:slug/kill`.
+  if (
+    method === 'POST'
+    && pathname.startsWith('/api/t5t/projects/')
+    && pathname.endsWith('/kill')
+  ) return true;
   return false;
 }
 
@@ -312,6 +319,12 @@ function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname === '/api/t5t/cli/evaluator' && method === 'POST') return 'evaluator';
   if (pathname === '/api/t5t/cli/bottleneck' && method === 'POST') return 'bottleneck';
   if (pathname === '/api/t5t/cli/wip' && method === 'POST') return 'wip';
+  if (pathname === '/api/t5t/cli/kill' && method === 'POST') return 'kill';
+  if (
+    method === 'POST'
+    && pathname.startsWith('/api/t5t/projects/')
+    && pathname.endsWith('/kill')
+  ) return 'kill';
   if (pathname === '/api/t5t/board' && method === 'GET') return 'list';
   if (pathname.startsWith('/api/t5t/projects/') && method === 'GET') return 'get';
   if (pathname === '/api/web/issue-token' && method === 'POST') return 'issue';
@@ -619,6 +632,13 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/t5t/board' && method === 'GET') {
         return jsonResult(res, t5tRoutes.getBoard(t5tStore, cred));
       }
+      // Specific project subresource — kill must precede the generic
+      // `/api/t5t/projects/:slug` GET below.
+      const killMatch = pathname.match(/^\/api\/t5t\/projects\/(.+)\/kill$/);
+      if (killMatch && method === 'POST') {
+        const slug = decodeURIComponent(killMatch[1]);
+        return jsonResult(res, t5tRoutes.postKillProject(t5tStore, slug, cred));
+      }
       if (pathname.startsWith('/api/t5t/projects/') && method === 'GET') {
         const slug = decodeURIComponent(pathname.slice('/api/t5t/projects/'.length));
         return jsonResult(res, t5tRoutes.getProject(t5tStore, slug, cred));
@@ -651,6 +671,10 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/t5t/cli/wip' && method === 'POST') {
         const body = await parseJsonBody(req);
         return jsonResult(res, t5tRoutes.postCliWip(t5tStore, body, cred));
+      }
+      if (pathname === '/api/t5t/cli/kill' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, t5tRoutes.postCliKill(t5tStore, body, cred));
       }
       if (pathname === '/api/t5t/cli/feedback' && method === 'POST') {
         const body = await parseJsonBody(req);

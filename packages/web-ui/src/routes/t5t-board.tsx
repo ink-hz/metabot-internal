@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError, type BoardResponse } from '../lib/api';
 import { formatRelative } from '../lib/format';
@@ -9,6 +9,7 @@ import { T5TTimeline } from '../components/t5t/T5TTimeline';
 export function T5tBoard() {
   const [board, setBoard] = useState<BoardResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [showKilled, setShowKilled] = useState(false);
 
   useEffect(() => {
     let live = true;
@@ -20,6 +21,18 @@ export function T5tBoard() {
       });
     return () => { live = false; };
   }, []);
+
+  const visibleProjects = useMemo(() => {
+    if (!board) return [];
+    return showKilled
+      ? board.projects
+      : board.projects.filter((p) => p.status !== 'killed');
+  }, [board, showKilled]);
+
+  const killedCount = useMemo(() => {
+    if (!board) return 0;
+    return board.projects.filter((p) => p.status === 'killed').length;
+  }, [board]);
 
   return (
     <div className="main">
@@ -55,16 +68,35 @@ export function T5tBoard() {
 
             <div className="section">
               <h2>
-                projects <span className="count">{board.projects.length}</span>
+                projects <span className="count">{visibleProjects.length}</span>
+                {killedCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowKilled((v) => !v)}
+                    style={{
+                      marginLeft: 12,
+                      fontSize: 11,
+                      background: 'transparent',
+                      color: 'var(--bone-300)',
+                      border: '1px solid var(--bone-700, #444)',
+                      borderRadius: 3,
+                      padding: '2px 8px',
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {showKilled ? `hide killed (${killedCount})` : `show killed (${killedCount})`}
+                  </button>
+                )}
               </h2>
-              {board.projects.length === 0 ? (
+              {visibleProjects.length === 0 ? (
                 <div className="t5t-card muted">尚无项目</div>
               ) : (
-                board.projects.map((p) => (
+                visibleProjects.map((p) => (
                   <Link
                     key={p.slug}
                     to={`/t5t/${encodeURIComponent(p.slug)}`}
                     className="t5t-proj"
+                    style={p.status === 'killed' ? { opacity: 0.55 } : undefined}
                   >
                     <span className="title">
                       {p.name || p.slug}

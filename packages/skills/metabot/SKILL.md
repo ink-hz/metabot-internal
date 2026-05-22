@@ -127,6 +127,7 @@ metabot t5t evaluator <project> add|remove <email>
 metabot t5t bottleneck <project> "<text>"      # owner-only ; pass --clear to remove
 metabot t5t wip <project> <evaluatorId> "<title>"
                                                # owner-only
+metabot t5t kill <project>                     # owner-only ; soft-kill (append-only status=killed)
 ```
 
 **Routes.** Every subcommand calls `/api/t5t/cli/*` (Bearer-only; web identity is excluded by the server). See `packages/server/src/t5t/t5t-routes.ts` for the exact shapes.

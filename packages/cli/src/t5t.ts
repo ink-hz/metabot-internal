@@ -45,6 +45,7 @@ Subcommands:
   evaluator <project> add|remove <email>         Manage project evaluators             (owner-auth)
   bottleneck <project> "<text>"                  Set the current bottleneck            (owner-auth)
   wip <project> <evaluatorId> "<title>"          Add a WIP item under an evaluator col (owner-auth)
+  kill <project>                                 Mark a project as killed              (owner-auth)
 
 Env:
   METABOT_CORE_URL    metabot-core base URL (default https://metabot-core.xvirobotics.com)
@@ -165,6 +166,13 @@ async function cmdBottleneck(client: T5tClient, args: string[]): Promise<void> {
   print(resp);
 }
 
+async function cmdKill(client: T5tClient, args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const project = need('<project>', positional[0]);
+  const resp = await client.post('/api/t5t/cli/kill', { project });
+  print(resp);
+}
+
 async function cmdWip(client: T5tClient, args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const project = need('<project>', positional[0]);
@@ -212,6 +220,8 @@ export async function run(argv: string[]): Promise<void> {
       return cmdBottleneck(client, rest);
     case 'wip':
       return cmdWip(client, rest);
+    case 'kill':
+      return cmdKill(client, rest);
     default:
       process.stderr.write(`metabot t5t: unknown subcommand '${sub}'\n\n`);
       process.stdout.write(usage());

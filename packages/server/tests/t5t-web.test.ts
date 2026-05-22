@@ -177,6 +177,55 @@ describe('t5t web routes — MR2', () => {
     expect(body.project.allowedUsers).toEqual([]);
   });
 
+  it('POST /api/t5t/projects/:slug/kill as web-identity leader → 200 status=killed', async () => {
+    kit = await startTestServer('t5t-kill-web-leader', { uiAllowedEmails: [WEB_EMAIL] });
+    seedProject(kit, {
+      slug: 'web-doomed',
+      name: 'Web Doomed',
+      leaderEmail: WEB_EMAIL,
+      entryItems: ['final entry'],
+    });
+    const res = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/projects/web-doomed/kill',
+      { 'X-Forwarded-Email': WEB_EMAIL, 'Content-Type': 'application/json' },
+      '{}',
+    );
+    expect(res.status).toBe(200);
+    const body = JSON.parse(res.body);
+    expect(body.status).toBe('killed');
+    expect(body.slug).toBe('web-doomed');
+
+    // Detail surfaces the killed state.
+    const detail = await rawRequest(kit.port, 'GET', '/api/t5t/projects/web-doomed', {
+      'X-Forwarded-Email': WEB_EMAIL,
+    });
+    expect(detail.status).toBe(200);
+    expect(JSON.parse(detail.body).project.status).toBe('killed');
+  });
+
+  it('POST /api/t5t/projects/:slug/kill as non-leader web-identity → 403', async () => {
+    const intruderEmail = 'intruder@xvirobotics.com';
+    kit = await startTestServer('t5t-kill-web-403', {
+      uiAllowedEmails: [WEB_EMAIL, intruderEmail],
+    });
+    seedProject(kit, {
+      slug: 'web-protected',
+      leaderEmail: WEB_EMAIL,
+      entryItems: ['x'],
+    });
+    const res = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/t5t/projects/web-protected/kill',
+      { 'X-Forwarded-Email': intruderEmail, 'Content-Type': 'application/json' },
+      '{}',
+    );
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body).error).toBe('owner_required');
+  });
+
   it('anomaly classification: project that has never been pushed shows in anomalies[] with reason:stale', async () => {
     kit = await startTestServer('t5t-stale', { uiAllowedEmails: [WEB_EMAIL] });
     const store = kit.handle.t5tStore;
