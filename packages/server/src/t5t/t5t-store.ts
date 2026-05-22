@@ -262,6 +262,29 @@ export class T5tStore {
     return this.getProject(input.slug)!;
   }
 
+  /**
+   * Mark a project as killed by appending a NEW project doc with
+   * `status='killed'`, preserving all other fields. Append-only: the prior
+   * doc stays for audit; latest-doc-wins surfaces the killed state at read.
+   * Owner-auth is enforced at the route layer (`ownerGate`). Idempotent —
+   * calling again on an already-killed project just appends another doc.
+   */
+  killProject(slug: string, cred: Credential): ProjectSummary {
+    const cur = this.getProject(slug);
+    if (!cur) throw httpErr(404, 'project_not_found');
+    return this.appendProject(
+      {
+        slug: cur.slug,
+        name: cur.name,
+        leaderEmail: cur.leaderEmail,
+        allowedUsers: cur.allowedUsers,
+        status: 'killed',
+        killCriteria: cur.killCriteria,
+      },
+      cred,
+    );
+  }
+
   // ---- read: goals ----
 
   getLatestGoal(slug: string): Goal | null {

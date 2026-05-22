@@ -14,6 +14,7 @@ export function T5tProject() {
   const { slug = '' } = useParams();
   const [detail, setDetail] = useState<ProjectDetailResponse | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [killing, setKilling] = useState(false);
 
   const load = useCallback((live: () => boolean) => {
     api.getT5tProject(slug)
@@ -39,6 +40,24 @@ export function T5tProject() {
   const refresh = useCallback(() => {
     load(() => true);
   }, [load]);
+
+  const onKill = useCallback(async () => {
+    if (!detail) return;
+    const projectName = detail.project.name || detail.project.slug;
+    if (!window.confirm(`Kill project "${projectName}"? Status will be set to killed (append-only; old docs preserved).`)) {
+      return;
+    }
+    setKilling(true);
+    try {
+      await api.killT5tProject(detail.project.slug);
+      refresh();
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) return;
+      window.alert(e instanceof Error ? e.message : 'kill failed');
+    } finally {
+      setKilling(false);
+    }
+  }, [detail, refresh]);
 
   return (
     <div className="main">
@@ -87,6 +106,25 @@ export function T5tProject() {
               </span>
               {detail.project.killCriteria && (
                 <span>kill · {detail.project.killCriteria}</span>
+              )}
+              {detail.project.status !== 'killed' && (
+                <button
+                  type="button"
+                  onClick={onKill}
+                  disabled={killing}
+                  style={{
+                    marginLeft: 'auto',
+                    fontSize: 11,
+                    background: 'transparent',
+                    color: 'var(--bone-300)',
+                    border: '1px solid var(--bone-700, #444)',
+                    borderRadius: 3,
+                    padding: '3px 10px',
+                    cursor: killing ? 'wait' : 'pointer',
+                  }}
+                >
+                  {killing ? 'killing…' : 'kill project'}
+                </button>
               )}
             </div>
 

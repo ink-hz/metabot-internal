@@ -104,6 +104,39 @@ export function getProject(
 }
 
 /**
+ * POST /api/t5t/projects/:slug/kill (web)  and  POST /api/t5t/cli/kill (CLI)
+ *   — append a new project doc with `status='killed'`. Owner-auth required
+ * (project leader, allowedUsers, or admin). Append-only: prior project docs
+ * stay intact; latest-doc-wins surfaces the killed state. Idempotent.
+ *
+ * Web shape takes `slug` from the URL; CLI shape takes `project` from the
+ * body. Both converge on `store.killProject(slug, cred)`.
+ */
+export function postKillProject(
+  store: T5tStore,
+  slug: string,
+  cred: Credential,
+): RouteResult {
+  const decoded = (slug || '').trim();
+  if (!decoded) return err(400, 'slug_required');
+  const gate = ownerGate(store, decoded, cred);
+  if (gate) return gate;
+  return guarded(() => store.killProject(decoded, cred));
+}
+
+export function postCliKill(
+  store: T5tStore,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  const project = typeof body.project === 'string' ? body.project.trim() : '';
+  if (!project) return err(400, 'project_required');
+  const gate = ownerGate(store, project, cred);
+  if (gate) return gate;
+  return guarded(() => store.killProject(project, cred));
+}
+
+/**
  * POST /api/t5t/feedback — append a feedback comment under an entry. The
  * `author`/`from` field is ALWAYS stamped server-side from `cred.botName`;
  * any client-supplied `author` / `from` in the body is ignored. This mirrors

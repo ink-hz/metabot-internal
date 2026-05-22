@@ -181,6 +181,29 @@ describe('metabot t5t — argv parsing + dispatch', () => {
     await expect(mod.run(['goal', 'slug', 'be excellent'])).rejects.toThrow(/403.*owner_required/);
   });
 
+  it('kill <project> posts {project} to /api/t5t/cli/kill', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    process.env.METABOT_CORE_URL = 'https://example.test/core';
+    const fetchMock = mockOk({ slug: 'doomed', status: 'killed' });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['kill', 'doomed']);
+
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).toBe('https://example.test/core/api/t5t/cli/kill');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ project: 'doomed' });
+  });
+
+  it('kill without <project> throws clean error', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    vi.stubGlobal('fetch', mockOk({}));
+    const mod = await importFresh();
+    await expect(mod.run(['kill'])).rejects.toThrow(/<project> required/);
+  });
+
   it('projects show <slug> hits /api/t5t/cli/project/:slug', async () => {
     process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
     process.env.METABOT_CORE_URL = 'https://example.test/core';

@@ -181,6 +181,54 @@ describe('t5t CLI routes — MR3', () => {
     }
   });
 
+  it('POST /cli/kill as leader → 200, project surfaces status=killed; non-leader → 403', async () => {
+    kit = await startTestServer('t5t-cli-kill');
+    const leader = 'killer@xvirobotics.com';
+    const token = await issueMember(kit, leader);
+    kit.handle.t5tStore.appendProject(
+      { slug: 'doomed', name: 'Doomed', leaderEmail: leader, status: 'yellow' },
+      { botName: 'seed', role: 'admin' } as never,
+    );
+
+    // Non-leader cannot kill.
+    const intruderToken = await issueMember(kit, 'intruder@xvirobotics.com');
+    const denied = await call(kit.baseUrl, 'POST', '/api/t5t/cli/kill', intruderToken, {
+      project: 'doomed',
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('owner_required');
+
+    // Leader can kill.
+    const ok = await call(kit.baseUrl, 'POST', '/api/t5t/cli/kill', token, {
+      project: 'doomed',
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe('killed');
+
+    // Detail surfaces the killed status.
+    const detail = await call(kit.baseUrl, 'GET', '/api/t5t/cli/project/doomed', token);
+    expect(detail.status).toBe(200);
+    expect(detail.body.project.status).toBe('killed');
+  });
+
+  it('POST /cli/kill on unknown project → 404 project_not_found', async () => {
+    kit = await startTestServer('t5t-cli-kill-404');
+    const token = await issueMember(kit, 'whoever@xvirobotics.com');
+    const res = await call(kit.baseUrl, 'POST', '/api/t5t/cli/kill', token, {
+      project: 'no-such-thing',
+    });
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('project_not_found');
+  });
+
+  it('POST /cli/kill missing body.project → 400 project_required', async () => {
+    kit = await startTestServer('t5t-cli-kill-validation');
+    const token = await issueMember(kit, 'whoever@xvirobotics.com');
+    const res = await call(kit.baseUrl, 'POST', '/api/t5t/cli/kill', token, {});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('project_required');
+  });
+
   it('contract validation: missing required field → 400 before any store write', async () => {
     kit = await startTestServer('t5t-cli-validation');
     const token = await issueMember(kit, 'val@xvirobotics.com');

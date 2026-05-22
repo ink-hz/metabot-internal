@@ -22,6 +22,7 @@ export type AuditOp =
   | 'evaluator'
   | 'bottleneck'
   | 'wip'
+  | 'kill'
   | 'issue'
   | 'whoami';
 
