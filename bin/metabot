@@ -85,13 +85,12 @@ cmd_update() {
   npm run build
 
   # Update CLI tools in ~/.local/bin.
-  # `mb` is the bridge inter-bot API shortcut; `metabot` is the dual
-  # dispatcher (bridge process control + delegate to metabot-core feature CLI).
-  # `mm`/`mh`/`mbcore` are Phase-4 legacy and stay removed.
+  # `metabot` is the sole dispatcher (bridge process control + delegate to
+  # metabot-core feature CLI). `mb`/`mm`/`mh`/`mbcore` are legacy and stay removed.
   LOCAL_BIN="$HOME/.local/bin"
   if [[ -d "$LOCAL_BIN" ]]; then
     info "Updating CLI tools..."
-    for cli in mb metabot; do
+    for cli in metabot; do
       local src="$METABOT_HOME/bin/$cli"
       local dst="$LOCAL_BIN/$cli"
       if [[ -f "$src" ]]; then
@@ -105,7 +104,7 @@ cmd_update() {
       fi
     done
     # Clean up legacy CLIs (Phase 4 consolidation + temp shims).
-    for legacy_cli in mm mh mbcore fd; do
+    for legacy_cli in mb mm mh mbcore fd; do
       if [[ -f "$LOCAL_BIN/$legacy_cli" || -L "$LOCAL_BIN/$legacy_cli" ]]; then
         rm -f "$LOCAL_BIN/$legacy_cli"
       fi

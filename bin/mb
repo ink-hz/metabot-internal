@@ -1,6 +1,0 @@
-#!/usr/bin/env bash
-# mb — DEPRECATED. Use `metabot <command>` instead. Forwards for now; removed in a future release.
-set -euo pipefail
-sub="${1:-help}"
-echo "[mb] 'mb' is deprecated — use 'metabot ${sub}' instead." >&2
-exec metabot "$@"

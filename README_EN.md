@@ -152,7 +152,7 @@ As of 2026-05-19, MetaBot absorbed `metabot-core` into a single npm-workspaces m
 ```
 metabot/                       # repo root — bridge runtime (bot hosts run this under PM2)
 ├── src/                       # bridge engine, stream processing, Feishu/Telegram/WeChat bridges
-├── bin/                       # CLI (metabot single entrypoint / mb deprecation shim / doubao-tts)
+├── bin/                       # CLI (metabot single entrypoint / doubao-tts)
 ├── web/                       # bridge's own browser SPA
 ├── packages/                  # absorbed metabot-core
 │   ├── server/                # central HTTP backend (ECS deploy unit)
@@ -497,7 +497,7 @@ MetaBot runs Claude Code in `bypassPermissions` mode — no interactive approval
 <details>
 <summary><strong>CLI Tools</strong></summary>
 
-The installer places `metabot` in `~/.local/bin/` — available immediately. `metabot` is the **single CLI binary** with three command categories: (1) bridge process control (`update` / `start` / `stop` / `restart` / `logs` / `status`); (2) bridge daemon API (`bots` / `talk` / `schedule` / `peers` / `stats` / `voice` / `health`, which curl the local bridge at `localhost:9100`); (3) everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mb` command is now a thin deprecation wrapper that forwards to `metabot`; the `mm` / `mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles were removed in Phase 4.
+The installer places `metabot` in `~/.local/bin/` — available immediately. `metabot` is the **single CLI binary** with three command categories: (1) bridge process control (`update` / `start` / `stop` / `restart` / `logs` / `status`); (2) bridge daemon API (`bots` / `talk` / `schedule` / `peers` / `stats` / `voice` / `health`, which curl the local bridge at `localhost:9100`); (3) everything else (`t5t` / `agents` / `memory` / `skills`) forwards to the metabot-core feature CLI shipped in this monorepo at `packages/cli/bin/metabot`. The legacy `mb`/`mm`/`mh` CLIs and the standalone `metamemory` / `skill-hub` skill bundles have all been removed; install/update actively cleans up any leftover binaries in `~/.local/bin/`.
 
 ```bash
 # 1. MetaBot process management (handled in-script by bin/metabot)

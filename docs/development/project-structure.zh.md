@@ -45,7 +45,6 @@ metabot/
 │       └── logger.ts               # 日志
 ├── bin/
 │   ├── metabot                     # 唯一 CLI 入口（进程控制 + bridge API + core 转发）
-│   ├── mb                          # 弃用兼容壳 —— 转发到 metabot
 │   └── doubao-tts                  # 豆包 TTS CLI
 ├── web/                            # Web UI 源码（React + Vite）
 │   ├── src/

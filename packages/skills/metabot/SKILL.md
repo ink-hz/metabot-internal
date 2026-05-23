@@ -191,24 +191,24 @@ surface above.
 
 ## Migration from `mm` / `mh` / `mb`
 
-P4-MR4 removed the standalone `mm` and `mh` bins. `mb` is **not** removed — it
-is now a thin deprecation wrapper that forwards to `metabot` (so old `mb`
-scripts keep working, with a stderr notice). Update any script or muscle-memory
-call site to the unified form:
+The legacy `mm`, `mh`, and `mb` bins have all been removed. Install and
+`metabot update` actively delete any leftover binaries from `~/.local/bin/`,
+so old scripts will now hit `command not found`. Update every call site to
+the unified form:
 
 | Old | New (canonical) |
 |---|---|
-| `mm <cmd>` (removed) | `metabot memory <cmd>` |
-| `mh <cmd>` (removed) | `metabot skills <cmd>` |
-| `mb skills <cmd>` (wrapper, was → `bot-skills`) | `metabot skills <cmd>` (central Skill Hub) |
-| `mb talk <bot> <chatId> "<msg>"` (wrapper) | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`) |
-| `mb bots / schedule / voice / stats / peers / metrics / health` (wrapper) | `metabot <same subcommand>` |
+| `mm <cmd>` | `metabot memory <cmd>` |
+| `mh <cmd>` | `metabot skills <cmd>` |
+| `mb skills <cmd>` (was → `bot-skills`) | `metabot skills <cmd>` (central Skill Hub) |
+| `mb talk <bot> <chatId> "<msg>"` | `metabot talk <bot> <chatId> "<msg>"` (bridge `/api/talk`) |
+| `mb bots / schedule / voice / stats / peers / metrics / health` | `metabot <same subcommand>` |
 | (n/a) | `metabot agents talk <peer>[/<bot>] <chatId> "<msg>"` (central-registry P2P variant) |
 | (n/a) | `metabot agents list / register / heartbeat / visible / hide` (new in the agent-bus batch) |
 | (n/a) | `metabot t5t <cmd>` (new in T5T MR5) |
 
-The wire calls are identical — only the executable name changed. If `command -v
-mm` (or `mh`) still resolves on your machine, you have a stale install from
-before P4-MR4; reinstall via the metabot skill / your dotfiles bootstrap.
+The wire calls are identical — only the executable name changed. If
+`command -v mm`, `mh`, or `mb` still resolves on your machine, run a fresh
+`metabot update` (or `install.sh`) to scrub the stragglers.
 
 The standalone `metamemory` and `skill-hub` skill bundles were never published in this fresh metabot-core arch; the unified `metabot` skill is the single skill bundle for the whole CLI surface.

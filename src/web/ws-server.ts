@@ -681,7 +681,7 @@ async function handleGroupChat(
 
   // Subscribe the client to the group chatId for receiving updates
   subscriptions.subscribe(chatId, ws);
-  // Subscribe to grouptalk chatIds so inter-bot mb talk calls are visible
+  // Subscribe to grouptalk chatIds so inter-bot metabot talk calls are visible
   for (const member of group.members) {
     subscriptions.subscribe(`grouptalk-${groupId}-${member}`, ws);
   }

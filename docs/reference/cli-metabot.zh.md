@@ -10,8 +10,9 @@
 
 MetaBot 安装器自动安装到 `~/.local/bin/metabot`。
 
-> 旧的 `mb` 命令现在是一个薄薄的弃用兼容壳，原样转发到 `metabot`（stderr 会
-> 打印弃用提示）。请将脚本更新为直接调用 `metabot`。
+> 旧的 `mb` / `mm` / `mh` CLI 已下线。安装与更新会主动删除 `~/.local/bin/`
+> 里的残留二进制；如果脚本里还有这些命令，会报 `command not found`，请
+> 改成 `metabot <子命令>`。
 
 ## 1. bridge 进程控制
 

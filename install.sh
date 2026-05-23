@@ -1023,13 +1023,12 @@ PYEOF
   success "Legacy mm() shortcut removed"
 fi
 
-# Install mb/metabot as standalone executables in ~/.local/bin (no source needed).
+# Install metabot as a standalone executable in ~/.local/bin (no source needed).
 # `metabot` is the single CLI binary (bridge process control + bridge daemon API
-# + delegation to the metabot-core feature CLI). `mb` is a thin deprecation
-# wrapper that forwards to `metabot`.
+# + delegation to the metabot-core feature CLI).
 LOCAL_BIN="$HOME/.local/bin"
 mkdir -p "$LOCAL_BIN"
-CLI_TOOLS="mb metabot"
+CLI_TOOLS="metabot"
 for cli in $CLI_TOOLS; do
   src="$METABOT_HOME/bin/$cli"
   dst="$LOCAL_BIN/$cli"
@@ -1044,9 +1043,10 @@ for cli in $CLI_TOOLS; do
     chmod +x "$dst"
   fi
 done
-# Clean up legacy CLIs: fd (old shortcut), mbcore (temp Phase 4 shim),
-# mm/mh (metabot-core feature CLIs subsumed by `metabot` dispatcher).
-for legacy_cli in fd mbcore mm mh; do
+# Clean up legacy CLIs: mb (deprecation shim, now removed), fd (old shortcut),
+# mbcore (temp Phase 4 shim), mm/mh (metabot-core feature CLIs subsumed by
+# `metabot` dispatcher).
+for legacy_cli in mb fd mbcore mm mh; do
   if [[ -f "$LOCAL_BIN/$legacy_cli" || -L "$LOCAL_BIN/$legacy_cli" ]]; then
     # Only remove regular files / symlinks living inside ~/.local/bin — never
     # touch system-installed binaries elsewhere on PATH.
@@ -1058,11 +1058,11 @@ if ! echo "$PATH" | grep -q "$LOCAL_BIN"; then
   echo "export PATH=\"$LOCAL_BIN:\$PATH\"" >> "$HOME/.bashrc"
   info "Added ~/.local/bin to PATH in ~/.bashrc"
 fi
-success "mb/metabot CLI tools installed to $LOCAL_BIN"
+success "metabot CLI installed to $LOCAL_BIN"
 
-# Persist METABOT_HOME for non-default install paths so the CLI tools
-# (mm/mb/metabot) can find the install in new shell sessions. The CLIs all
-# fall back to $HOME/metabot, so we only need to export when it differs.
+# Persist METABOT_HOME for non-default install paths so the CLI tool
+# (metabot) can find the install in new shell sessions. The CLI falls
+# back to $HOME/metabot, so we only need to export when it differs.
 if [[ "$METABOT_HOME" != "$DEFAULT_METABOT_HOME" ]]; then
   for rc_file in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
     [[ -f "$rc_file" ]] || continue

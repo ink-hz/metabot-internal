@@ -10,9 +10,10 @@
 
 Installed automatically by the MetaBot installer to `~/.local/bin/metabot`.
 
-> The legacy `mb` command is now a thin deprecation wrapper that forwards to
-> `metabot` verbatim (with a stderr deprecation notice). Update your scripts to
-> call `metabot` directly.
+> The legacy `mb` / `mm` / `mh` CLIs have been removed. Install and update
+> actively delete any leftover binaries from `~/.local/bin/`; if a script
+> still calls them you'll see `command not found` — switch the call to
+> `metabot <subcommand>`.
 
 ## 1. Bridge process control
 
