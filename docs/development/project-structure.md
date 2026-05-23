@@ -45,7 +45,6 @@ metabot/
 │       └── logger.ts               # Logging
 ├── bin/
 │   ├── metabot                     # Single CLI binary (process control + bridge API + core delegation)
-│   ├── mb                          # Deprecation wrapper — forwards to metabot
 │   └── doubao-tts                  # Doubao TTS CLI
 ├── web/                            # Web UI source (React + Vite)
 │   ├── src/

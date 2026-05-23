@@ -698,7 +698,7 @@ New-Item -ItemType Directory -Path $LocalBin -Force | Out-Null
 
 $HasBash = Test-Command "bash"
 
-$cliTools = @("mb", "metabot")
+$cliTools = @("metabot")
 if ($HasFeishu) { $cliTools += "fd" }
 
 if ($HasBash) {
@@ -713,13 +713,18 @@ if ($HasBash) {
             if ($ApiSecret) {
                 (Get-Content $scriptPath -Raw) -replace 'changeme', $ApiSecret | Set-Content $scriptPath -NoNewline
             }
-            if ($ApiPort -and $cli -eq "mb") {
-                (Get-Content $scriptPath -Raw) -replace '9100', $ApiPort | Set-Content $scriptPath -NoNewline
-            }
 
-            # Create .cmd wrapper: @bash "%~dp0mm" %*
+            # Create .cmd wrapper: @bash "%~dp0metabot" %*
             $cmdContent = "@bash `"%~dp0$cli`" %*"
             $cmdContent | Out-File -FilePath (Join-Path $LocalBin "$cli.cmd") -Encoding ascii -NoNewline
+        }
+    }
+
+    # Clean up legacy CLIs (mb deprecation shim + Phase 4 consolidation).
+    foreach ($legacy in @("mb", "mb.cmd", "mm", "mm.cmd", "mh", "mh.cmd", "mbcore", "mbcore.cmd")) {
+        $legacyPath = Join-Path $LocalBin $legacy
+        if (Test-Path $legacyPath) {
+            Remove-Item -Force $legacyPath
         }
     }
 
@@ -732,18 +737,18 @@ if ($HasBash) {
     }
 
     if ($HasFeishu) {
-        Write-Success "mm/mb/metabot/fd CLI tools installed to $LocalBin (with .cmd wrappers)"
+        Write-Success "metabot/fd CLI tools installed to $LocalBin (with .cmd wrappers)"
     } else {
-        Write-Success "mm/mb/metabot CLI tools installed to $LocalBin (with .cmd wrappers)"
+        Write-Success "metabot CLI installed to $LocalBin (with .cmd wrapper)"
     }
 } else {
-    Write-Warn "Git Bash not found. CLI tools (mm, mb, metabot) require bash."
+    Write-Warn "Git Bash not found. The metabot CLI requires bash."
     Write-Warn "Install Git for Windows (https://git-scm.com) to enable CLI tools."
 }
 
-# Persist METABOT_HOME for non-default install paths so the CLI tools
-# (mm/mb/metabot) can find the install in new shell sessions. The CLIs all
-# fall back to ~/metabot, so we only need to persist when it differs.
+# Persist METABOT_HOME for non-default install paths so the CLI tool
+# (metabot) can find the install in new shell sessions. The CLI falls
+# back to ~/metabot, so we only need to persist when it differs.
 if ($MetabotHome -ne $DefaultMetabotHome) {
     [System.Environment]::SetEnvironmentVariable("METABOT_HOME", $MetabotHome, "User")
     $env:METABOT_HOME = $MetabotHome

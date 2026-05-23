@@ -316,7 +316,7 @@ export class CodexExecutor {
         const others = apiContext.groupMembers.filter((m) => m !== apiContext.botName);
         if (apiContext.groupId) {
           sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
+            `## Group Chat\nYou are in a group chat (group: ${apiContext.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${apiContext.groupId}-<botName> "message"\``,
           );
         }
       }

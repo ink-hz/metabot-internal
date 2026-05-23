@@ -1,9 +1,9 @@
 /**
- * `metabot` — unified entry point. Sole CLI binary in v1; `mm` / `mh` / `mb`
- * bins were removed in P4-MR4 (CLI hard-consolidation). The implementations
- * still live in `@xvirobotics/metamemory` and `@xvirobotics/skill-hub` as
- * workspace libraries — `metabot memory` and `metabot skills` import their
- * `main(argv)` exports directly.
+ * `metabot` — unified entry point. Sole CLI binary; legacy `mm` / `mh` / `mb`
+ * bins have all been removed. The implementations still live in
+ * `@xvirobotics/metamemory` and `@xvirobotics/skill-hub` as workspace
+ * libraries — `metabot memory` and `metabot skills` import their `main(argv)`
+ * exports directly.
  *
  *   metabot memory <…>   → @xvirobotics/metamemory  (former `mm`)
  *   metabot skills <…>   → @xvirobotics/skill-hub   (former `mh`)

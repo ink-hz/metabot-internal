@@ -269,7 +269,7 @@ export class KimiExecutor {
         const groupId = apiContext.groupId;
         if (groupId) {
           sections.push(
-            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\``,
+            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${groupId}-<botName> "message"\``,
           );
         }
       }

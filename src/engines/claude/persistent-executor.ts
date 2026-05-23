@@ -380,11 +380,11 @@ export class PersistentClaudeExecutor extends EventEmitter {
         const others = ctx.groupMembers.filter((m) => m !== ctx.botName);
         if (ctx.groupId) {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat (group: ${ctx.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${ctx.groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${ctx.groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${ctx.groupId}-<botName> chatId pattern when talking to other bots in this group.`,
+            `## Group Chat\nYou are in a group chat (group: ${ctx.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${ctx.groupId}-<botName> "message"\`\nExample: \`metabot talk ${others[0]} grouptalk-${ctx.groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${ctx.groupId}-<botName> chatId pattern when talking to other bots in this group.`,
           );
         } else {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`mb talk <botName> <chatId> "message"\` to communicate with other bots in the group.`,
+            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`metabot talk <botName> <chatId> "message"\` to communicate with other bots in the group.`,
           );
         }
       }

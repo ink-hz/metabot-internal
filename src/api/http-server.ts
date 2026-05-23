@@ -159,10 +159,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // Auth check (exempt /web/, /api/files/).
     //
     // /api/talk and /api/tasks routes accept dual auth: the local secret
-    // (mb shortcut, local cross-bot dispatch) OR any Bearer that metabot-core
-    // `GET /api/whoami` validates (cross-bridge peer calls, `metabot agents
-    // talk` from any user with a metabot-core token). Every other API stays
-    // single-secret.
+    // (metabot CLI shortcut, local cross-bot dispatch) OR any Bearer that
+    // metabot-core `GET /api/whoami` validates (cross-bridge peer calls,
+    // `metabot talk` from any user with a metabot-core token). Every other
+    // API stays single-secret.
     if (secret && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const urlToken = url.includes('token=')
