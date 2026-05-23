@@ -55,15 +55,19 @@ const startTime = Date.now();
 const WHOAMI_VERIFY_TIMEOUT_MS = 5_000;
 
 /**
- * Is this a talk route? POST /api/talk + POST /api/tasks (deprecated alias)
- * + GET /api/talk/:taskId. The dual-auth gate (local secret OR metabot-core
- * /api/whoami verification) applies only to these routes — every other API
- * stays single-secret as before.
+ * Routes that accept the dual-auth gate: local secret OR a Bearer that
+ * metabot-core `/api/whoami` validates. Covers the cross-bridge RPC entry
+ * points (`/api/talk`, `/api/tasks`) plus the read-only peer-discovery
+ * endpoints that peer-manager polls — without these, peer state can never
+ * become healthy across hosts that don't share a local secret.
  */
-function isTalkRoute(method: string, url: string): boolean {
+export function isCrossVerifyRoute(method: string, url: string): boolean {
   if (method === 'POST' && (url === '/api/talk' || url.startsWith('/api/talk?'))) return true;
   if (method === 'POST' && (url === '/api/tasks' || url.startsWith('/api/tasks?'))) return true;
   if (method === 'GET' && url.startsWith('/api/talk/')) return true;
+  if (method === 'GET' && (url === '/api/bots' || url.startsWith('/api/bots?'))) return true;
+  if (method === 'GET' && (url === '/api/skills' || url.startsWith('/api/skills?'))) return true;
+  if (method === 'GET' && (url === '/api/peers' || url.startsWith('/api/peers?'))) return true;
   return false;
 }
 
@@ -167,7 +171,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
       const localOk = auth === `Bearer ${secret}` || urlToken === secret;
 
       if (!localOk) {
-        const canCrossVerify = isTalkRoute(method, url) && typeof auth === 'string' && /^Bearer\s+/i.test(auth);
+        const canCrossVerify = isCrossVerifyRoute(method, url) && typeof auth === 'string' && /^Bearer\s+/i.test(auth);
         if (!canCrossVerify) {
           jsonResponse(res, 401, { error: 'Unauthorized' });
           return;
