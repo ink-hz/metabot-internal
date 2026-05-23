@@ -9,8 +9,10 @@ function createLogger() {
 
 const REGISTRY_ENV_KEYS = [
   'METABOT_CORE_AGENT_BUS_URL',
+  'METABOT_CORE_URL',
   'METABOT_CORE_TOKEN',
   'METABOT_AGENT_SELF_URL',
+  'API_PORT',
 ] as const;
 
 function clearRegistryEnv() {
@@ -507,6 +509,153 @@ describe('PeerManager', () => {
         typeof c[1] === 'string' && c[1].includes('agent bus unreachable'),
       );
       expect(sawFallbackWarn).toBe(true);
+    });
+
+    it('enters registry mode via METABOT_CORE_URL fallback (when AGENT_BUS_URL unset)', async () => {
+      process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'fallback-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'fallback-bot' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      expect(bulkCall, 'expected POST /api/agents/bulk via METABOT_CORE_URL fallback').toBeDefined();
+      expect(bulkCall![0]).toBe('https://metabot.example.com/core/api/agents/bulk');
+    });
+
+    it('defaults SELF_URL to http://localhost:<API_PORT> when unset', async () => {
+      process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.API_PORT = '9123';
+      // METABOT_AGENT_SELF_URL deliberately unset.
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'localhost-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'localhost-bot' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      expect(bulkCall, 'expected POST /api/agents/bulk with defaulted SELF_URL').toBeDefined();
+      const body = JSON.parse((bulkCall![1] as RequestInit).body as string);
+      expect(body.bots[0].url).toBe('http://localhost:9123');
+    });
+
+    it('defaults SELF_URL to http://localhost:9100 when API_PORT also unset', async () => {
+      process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      // Both METABOT_AGENT_SELF_URL and API_PORT unset.
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'default-port-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'default-port-bot' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      expect(bulkCall, 'expected POST /api/agents/bulk with localhost:9100 default').toBeDefined();
+      const body = JSON.parse((bulkCall![1] as RequestInit).body as string);
+      expect(body.bots[0].url).toBe('http://localhost:9100');
+    });
+
+    it('METABOT_CORE_AGENT_BUS_URL wins over METABOT_CORE_URL (precedence preserved)', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://bus.example.com/core';
+      process.env.METABOT_CORE_URL = 'https://other.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'precedence-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'precedence-bot' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      expect(bulkCall, 'expected POST /api/agents/bulk against AGENT_BUS_URL').toBeDefined();
+      // AGENT_BUS_URL wins — call goes to bus.example.com, not other.example.com.
+      expect(bulkCall![0]).toBe('https://bus.example.com/core/api/agents/bulk');
+    });
+
+    it('explicit METABOT_AGENT_SELF_URL wins over the localhost default', async () => {
+      process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://explicit-self:9100';
+      process.env.API_PORT = '9123';
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({
+          registered: 1,
+          results: [{ botName: 'self-precedence-bot', status: 201 }],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'self-precedence-bot' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
+      );
+      expect(bulkCall, 'expected POST /api/agents/bulk with explicit SELF_URL').toBeDefined();
+      const body = JSON.parse((bulkCall![1] as RequestInit).body as string);
+      expect(body.bots[0].url).toBe('http://explicit-self:9100');
+    });
+
+    it('empty METABOT_CORE_URL after trim does not enable registry mode', async () => {
+      process.env.METABOT_CORE_URL = '   ';
+      // No other registry vars.
+
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ bots: [] }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [{ name: 'should-not-register' }], createLogger());
+      await new Promise((r) => setImmediate(r));
+
+      // No bulk-register call should have been made.
+      const bulkCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0].includes('/api/agents/bulk'),
+      );
+      expect(bulkCall).toBeUndefined();
     });
   });
 });
