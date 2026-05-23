@@ -76,7 +76,7 @@ export class PeerManager {
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private logger: Logger;
 
-  // Registry mode (set when METABOT_CORE_AGENT_BUS_URL is configured).
+  // Registry mode (on when METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL is set).
   private agentBusUrl?: string;
   private agentBusToken?: string;
   private selfUrl?: string;
@@ -102,16 +102,31 @@ export class PeerManager {
       });
     }
 
-    const rawBus = process.env.METABOT_CORE_AGENT_BUS_URL?.trim();
-    if (rawBus) {
-      this.agentBusUrl = rawBus.replace(/\/+$/, '');
+    // Precedence: explicit METABOT_CORE_AGENT_BUS_URL > METABOT_CORE_URL.
+    // Empty string after .trim() does not count as set.
+    const rawBus = process.env.METABOT_CORE_AGENT_BUS_URL?.trim() || undefined;
+    const rawCore = process.env.METABOT_CORE_URL?.trim() || undefined;
+    const resolvedBus = rawBus ?? rawCore;
+    if (resolvedBus) {
+      this.agentBusUrl = resolvedBus.replace(/\/+$/, '');
       this.agentBusToken = loadMetabotCoreToken();
-      this.selfUrl = process.env.METABOT_AGENT_SELF_URL?.trim();
+
+      const rawSelf = process.env.METABOT_AGENT_SELF_URL?.trim() || undefined;
+      if (rawSelf) {
+        this.selfUrl = rawSelf;
+      } else {
+        const port = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
+        this.selfUrl = `http://localhost:${port}`;
+        this.logger.info(
+          { selfUrl: this.selfUrl },
+          'METABOT_AGENT_SELF_URL not set — defaulting to http://localhost:<port>; cross-host /api/talk from peers will not reach this bridge',
+        );
+      }
 
       if (configs.length > 0) {
         this.logger.warn(
           { staticPeers: configs.map((c) => c.name) },
-          'METABOT_CORE_AGENT_BUS_URL is set — static peer configs will be shadowed by registry entries',
+          'registry mode enabled (METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL set) — static peer configs will be shadowed by registry entries',
         );
       }
       if (!this.agentBusToken) {
@@ -120,11 +135,7 @@ export class PeerManager {
           'Registry mode enabled but no METABOT_CORE_TOKEN / ~/.metabot-core/token found — agent-bus calls will fail with 401',
         );
       }
-      if (!this.selfUrl) {
-        this.logger.warn(
-          'Registry mode enabled but METABOT_AGENT_SELF_URL is unset — bulk register will be skipped',
-        );
-      } else if (this.localBots.length === 0) {
+      if (this.localBots.length === 0) {
         this.logger.warn(
           { agentBusUrl: this.agentBusUrl, selfUrl: this.selfUrl },
           'Registry mode enabled but no local bots configured — bulk register will be skipped',
