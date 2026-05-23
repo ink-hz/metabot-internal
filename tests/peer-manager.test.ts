@@ -1,5 +1,42 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { PeerManager } from '../src/api/peer-manager.js';
+import { PeerManager, pickPrivateIPv4 } from '../src/api/peer-manager.js';
+import type * as os from 'node:os';
+
+type IfaceDict = NodeJS.Dict<os.NetworkInterfaceInfo[]>;
+
+function ipv4(address: string): os.NetworkInterfaceInfo {
+  return {
+    address,
+    netmask: '255.255.255.0',
+    family: 'IPv4',
+    mac: '00:00:00:00:00:00',
+    internal: false,
+    cidr: `${address}/24`,
+  };
+}
+
+function loopback(): os.NetworkInterfaceInfo {
+  return {
+    address: '127.0.0.1',
+    netmask: '255.0.0.0',
+    family: 'IPv4',
+    mac: '00:00:00:00:00:00',
+    internal: true,
+    cidr: '127.0.0.1/8',
+  };
+}
+
+function ipv6(address: string): os.NetworkInterfaceInfo {
+  return {
+    address,
+    netmask: 'ffff:ffff:ffff:ffff::',
+    family: 'IPv6',
+    mac: '00:00:00:00:00:00',
+    internal: false,
+    cidr: `${address}/64`,
+    scopeid: 0,
+  };
+}
 
 function createLogger() {
   const logger = { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn(), child: vi.fn() } as any;
@@ -535,11 +572,12 @@ describe('PeerManager', () => {
       expect(bulkCall![0]).toBe('https://metabot.example.com/core/api/agents/bulk');
     });
 
-    it('defaults SELF_URL to http://localhost:<API_PORT> when unset', async () => {
+    it('honors API_PORT in the defaulted SELF_URL when METABOT_AGENT_SELF_URL is unset', async () => {
       process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
       process.env.API_PORT = '9123';
-      // METABOT_AGENT_SELF_URL deliberately unset.
+      // METABOT_AGENT_SELF_URL deliberately unset — host (auto-detected private IPv4 or localhost
+      // fallback) varies by machine, so we only pin the :<port> suffix.
 
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -558,13 +596,15 @@ describe('PeerManager', () => {
       );
       expect(bulkCall, 'expected POST /api/agents/bulk with defaulted SELF_URL').toBeDefined();
       const body = JSON.parse((bulkCall![1] as RequestInit).body as string);
-      expect(body.bots[0].url).toBe('http://localhost:9123');
+      expect(body.bots[0].url).toMatch(/^http:\/\/[^:]+:9123$/);
     });
 
-    it('defaults SELF_URL to http://localhost:9100 when API_PORT also unset', async () => {
+    it('defaults SELF_URL to an http URL when env unset (auto-detected private IPv4 with localhost fallback)', async () => {
       process.env.METABOT_CORE_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
-      // Both METABOT_AGENT_SELF_URL and API_PORT unset.
+      // Both METABOT_AGENT_SELF_URL and API_PORT unset — selfUrl will be auto-detected from this machine's
+      // network interfaces, so we only assert the shape, not a specific address. The selection logic itself
+      // is exercised directly against pickPrivateIPv4 below.
 
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,
@@ -581,9 +621,9 @@ describe('PeerManager', () => {
       const bulkCall = fetchMock.mock.calls.find(
         (c) => typeof c[0] === 'string' && c[0].endsWith('/api/agents/bulk') && c[1]?.method === 'POST',
       );
-      expect(bulkCall, 'expected POST /api/agents/bulk with localhost:9100 default').toBeDefined();
+      expect(bulkCall).toBeDefined();
       const body = JSON.parse((bulkCall![1] as RequestInit).body as string);
-      expect(body.bots[0].url).toBe('http://localhost:9100');
+      expect(body.bots[0].url).toMatch(/^http:\/\/[^:]+:9100$/);
     });
 
     it('METABOT_CORE_AGENT_BUS_URL wins over METABOT_CORE_URL (precedence preserved)', async () => {
@@ -657,5 +697,102 @@ describe('PeerManager', () => {
       );
       expect(bulkCall).toBeUndefined();
     });
+  });
+});
+
+describe('pickPrivateIPv4', () => {
+  it('returns undefined when no interfaces have private IPv4', () => {
+    const ifaces: IfaceDict = {
+      lo: [loopback()],
+      eth0: [ipv4('203.0.113.10')], // public
+    };
+    expect(pickPrivateIPv4(ifaces)).toBeUndefined();
+  });
+
+  it('returns undefined for empty interfaces dict', () => {
+    expect(pickPrivateIPv4({})).toBeUndefined();
+  });
+
+  it('skips loopback (internal=true)', () => {
+    const ifaces: IfaceDict = {
+      lo: [loopback()],
+      eth0: [ipv4('10.0.0.5')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.5');
+  });
+
+  it('skips IPv6 addresses', () => {
+    const ifaces: IfaceDict = {
+      eth0: [ipv6('fe80::1'), ipv4('172.20.0.5')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('172.20.0.5');
+  });
+
+  it('prefers 10/8 over 172.16/12 over 192.168/16', () => {
+    const ifaces: IfaceDict = {
+      eth0: [ipv4('192.168.1.5')],
+      eth1: [ipv4('172.20.0.5')],
+      eth2: [ipv4('10.0.0.5')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.5');
+  });
+
+  it('prefers 172.16/12 over 192.168/16 when 10/8 absent', () => {
+    const ifaces: IfaceDict = {
+      eth0: [ipv4('192.168.1.5')],
+      eth1: [ipv4('172.31.40.182')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('172.31.40.182');
+  });
+
+  it('breaks ties on equal rank by interface name (lexicographic)', () => {
+    const ifaces: IfaceDict = {
+      eth2: [ipv4('10.0.0.10')],
+      eth0: [ipv4('10.0.0.20')],
+      eth1: [ipv4('10.0.0.30')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.20'); // eth0 wins
+  });
+
+  it('skips docker virtual bridge interfaces', () => {
+    const ifaces: IfaceDict = {
+      docker0: [ipv4('172.17.0.1')], // virtual — must skip
+      eth0: [ipv4('172.31.40.182')], // real — must pick this
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('172.31.40.182');
+  });
+
+  it('skips veth/cni/flannel/kube/br-/cali/virbr/vmnet/tailscale/wg/utun', () => {
+    const ifaces: IfaceDict = {
+      'veth123abc': [ipv4('10.244.0.1')],
+      'cni0': [ipv4('10.244.1.1')],
+      'flannel.1': [ipv4('10.244.2.0')],
+      'kube-ipvs0': [ipv4('10.96.0.1')],
+      'br-abcdef': [ipv4('172.18.0.1')],
+      'cali123': [ipv4('192.168.100.1')],
+      'virbr0': [ipv4('192.168.122.1')],
+      'vmnet1': [ipv4('192.168.110.1')],
+      'tailscale0': [ipv4('100.64.0.1')], // CGNAT, but also virtual
+      'wg0': [ipv4('10.200.0.1')],
+      'utun0': [ipv4('192.168.50.1')],
+      'eth0': [ipv4('10.0.0.5')], // the only real one
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.5');
+  });
+
+  it('returns undefined when every non-virtual iface is public', () => {
+    const ifaces: IfaceDict = {
+      docker0: [ipv4('172.17.0.1')], // virtual, skipped
+      eth0: [ipv4('192.18.73.126')], // public, skipped
+    };
+    expect(pickPrivateIPv4(ifaces)).toBeUndefined();
+  });
+
+  it('handles iface entry being undefined safely', () => {
+    const ifaces: IfaceDict = {
+      eth0: undefined,
+      eth1: [ipv4('10.0.0.5')],
+    };
+    expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.5');
   });
 });

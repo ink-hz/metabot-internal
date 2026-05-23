@@ -55,6 +55,61 @@ const REGISTER_RETRY_INITIAL_MS = 1_000;
 const REGISTER_RETRY_MAX_MS = 30_000;
 const AGENT_BUS_FAIL_LOG_THRESHOLD = 3;
 
+/**
+ * Pick a private IPv4 address that peers on the same intranet can route to.
+ *
+ * Skips loopback, virtual bridges (docker/k8s/cni), and public addresses. Among
+ * non-virtual RFC1918 candidates, prefers 10.x → 172.16-31.x → 192.168.x in
+ * that order; ties broken by interface name. Returns undefined if no private
+ * address is found (multi-homed public-only hosts, container with hostNetwork
+ * disabled, etc.).
+ */
+const VIRTUAL_IFACE_PATTERNS = [
+  /^docker/i,
+  /^br-/i,
+  /^veth/i,
+  /^cni/i,
+  /^flannel/i,
+  /^cali/i,
+  /^kube-/i,
+  /^virbr/i,
+  /^vmnet/i,
+  /^tailscale/i,
+  /^wg/i,
+  /^utun/i,
+];
+
+function rfc1918Rank(addr: string): number {
+  // Lower rank = preferred.
+  const parts = addr.split('.').map((n) => parseInt(n, 10));
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) return 99;
+  const [a, b] = parts;
+  if (a === 10) return 0;
+  if (a === 172 && b >= 16 && b <= 31) return 1;
+  if (a === 192 && b === 168) return 2;
+  return 99;
+}
+
+export function pickPrivateIPv4(
+  ifaces: NodeJS.Dict<os.NetworkInterfaceInfo[]> = os.networkInterfaces(),
+): string | undefined {
+  type Candidate = { ifname: string; address: string; rank: number };
+  const candidates: Candidate[] = [];
+  for (const [ifname, list] of Object.entries(ifaces)) {
+    if (!list) continue;
+    if (VIRTUAL_IFACE_PATTERNS.some((re) => re.test(ifname))) continue;
+    for (const info of list) {
+      if (info.family !== 'IPv4') continue;
+      if (info.internal) continue;
+      const rank = rfc1918Rank(info.address);
+      if (rank === 99) continue;
+      candidates.push({ ifname, address: info.address, rank });
+    }
+  }
+  candidates.sort((x, y) => x.rank - y.rank || x.ifname.localeCompare(y.ifname));
+  return candidates[0]?.address;
+}
+
 function loadMetabotCoreToken(): string | undefined {
   if (process.env.METABOT_CORE_TOKEN) return process.env.METABOT_CORE_TOKEN;
   const candidate = path.join(os.homedir(), '.metabot-core', 'token');
@@ -116,11 +171,20 @@ export class PeerManager {
         this.selfUrl = rawSelf;
       } else {
         const port = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
-        this.selfUrl = `http://localhost:${port}`;
-        this.logger.info(
-          { selfUrl: this.selfUrl },
-          'METABOT_AGENT_SELF_URL not set — defaulting to http://localhost:<port>; cross-host /api/talk from peers will not reach this bridge',
-        );
+        const privateIp = pickPrivateIPv4();
+        if (privateIp) {
+          this.selfUrl = `http://${privateIp}:${port}`;
+          this.logger.info(
+            { selfUrl: this.selfUrl, privateIp },
+            'METABOT_AGENT_SELF_URL not set — auto-detected from private IPv4 (set METABOT_AGENT_SELF_URL to override)',
+          );
+        } else {
+          this.selfUrl = `http://localhost:${port}`;
+          this.logger.warn(
+            { selfUrl: this.selfUrl },
+            'METABOT_AGENT_SELF_URL not set and no private IPv4 found — falling back to http://localhost:<port>; cross-host /api/talk from peers will not reach this bridge',
+          );
+        }
       }
 
       if (configs.length > 0) {
