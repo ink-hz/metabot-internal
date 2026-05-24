@@ -7,10 +7,8 @@
 *Write code · Manage agents · Automate everything*
 
 <p>
-  <a href="https://github.com/xvirobotics/metabot/actions"><img src="https://img.shields.io/github/actions/workflow/status/xvirobotics/metabot/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github" alt="CI"></a>
+  <a href="https://gitlab.xvirobotics.com/xvirobotics/metabot/-/pipelines"><img src="https://gitlab.xvirobotics.com/xvirobotics/metabot/badges/main/pipeline.svg" alt="Pipeline"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
-  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/github/stars/xvirobotics/metabot?style=for-the-badge&logo=github" alt="Stars"></a>
-  <a href="https://github.com/xvirobotics/metabot/network/members"><img src="https://img.shields.io/github/forks/xvirobotics/metabot?style=for-the-badge&logo=github" alt="Forks"></a>
 </p>
 
 <p>
@@ -47,12 +45,16 @@
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
+# First connect 飞连/VPN to the internal network and add your SSH key on GitLab
+git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+cd ~/metabot && bash install.sh
 ```
 
 The installer walks you through everything: working directory → **engine choice (Claude / Kimi / Codex)** → subscription login → IM platform → auto-start with PM2. **5 minutes to get started.**
 
-> Custom install directory (default `~/metabot`): `curl ... | bash -s -- --dir /opt/metabot`, or `METABOT_HOME=/opt/metabot bash install.sh`. Windows: `.\install.ps1 -Dir C:\opt\metabot`.
+> Custom install directory (default `~/metabot`): clone into the directory you want, or `METABOT_HOME=/opt/metabot bash install.sh`. Windows: `.\install.ps1 -Dir C:\opt\metabot`.
+>
+> MetaBot is now maintained only on the internal company GitLab (`gitlab.xvirobotics.com`); the public GitHub mirror is no longer kept in sync. Cloning the internal repo requires 飞连/VPN and a personal SSH key (add it in GitLab `User Settings → SSH Keys`).
 
 ---
 
@@ -542,7 +544,7 @@ CLI supports connecting to a remote MetaBot server — configure `METABOT_URL` i
 <summary><strong>Manual install</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # edit with your bot configs
 cp .env.example .env              # edit global settings
@@ -574,10 +576,6 @@ npm run build        # TypeScript compile
 MetaBot is built by [XVI Robotics](https://xvirobotics.com) (humanoid robot brains). We use MetaBot internally to run our company as an **agent-native organization** — a small team of humans supervising self-improving AI agents.
 
 We open-sourced it because we believe this is how companies will work in the future.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=xvirobotics/metabot&type=Date)](https://star-history.com/#xvirobotics/metabot&Date)
 
 ## License
 

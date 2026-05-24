@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # MetaBot Installer
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash -s -- --dir /opt/metabot
-#   METABOT_HOME=/opt/metabot bash install.sh
+#   # Requires 飞连/VPN to reach gitlab.xvirobotics.com + your SSH key on GitLab
+#   git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+#   cd ~/metabot && bash install.sh
+#   # Optional: METABOT_HOME=/opt/metabot bash install.sh
 set -euo pipefail
 
 # ============================================================================
@@ -69,7 +70,7 @@ done
 # ============================================================================
 # METABOT_HOME is resolved later (Phase 0.5) — priority: --dir > env var > prompt > default.
 DEFAULT_METABOT_HOME="$HOME/metabot"
-METABOT_REPO="${METABOT_REPO:-https://github.com/xvirobotics/metabot.git}"
+METABOT_REPO="${METABOT_REPO:-ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git}"
 
 # ============================================================================
 # Colors and formatting

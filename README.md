@@ -7,10 +7,8 @@
 *写代码 · 管 Agent · 自动化一切*
 
 <p>
-  <a href="https://github.com/xvirobotics/metabot/actions"><img src="https://img.shields.io/github/actions/workflow/status/xvirobotics/metabot/ci.yml?branch=main&style=for-the-badge&label=CI&logo=github" alt="CI"></a>
+  <a href="https://gitlab.xvirobotics.com/xvirobotics/metabot/-/pipelines"><img src="https://gitlab.xvirobotics.com/xvirobotics/metabot/badges/main/pipeline.svg" alt="Pipeline"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge" alt="License"></a>
-  <a href="https://github.com/xvirobotics/metabot"><img src="https://img.shields.io/github/stars/xvirobotics/metabot?style=for-the-badge&logo=github" alt="Stars"></a>
-  <a href="https://github.com/xvirobotics/metabot/network/members"><img src="https://img.shields.io/github/forks/xvirobotics/metabot?style=for-the-badge&logo=github" alt="Forks"></a>
 </p>
 
 <p>
@@ -47,12 +45,16 @@
 </div>
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash
+# 先连飞连/VPN 进内网，并把你的 GitLab SSH key 配好
+git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git ~/metabot
+cd ~/metabot && bash install.sh
 ```
 
 安装器引导一切：工作目录 → **引擎选择（Claude / Kimi / Codex）** → 订阅登录 → IM 平台 → PM2 自动启动。**5 分钟上手。**
 
-> 自定义安装目录(默认 `~/metabot`)：`curl ... | bash -s -- --dir /opt/metabot`,或 `METABOT_HOME=/opt/metabot bash install.sh`。Windows: `.\install.ps1 -Dir C:\opt\metabot`。
+> 自定义安装目录（默认 `~/metabot`）：把 `~/metabot` 换成你想要的路径即可，或 `METABOT_HOME=/opt/metabot bash install.sh`。Windows: `.\install.ps1 -Dir C:\opt\metabot`。
+>
+> MetaBot 当前只在公司内部 GitLab 维护（`gitlab.xvirobotics.com`），公网 GitHub mirror 不再同步。GitLab 内网仓库需要飞连/VPN + 你的个人 SSH key（在 GitLab `用户设置 → SSH 密钥` 添加）。
 
 ---
 
@@ -544,7 +546,7 @@ CLI 支持连接远程 MetaBot 服务器，在 `~/.metabot/.env` 配置 `METABOT
 <summary><strong>手动安装</strong></summary>
 
 ```bash
-git clone https://github.com/xvirobotics/metabot.git
+git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
 cd metabot && npm install
 cp bots.example.json bots.json   # 编辑 Bot 配置
 cp .env.example .env              # 编辑全局设置
@@ -576,10 +578,6 @@ npm run build        # TypeScript 编译
 MetaBot 由 [XVI Robotics](https://xvirobotics.com) 打造（人形机器人大脑公司）。我们在内部用 MetaBot 把公司打造成 **Agent Native 组织** —— 一个小团队的人类，监督自我进化的 AI Agent。
 
 我们开源它，因为我们相信这是未来公司的运行方式。
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=xvirobotics/metabot&type=Date)](https://star-history.com/#xvirobotics/metabot&Date)
 
 ## License
 
