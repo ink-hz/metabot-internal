@@ -25,21 +25,24 @@ const mockLogger = {
 } as any;
 
 describe('makeCanUseTool (ExitPlanMode auto-approve)', () => {
-  it('returns behavior=allow for ExitPlanMode and logs the toolUseID', async () => {
+  it('returns behavior=allow with updatedInput echoed back for ExitPlanMode', async () => {
     collected.length = 0;
     const canUseTool = makeCanUseTool(mockLogger);
-    const result = await canUseTool('ExitPlanMode', { plan: 'p' }, { toolUseID: 'toolu_plan_1' });
-    expect(result).toEqual({ behavior: 'allow' });
+    const input = { plan: 'p' };
+    const result = await canUseTool('ExitPlanMode', input, { toolUseID: 'toolu_plan_1' });
+    // updatedInput MUST be present — the SDK's Zod schema rejects `allow` without it
+    expect(result).toEqual({ behavior: 'allow', updatedInput: input });
     const info = collected.find((c) => c.level === 'info');
     expect(info?.msg).toBe('canUseTool: auto-approving ExitPlanMode');
     expect((info?.obj as any).toolUseId).toBe('toolu_plan_1');
   });
 
-  it('allows non-ExitPlanMode tools too (safety net) and logs a warning', async () => {
+  it('allows non-ExitPlanMode tools too (safety net) with updatedInput', async () => {
     collected.length = 0;
     const canUseTool = makeCanUseTool(mockLogger);
-    const result = await canUseTool('Bash', { command: 'ls' }, { toolUseID: 'toolu_bash_1' });
-    expect(result).toEqual({ behavior: 'allow' });
+    const input = { command: 'ls' };
+    const result = await canUseTool('Bash', input, { toolUseID: 'toolu_bash_1' });
+    expect(result).toEqual({ behavior: 'allow', updatedInput: input });
     const warn = collected.find((c) => c.level === 'warn');
     expect(warn?.msg).toContain('unexpected ask under bypassPermissions');
     expect((warn?.obj as any).toolName).toBe('Bash');

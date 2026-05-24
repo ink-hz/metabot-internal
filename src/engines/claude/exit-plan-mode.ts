@@ -17,14 +17,14 @@ import type { Logger } from '../../utils/logger.js';
 export function makeCanUseTool(logger: Logger) {
   return async function canUseTool(
     toolName: string,
-    _input: Record<string, unknown>,
+    input: Record<string, unknown>,
     opts: { toolUseID: string },
-  ): Promise<{ behavior: 'allow'; updatedInput?: Record<string, unknown> }> {
+  ): Promise<{ behavior: 'allow'; updatedInput: Record<string, unknown> }> {
     if (toolName === 'ExitPlanMode') {
       logger.info({ toolUseId: opts.toolUseID }, 'canUseTool: auto-approving ExitPlanMode');
     } else {
       logger.warn({ toolName, toolUseId: opts.toolUseID }, 'canUseTool: unexpected ask under bypassPermissions — allowing');
     }
-    return { behavior: 'allow' };
+    return { behavior: 'allow', updatedInput: input };
   };
 }
