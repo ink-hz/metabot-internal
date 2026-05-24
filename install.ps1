@@ -1,8 +1,11 @@
 # MetaBot Installer for Windows PowerShell
 # Usage:
-#   irm https://raw.githubusercontent.com/xvirobotics/metabot/main/install.ps1 | iex
-#   .\install.ps1 -Dir C:\opt\metabot
-#   $env:METABOT_HOME = "C:\opt\metabot"; irm <url> | iex
+#   # Requires 飞连/VPN to reach gitlab.xvirobotics.com + your SSH key on GitLab
+#   git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git $env:USERPROFILE\metabot
+#   cd $env:USERPROFILE\metabot
+#   .\install.ps1
+#   # Optional: .\install.ps1 -Dir C:\opt\metabot
+#   # Optional: $env:METABOT_HOME = "C:\opt\metabot"; .\install.ps1
 #Requires -Version 5.1
 
 [CmdletBinding()]
@@ -20,8 +23,10 @@ if ($Help) {
 MetaBot Installer (Windows)
 
 Usage:
+  # Requires 飞连/VPN to reach gitlab.xvirobotics.com + SSH key on GitLab
+  git clone ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git
+  cd metabot
   .\install.ps1 [-Dir <path>]
-  irm <url> | iex                        # uses default ($env:USERPROFILE\metabot) or $env:METABOT_HOME
 
 Parameters:
   -Dir, -d <path>     Install MetaBot to <path>.
@@ -32,7 +37,7 @@ Parameters:
 Examples:
   .\install.ps1
   .\install.ps1 -Dir C:\opt\metabot
-  `$env:METABOT_HOME = "C:\opt\metabot"; irm <url> | iex
+  `$env:METABOT_HOME = "C:\opt\metabot"; .\install.ps1
 "@ | Write-Host
     exit 0
 }
@@ -40,7 +45,7 @@ Examples:
 # ============================================================================
 # Configuration defaults
 # ============================================================================
-$MetabotRepo = if ($env:METABOT_REPO) { $env:METABOT_REPO } else { "https://github.com/xvirobotics/metabot.git" }
+$MetabotRepo = if ($env:METABOT_REPO) { $env:METABOT_REPO } else { "ssh://git@gitlab.xvirobotics.com:2222/xvirobotics/metabot.git" }
 # $MetabotHome is resolved later (Phase 0.5) — priority: -Dir > env > prompt > default.
 $DefaultMetabotHome = Join-Path $env:USERPROFILE "metabot"
 $MetabotHome = $null
