@@ -587,6 +587,12 @@ export function startServer(options: ServerOptions): ServerHandle {
         const body = await parseJsonBody(req);
         return jsonResult(res, skillRoutes.publishSkill(skillStore, name, body, cred));
       }
+      // GET /api/skills/:name/references — unpacked file list (lazy-loaded by skill-hub install)
+      const referencesMatch = pathname.match(/^\/api\/skills\/([^/]+)\/references$/);
+      if (referencesMatch && method === 'GET') {
+        const name = decodeURIComponent(referencesMatch[1]);
+        return jsonResult(res, skillRoutes.getSkillReferences(skillStore, name, cred));
+      }
       if (pathname.startsWith('/api/skills/') && method === 'GET') {
         const name = decodeURIComponent(pathname.slice('/api/skills/'.length));
         return jsonResult(res, skillRoutes.getSkill(skillStore, name, cred));
