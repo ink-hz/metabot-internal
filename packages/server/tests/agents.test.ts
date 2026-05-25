@@ -22,6 +22,18 @@ async function issueMember(k: ServerKit, name = 'cli-bot'): Promise<string> {
   return res.body.token as string;
 }
 
+async function issueMemberWithOwner(
+  k: ServerKit,
+  botName: string,
+  ownerName: string,
+): Promise<string> {
+  const res = await call(k.baseUrl, 'POST', '/admin/credentials/issue', k.adminToken, {
+    botName, ownerName, role: 'member',
+  });
+  expect(res.status).toBe(201);
+  return res.body.token as string;
+}
+
 describe('/api/agents — routes + audit (token-auth era)', () => {
   it('POST /api/agents creates a row; body.botName missing → falls back to cred.botName (legacy 1:1)', async () => {
     kit = await startTestServer('agents-register');
@@ -177,6 +189,36 @@ describe('/api/agents — routes + audit (token-auth era)', () => {
     expect(names).toEqual(['alice-bot']);
     // No talkSecret in the response shape.
     expect((list.body.agents as Array<Record<string, unknown>>)[0].talkSecret).toBeUndefined();
+  });
+
+  it('GET /api/agents — owner sees own visible:false bot via a different-machine cred (same ownerName)', async () => {
+    kit = await startTestServer('agents-list-owner-bypass');
+    // Same human, two different machines. Same `ownerName`, different
+    // `botName`s. Without owner-bypass, the visible:1 SQL pre-filter would
+    // have hidden machine-1's invisible bot from machine-2's cred.
+    const tokenM1 = await issueMemberWithOwner(kit, 'alice-machine-1', 'alice');
+    const tokenM2 = await issueMemberWithOwner(kit, 'alice-machine-2', 'alice');
+    const reg = await call(kit.baseUrl, 'POST', '/api/agents', tokenM1, {
+      botName: 'hidden-bot', url: 'http://m1:9100', visible: false,
+    });
+    expect(reg.status).toBe(201);
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', tokenM2);
+    expect(list.status).toBe(200);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName);
+    expect(names).toContain('hidden-bot');
+  });
+
+  it('GET /api/agents — non-owner does NOT see another user\'s visible:false bot', async () => {
+    kit = await startTestServer('agents-list-cross-owner-hidden');
+    const aliceTok = await issueMemberWithOwner(kit, 'alice-bot', 'alice');
+    const bobTok = await issueMemberWithOwner(kit, 'bob-bot', 'bob');
+    await call(kit.baseUrl, 'POST', '/api/agents', aliceTok, {
+      botName: 'alice-secret', url: 'http://x:9100', visible: false,
+    });
+    const list = await call(kit.baseUrl, 'GET', '/api/agents', bobTok);
+    expect(list.status).toBe(200);
+    const names = (list.body.agents as Array<{ botName: string }>).map((a) => a.botName);
+    expect(names).not.toContain('alice-secret');
   });
 
   it('GET /api/agents derives host from url for each agent (different hosts → different host fields)', async () => {

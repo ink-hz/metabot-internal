@@ -59,6 +59,7 @@ export function registerAgent(
       visible,
       memoryPublic,
       ownerCredentialId: cred.id,
+      ownerName: cred.ownerName,
     });
     return { status: 201, body: publicShape(rec) };
   } catch (e) {
@@ -100,7 +101,11 @@ export function registerAgentsBulk(
     const visible = entry.visible === undefined ? true : !!entry.visible;
     const memoryPublic = entry.memoryPublic === undefined ? undefined : !!entry.memoryPublic;
     try {
-      store.register({ botName, url, visible, memoryPublic, ownerCredentialId: cred.id });
+      store.register({
+        botName, url, visible, memoryPublic,
+        ownerCredentialId: cred.id,
+        ownerName: cred.ownerName,
+      });
       results.push({ botName, status: 201 });
       registered++;
     } catch (e) {
@@ -158,7 +163,18 @@ export function listAgents(
   if (includeHidden && cred.role !== 'admin') {
     return err(403, 'include_hidden_admin_only');
   }
-  const agents = store.list({ includeHidden });
+  // Always pull every row, then filter in JS — the owner-bypass needs
+  // hidden rows owned by `cred.ownerName` to come back even when the caller
+  // is a member. The legacy `visible = 1` SQL pre-filter at the store level
+  // would have hidden the caller's own bots from their other-machine cred.
+  const all = store.list({ includeHidden: true });
+  const visibleToCaller = (a: { visible: boolean; ownerName: string }): boolean => {
+    if (includeHidden) return true; // admin-only, already gated above
+    if (cred.role === 'admin') return true;
+    if (a.visible) return true;
+    return !!cred.ownerName && a.ownerName === cred.ownerName;
+  };
+  const agents = all.filter(visibleToCaller);
   return {
     status: 200,
     body: {
