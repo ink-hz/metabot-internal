@@ -12,6 +12,13 @@ export interface SkillRecord {
   author: string;
   ownerBotName?: string;
   ownerCredentialId?: string;
+  /**
+   * Snapshot of the publisher's `cred.ownerName` (user-level identity).
+   * Used by `filterSkillsForCred` to keep `private` skills visible to the
+   * owner's other-machine credentials. Optional because pre-2026-05-25
+   * rows predate the column.
+   */
+  ownerName?: string;
   visibility: Visibility;
   contentHash: string;
   tags: string[];
@@ -31,6 +38,7 @@ export interface SkillSummary {
   version: number;
   author: string;
   ownerBotName?: string;
+  ownerName?: string;
   visibility: Visibility;
   contentHash: string;
   tags: string[];
@@ -45,10 +53,12 @@ export interface SkillSearchResult extends SkillSummary {
 export interface SkillPublishInput {
   name: string;
   skillMd: string;
-  referencesTar?: Buffer;
+  // tristate: Buffer = replace, null = explicit clear, undefined = preserve existing
+  referencesTar?: Buffer | null;
   author?: string;
   ownerBotName?: string;
   ownerCredentialId?: string;
+  ownerName?: string;
   visibility?: Visibility;
 }
 
@@ -117,6 +127,27 @@ export class SkillStore {
       CREATE INDEX IF NOT EXISTS skills_owner_idx ON skills(owner_credential_id);
     `);
 
+    // Idempotent migration for `owner_name` (added 2026-05-25). Backfill from
+    // `credentials.owner_name` JOINed on owner_credential_id so existing
+    // private skills become visible to their publisher's other-machine creds.
+    // Rows whose credential was revoked (or never set) keep owner_name = NULL
+    // and remain admin-only — matches the previous behavior.
+    const skillCols = this.db.prepare(`PRAGMA table_info(skills)`).all() as Array<{ name: string }>;
+    if (!skillCols.some((c) => c.name === 'owner_name')) {
+      this.db.exec(`ALTER TABLE skills ADD COLUMN owner_name TEXT`);
+      const hasCredentials = this.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='credentials'",
+      ).get();
+      if (hasCredentials) {
+        this.db.exec(`
+          UPDATE skills
+             SET owner_name = (
+               SELECT owner_name FROM credentials WHERE credentials.id = skills.owner_credential_id
+             )
+        `);
+      }
+    }
+
     const ftsExists = this.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='skills_fts'",
     ).get();
@@ -157,7 +188,6 @@ export class SkillStore {
     const context = meta['context'] || undefined;
     const allowedTools = meta['allowed-tools'] || undefined;
     const visibility = input.visibility || 'published';
-    const contentHash = computeContentHash(input.skillMd, input.referencesTar);
     const now = new Date().toISOString();
 
     const existing = this.db.prepare('SELECT id, version FROM skills WHERE name = ?').get(name) as
@@ -165,37 +195,53 @@ export class SkillStore {
       | undefined;
 
     if (existing) {
+      // Preserve-on-republish: if caller omits referencesTar (undefined), keep
+      // whatever's stored. Buffer = replace, null = explicit clear. Without
+      // this, a `metabot skill publish foo --md SKILL.md` silently wipes refs.
+      const existingRow = this.db.prepare('SELECT references_tar FROM skills WHERE name = ?').get(name) as
+        | { references_tar: Buffer | null }
+        | undefined;
+      const nextRefs: Buffer | null =
+        input.referencesTar === undefined
+          ? (existingRow?.references_tar ?? null)
+          : (input.referencesTar ?? null);
+      const contentHash = computeContentHash(input.skillMd, nextRefs ?? undefined);
+
       this.db.prepare(`
         UPDATE skills SET
           description = ?, version = ?, author = ?, owner_bot_name = ?,
-          owner_credential_id = ?, visibility = ?, content_hash = ?, tags = ?,
+          owner_credential_id = ?, owner_name = ?, visibility = ?,
+          content_hash = ?, tags = ?,
           user_invocable = ?, context = ?, allowed_tools = ?,
           skill_md = ?, references_tar = ?, updated_at = ?
         WHERE name = ?
       `).run(
         description, existing.version + 1, input.author || '',
         input.ownerBotName || null, input.ownerCredentialId || null,
-        visibility, contentHash, JSON.stringify(tags),
+        input.ownerName || null, visibility, contentHash, JSON.stringify(tags),
         userInvocable ? 1 : 0, context || null, allowedTools || null,
-        input.skillMd, input.referencesTar || null, now, name,
+        input.skillMd, nextRefs, now, name,
       );
       this.logger.info({ name, version: existing.version + 1 }, 'skill updated');
       return this.get(name)!;
     }
 
+    const insertRefs: Buffer | null = input.referencesTar ?? null;
+    const contentHash = computeContentHash(input.skillMd, insertRefs ?? undefined);
     const id = crypto.randomUUID();
     this.db.prepare(`
       INSERT INTO skills (id, name, description, version, author,
-        owner_bot_name, owner_credential_id, visibility, content_hash, tags,
+        owner_bot_name, owner_credential_id, owner_name, visibility,
+        content_hash, tags,
         user_invocable, context, allowed_tools, skill_md, references_tar,
         published_at, updated_at)
-      VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, name, description, input.author || '',
       input.ownerBotName || null, input.ownerCredentialId || null,
-      visibility, contentHash, JSON.stringify(tags),
+      input.ownerName || null, visibility, contentHash, JSON.stringify(tags),
       userInvocable ? 1 : 0, context || null, allowedTools || null,
-      input.skillMd, input.referencesTar || null, now, now,
+      input.skillMd, insertRefs, now, now,
     );
     this.logger.info({ name, id }, 'skill published');
     return this.get(name)!;
@@ -220,7 +266,7 @@ export class SkillStore {
 
   list(options?: ListOptions): SkillSummary[] {
     const { sql, params } = applyVisibilityFilter(
-      `SELECT id, name, description, version, author, owner_bot_name,
+      `SELECT id, name, description, version, author, owner_bot_name, owner_name,
               visibility, content_hash, tags,
               published_at, updated_at
        FROM skills`,
@@ -236,7 +282,7 @@ export class SkillStore {
 
     const { sql, params } = applyVisibilityFilter(
       `SELECT s.id, s.name, s.description, s.version, s.author,
-              s.owner_bot_name, s.visibility,
+              s.owner_bot_name, s.owner_name, s.visibility,
               s.content_hash, s.tags,
               s.published_at, s.updated_at,
               snippet(skills_fts, 3, '<b>', '</b>', '...', 32) AS snippet
@@ -271,6 +317,7 @@ interface RawSkillRow {
   author: string;
   owner_bot_name: string | null;
   owner_credential_id: string | null;
+  owner_name: string | null;
   visibility: Visibility;
   content_hash: string;
   tags: string;
@@ -290,6 +337,7 @@ interface RawSkillSummaryRow {
   version: number;
   author: string;
   owner_bot_name: string | null;
+  owner_name: string | null;
   visibility: Visibility;
   content_hash: string;
   tags: string;
@@ -306,6 +354,7 @@ function rowToRecord(row: RawSkillRow): SkillRecord {
     author: row.author,
     ownerBotName: row.owner_bot_name || undefined,
     ownerCredentialId: row.owner_credential_id || undefined,
+    ownerName: row.owner_name || undefined,
     visibility: row.visibility,
     contentHash: row.content_hash,
     tags: safeJsonArray(row.tags),
@@ -327,6 +376,7 @@ function summaryRowToRecord(row: RawSkillSummaryRow): SkillSummary {
     version: row.version,
     author: row.author,
     ownerBotName: row.owner_bot_name || undefined,
+    ownerName: row.owner_name || undefined,
     visibility: row.visibility,
     contentHash: row.content_hash,
     tags: safeJsonArray(row.tags),

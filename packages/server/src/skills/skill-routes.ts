@@ -1,6 +1,9 @@
+import * as zlib from 'node:zlib';
 import type { SkillStore } from './skill-store.js';
 import type { Credential } from '../auth/credentials.js';
-import { canPublishSkill, canUnpublishSkill, visibilityFilter } from './publish-acl.js';
+import {
+  canPublishSkill, canUnpublishSkill, filterSkillsForCred, isVisibleToCred,
+} from './publish-acl.js';
 
 export interface RouteResult {
   status: number;
@@ -12,25 +15,23 @@ function err(status: number, error: string): RouteResult {
 }
 
 export function listSkills(store: SkillStore, cred: Credential): RouteResult {
-  const filter = visibilityFilter(cred);
-  const skills = store.list(filter ? { visibility: filter } : undefined);
+  // Don't pre-filter at the SQL layer — `filterSkillsForCred` needs private
+  // rows owned by `cred.ownerName` to come through. The post-filter handles
+  // both visibility-list AND owner-bypass in one place.
+  const skills = filterSkillsForCred(store.list(), cred);
   return { status: 200, body: { skills } };
 }
 
 export function searchSkills(store: SkillStore, query: URLSearchParams, cred: Credential): RouteResult {
   const q = query.get('q') || '';
-  const filter = visibilityFilter(cred);
-  const skills = store.search(q, filter ? { visibility: filter } : undefined);
+  const skills = filterSkillsForCred(store.search(q), cred);
   return { status: 200, body: { skills } };
 }
 
 export function getSkill(store: SkillStore, name: string, cred: Credential): RouteResult {
   const record = store.get(name);
   if (!record) return err(404, 'skill_not_found');
-  const filter = visibilityFilter(cred);
-  if (filter && !filter.includes(record.visibility)) {
-    return err(404, 'skill_not_found');
-  }
+  if (!isVisibleToCred(record, cred)) return err(404, 'skill_not_found');
   return { status: 200, body: record };
 }
 
@@ -45,9 +46,19 @@ export function publishSkill(
   const skillMd = body.skillMd as string | undefined;
   if (!skillMd) return err(400, 'skillMd_required');
 
-  const referencesTar = body.referencesTar
-    ? Buffer.from(body.referencesTar as string, 'base64')
-    : undefined;
+  // Tristate: field absent = preserve existing, null = explicit clear,
+  // string = new base64-encoded pack. Without this, CLI publishes that omit
+  // --from would silently wipe the stored references.
+  let referencesTar: Buffer | null | undefined;
+  if (!('referencesTar' in body)) {
+    referencesTar = undefined;
+  } else if (body.referencesTar === null) {
+    referencesTar = null;
+  } else if (typeof body.referencesTar === 'string') {
+    referencesTar = Buffer.from(body.referencesTar, 'base64');
+  } else {
+    return err(400, 'referencesTar_invalid_type');
+  }
 
   const record = store.publish({
     name,
@@ -56,10 +67,30 @@ export function publishSkill(
     author: cred.botName,
     ownerBotName: cred.botName,
     ownerCredentialId: cred.id,
+    ownerName: cred.ownerName || undefined,
     visibility: (body.visibility as 'private' | 'published' | 'shared') || 'published',
   });
 
   return { status: 201, body: { name: record.name, version: record.version, published: true } };
+}
+
+export function getSkillReferences(store: SkillStore, name: string, cred: Credential): RouteResult {
+  const record = store.get(name);
+  if (!record) return err(404, 'skill_not_found');
+  if (!isVisibleToCred(record, cred)) return err(404, 'skill_not_found');
+  if (!record.hasReferences) return err(404, 'no_references');
+  const content = store.getContent(name);
+  if (!content?.referencesTar) return err(404, 'no_references');
+  let parsed: { files?: unknown };
+  try {
+    parsed = JSON.parse(zlib.gunzipSync(content.referencesTar).toString('utf8')) as {
+      files?: unknown;
+    };
+  } catch {
+    return err(500, 'references_corrupt');
+  }
+  if (!Array.isArray(parsed.files)) return err(500, 'references_corrupt');
+  return { status: 200, body: { name, version: record.version, files: parsed.files } };
 }
 
 export function deleteSkill(store: SkillStore, name: string, cred: Credential): RouteResult {

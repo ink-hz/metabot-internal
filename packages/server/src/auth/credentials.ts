@@ -78,12 +78,31 @@ export function toPublic(c: Credential): CredentialPublic {
 export function canRead(cred: Credential, path: string): boolean {
   if (cred.role === 'admin') return true;
   if (path.startsWith('/shared/')) return true;
+  if (matchesOwnerNamespace(cred, path)) return true;
   return cred.readableNamespaces.some((ns) => pathMatchesNamespace(path, ns));
 }
 
 export function canWrite(cred: Credential, path: string): boolean {
   if (cred.role === 'admin') return true;
+  if (matchesOwnerNamespace(cred, path)) return true;
   return cred.writableNamespaces.some((ns) => pathMatchesNamespace(path, ns));
+}
+
+/**
+ * User-level owner-bypass: any `/users/<ownerName>/...` path is always
+ * accessible to a credential whose `ownerName` matches, regardless of what
+ * `readableNamespaces` / `writableNamespaces` say. This is what lets the
+ * same human's CLI cred on machine A and cred on machine B share a private
+ * namespace — the per-credential namespace lists are keyed on `botName`
+ * (which differs across machines) but ownership is keyed on `ownerName`.
+ *
+ * Empty `ownerName` (legacy creds, or bootstrap admin) → no bypass. This
+ * prevents an accidentally-empty value from matching `/users//foo` or
+ * granting blanket access.
+ */
+function matchesOwnerNamespace(cred: Credential, path: string): boolean {
+  if (!cred.ownerName) return false;
+  return pathMatchesNamespace(path, `/users/${cred.ownerName}`);
 }
 
 export function canPublishSkill(cred: Credential): boolean {

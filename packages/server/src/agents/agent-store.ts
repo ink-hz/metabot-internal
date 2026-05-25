@@ -16,6 +16,15 @@ export interface AgentRecord {
    */
   memoryPublic: boolean;
   ownerCredentialId: string;
+  /**
+   * Snapshot of the owning credential's `ownerName` at register time. Used by
+   * `listAgents` to keep the owner's other-machine credentials seeing their
+   * own `visible:false` bots — bot-level `visible` is a public-facing flag,
+   * not a self-isolation flag. Empty string for legacy rows backfilled
+   * against a now-revoked credential; the owner-bypass treats empty as
+   * "no match" so legacy state can't grant accidental access.
+   */
+  ownerName: string;
   registeredAt: string;
   lastSeenAt: string;
 }
@@ -26,6 +35,14 @@ export interface RegisterInput {
   visible?: boolean;
   memoryPublic?: boolean;
   ownerCredentialId: string;
+  /**
+   * Snapshot of the caller's `cred.ownerName`. Optional in the unit-test
+   * surface (some legacy specs construct an AgentStore without a credentials
+   * table); defaults to `''`. The owner-bypass in `listAgents` treats empty
+   * as "no match", so an unset value never grants accidental cross-cred
+   * access.
+   */
+  ownerName?: string;
 }
 
 export interface ListOptions {
@@ -90,6 +107,26 @@ export class AgentStore {
     if (!cols.some((c) => c.name === 'memory_public')) {
       this.db.exec(`ALTER TABLE agents ADD COLUMN memory_public INTEGER NOT NULL DEFAULT 1`);
     }
+
+    // Idempotent migration for `owner_name` (added 2026-05-25). Backfill from
+    // `credentials.owner_name` so existing rows immediately participate in
+    // the user-level owner-bypass; revoked-credential rows keep empty string
+    // and stay locked to public-visibility-only behavior.
+    if (!cols.some((c) => c.name === 'owner_name')) {
+      this.db.exec(`ALTER TABLE agents ADD COLUMN owner_name TEXT NOT NULL DEFAULT ''`);
+      const hasCredentials = this.db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='credentials'",
+      ).get();
+      if (hasCredentials) {
+        this.db.exec(`
+          UPDATE agents
+             SET owner_name = COALESCE(
+               (SELECT owner_name FROM credentials WHERE credentials.id = agents.owner_credential_id),
+               ''
+             )
+        `);
+      }
+    }
   }
 
   register(input: RegisterInput): AgentRecord {
@@ -113,12 +150,15 @@ export class AgentStore {
       const memoryPublic = input.memoryPublic === undefined
         ? existing.memory_public === 1
         : input.memoryPublic === true;
+      // ownerName re-sync on every register so a credential rotation that
+      // preserves ownerCredentialId but changes ownerName keeps the row
+      // accurate. Owner-bypass reads owner_name directly.
       this.db.prepare(`
         UPDATE agents SET
-          url = ?, visible = ?, memory_public = ?, last_seen_at = ?
+          url = ?, visible = ?, memory_public = ?, owner_name = ?, last_seen_at = ?
         WHERE bot_name = ?
       `).run(
-        input.url, visible ? 1 : 0, memoryPublic ? 1 : 0, now, input.botName,
+        input.url, visible ? 1 : 0, memoryPublic ? 1 : 0, input.ownerName ?? '', now, input.botName,
       );
       this.logger.info({ botName: input.botName }, 'agent re-registered');
       return this.getByName(input.botName)!;
@@ -128,11 +168,11 @@ export class AgentStore {
     const memoryPublic = input.memoryPublic !== false;
     this.db.prepare(`
       INSERT INTO agents (id, bot_name, url, talk_secret, visible, memory_public,
-        owner_credential_id, registered_at, last_seen_at)
-      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)
+        owner_credential_id, owner_name, registered_at, last_seen_at)
+      VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.botName, input.url, visible ? 1 : 0, memoryPublic ? 1 : 0,
-      input.ownerCredentialId, now, now,
+      input.ownerCredentialId, input.ownerName ?? '', now, now,
     );
     this.logger.info({ botName: input.botName, id }, 'agent registered');
     return this.getByName(input.botName)!;
@@ -254,6 +294,7 @@ interface RawAgentRow {
   visible: 0 | 1;
   memory_public: 0 | 1;
   owner_credential_id: string;
+  owner_name: string | null;
   registered_at: string;
   last_seen_at: string;
 }
@@ -266,6 +307,7 @@ function rowToRecord(row: RawAgentRow): AgentRecord {
     visible: row.visible === 1,
     memoryPublic: row.memory_public === 1,
     ownerCredentialId: row.owner_credential_id,
+    ownerName: row.owner_name || '',
     registeredAt: row.registered_at,
     lastSeenAt: row.last_seen_at,
   };
