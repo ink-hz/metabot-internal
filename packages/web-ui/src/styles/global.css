@@ -84,6 +84,39 @@ a:hover { border-bottom-color: var(--phosphor); }
   background: var(--ink-050);
 }
 
+.brand-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.sidebar-toggle {
+  font-family: var(--mono);
+  font-size: 14px;
+  line-height: 1;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--ink-100);
+  border: 1px solid var(--hairline-strong);
+  color: var(--bone-200);
+  cursor: pointer;
+  padding: 0;
+  transition: color 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+.sidebar-toggle:hover {
+  color: var(--phosphor);
+  border-color: var(--phosphor-dim);
+  background: var(--ink-200);
+}
+.sidebar-toggle:focus-visible {
+  outline: 0;
+  border-color: var(--phosphor);
+  box-shadow: 0 0 0 1px var(--phosphor) inset;
+}
+
 .brand {
   display: flex;
   align-items: baseline;
@@ -202,6 +235,12 @@ a:hover { border-bottom-color: var(--phosphor); }
   overflow-y: auto;
   background: var(--ink-050);
 }
+
+/* sidebar-collapsed: hide aside, give content the full row.
+   Controlled by `.shell.sidebar-collapsed` class set in App.tsx. */
+.shell.sidebar-collapsed .main { grid-template-columns: 1fr; }
+.shell.sidebar-collapsed .sidebar { display: none; }
+.shell.sidebar-collapsed .content { max-width: none; padding-left: 48px; padding-right: 48px; }
 
 .sidebar-section {
   padding: 0 18px 12px;
@@ -402,6 +441,73 @@ a:hover { border-bottom-color: var(--phosphor); }
   border: 1px solid var(--hairline-strong);
   background: #fafaf6;
   border-radius: 0;
+}
+
+/* HTML doc fullscreen overlay — clicked from the toolbar above the iframe.
+   Covers the entire viewport, restores the iframe to natural document height. */
+.doc-iframe-wrap { position: relative; }
+
+.doc-iframe-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.doc-iframe-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  background: var(--ink-100);
+  border: 1px solid var(--hairline-strong);
+  color: var(--bone-200);
+  padding: 5px 10px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.doc-iframe-btn:hover {
+  color: var(--phosphor);
+  border-color: var(--phosphor-dim);
+}
+.doc-iframe-btn .icon {
+  font-size: 13px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+
+.doc-iframe-wrap.fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: var(--ink-000);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  padding: 0;
+}
+.doc-iframe-wrap.fullscreen .doc-iframe-toolbar {
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--ink-050);
+  border-bottom: 1px solid var(--hairline);
+  justify-content: space-between;
+  align-items: center;
+}
+.doc-iframe-wrap.fullscreen .doc-iframe-toolbar .fs-title {
+  font-family: var(--display);
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--bone-300);
+}
+.doc-iframe-wrap.fullscreen .doc-iframe {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+  border: 0;
 }
 
 /* markdown body — readable, restrained */
