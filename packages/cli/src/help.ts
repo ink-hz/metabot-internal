@@ -11,6 +11,8 @@ Subcommands:
                         e.g. metabot skills list | metabot skills install <name>
   agents <cmd> [args]   agent registry (address book for peer bots)
                         e.g. metabot agents list | metabot agents talk <peer>/<bot> <chatId> "<msg>"
+  inbox <cmd> [args]    central inbox for CLI agents (no resident bridge needed)
+                        e.g. metabot inbox register | metabot inbox poll --loop
   t5t <cmd> [args]      daily team status portal (board / projects / entries)
                         e.g. metabot t5t board | metabot t5t push <slug> <date> "<item>"
   help                  this message (also --help, -h, or bare invocation)
@@ -19,6 +21,7 @@ Each subcommand has its own help; pass --help through to see it:
   metabot memory --help
   metabot skills --help
   metabot agents --help
+  metabot inbox --help
   metabot t5t --help
 
 Env:

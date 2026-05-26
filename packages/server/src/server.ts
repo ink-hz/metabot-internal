@@ -9,12 +9,14 @@ import { authenticate, authenticateWeb, extractBearer, isAuthFailure } from './a
 import { MemoryStore, ALLOWED_CONTENT_TYPES } from './memory/memory-store.js';
 import { SkillStore } from './skills/skill-store.js';
 import { AgentStore } from './agents/agent-store.js';
+import { InboxStore } from './agents/inbox-store.js';
 import { T5tStore } from './t5t/t5t-store.js';
 import { loadT5tFolderIds } from './t5t/folder-ids.js';
 import { AuditLog, createDefaultAuditLog, type AuditOp } from './observability/audit-log.js';
 import * as memoryRoutes from './memory/memory-routes.js';
 import * as skillRoutes from './skills/skill-routes.js';
 import * as agentRoutes from './agents/agent-routes.js';
+import * as inboxRoutes from './agents/inbox-routes.js';
 import * as t5tRoutes from './t5t/t5t-routes.js';
 import * as adminRoutes from './admin/admin-routes.js';
 import * as webRoutes from './web/web-routes.js';
@@ -53,6 +55,7 @@ export interface ServerHandle {
   memoryStore: MemoryStore;
   skillStore: SkillStore;
   agentStore: AgentStore;
+  inboxStore: InboxStore;
   t5tStore: T5tStore;
   auditLog: AuditLog;
   startedAt: number;
@@ -330,6 +333,12 @@ function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname === '/api/t5t/board' && method === 'GET') return 'list';
   if (pathname.startsWith('/api/t5t/projects/') && method === 'GET') return 'get';
   if (pathname === '/api/web/issue-token' && method === 'POST') return 'issue';
+  if (pathname.startsWith('/api/inbox/')) {
+    if (pathname.endsWith('/poll') && method === 'POST') return 'inbox_pop';
+    if (method === 'POST') return 'inbox_enqueue';
+    if (method === 'GET') return 'inbox_peek';
+    if (method === 'DELETE') return 'inbox_clear';
+  }
   if (method === 'POST') return 'create';
   if (method === 'PATCH' || method === 'PUT') return 'update';
   if (method === 'DELETE') return 'delete';
@@ -357,6 +366,7 @@ export function startServer(options: ServerOptions): ServerHandle {
   const memoryStore = new MemoryStore(db, logger.child({ module: 'memory' }));
   const skillStore = new SkillStore(db, logger.child({ module: 'skills' }));
   const agentStore = new AgentStore(db, logger.child({ module: 'agents' }));
+  const inboxStore = new InboxStore(db, logger.child({ module: 'inbox' }));
   const t5tFolderIds = loadT5tFolderIds(
     process.env,
     memoryStore,
@@ -672,6 +682,42 @@ export function startServer(options: ServerOptions): ServerHandle {
         return jsonResult(res, agentRoutes.removeAgent(agentStore, botName, cred));
       }
 
+      // ---- Inbox routes (central agent-bus inbox for CLI users) ----
+      // Match order: longer paths first so `/poll` doesn't hit the bare
+      // `/api/inbox/:botName` enqueue match.
+      const inboxPollMatch = pathname.match(/^\/api\/inbox\/([^/]+)\/poll$/);
+      if (inboxPollMatch && method === 'POST') {
+        const botName = decodeURIComponent(inboxPollMatch[1]);
+        // Long-poll: handler writes the response directly.
+        const body = await parseJsonBody(req).catch(() => ({} as Record<string, unknown>));
+        const chatIdQ = query.get('chatId');
+        const chatId = chatIdQ !== null
+          ? chatIdQ
+          : (typeof body.chatId === 'string' ? body.chatId : undefined);
+        const waitMs = inboxRoutes.parsePollWaitMs(
+          query.get('wait') ?? body.wait,
+        );
+        inboxRoutes.pollInbox(
+          { inbox: inboxStore, agents: agentStore },
+          { botName, chatId, waitMs, cred, req, res },
+        );
+        return;
+      }
+      const inboxMatch = pathname.match(/^\/api\/inbox\/([^/]+)$/);
+      if (inboxMatch && method === 'POST') {
+        const botName = decodeURIComponent(inboxMatch[1]);
+        const body = await parseJsonBody(req);
+        return jsonResult(res, inboxRoutes.enqueueInbox(inboxStore, agentStore, botName, body, cred));
+      }
+      if (inboxMatch && method === 'GET') {
+        const botName = decodeURIComponent(inboxMatch[1]);
+        return jsonResult(res, inboxRoutes.peekInbox(inboxStore, agentStore, botName, query, cred));
+      }
+      if (inboxMatch && method === 'DELETE') {
+        const botName = decodeURIComponent(inboxMatch[1]);
+        return jsonResult(res, inboxRoutes.clearInbox(inboxStore, agentStore, botName, query, cred));
+      }
+
       // ---- T5T routes ----
       if (pathname === '/api/t5t/board' && method === 'GET') {
         return jsonResult(res, t5tRoutes.getBoard(t5tStore, cred));
@@ -767,6 +813,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     memoryStore,
     skillStore,
     agentStore,
+    inboxStore,
     t5tStore,
     auditLog,
     startedAt,
