@@ -18,7 +18,7 @@ The legacy `metamemory` and `skill-hub` Claude Code skills keep working unchange
 
 ## What's inside
 
-- `SKILL.md` — the user-facing skill manifest with frontmatter (`name`, `description`) and the full `metabot` CLI reference: `memory`, `skills`, `agents` (incl. `talk <peer>/<bot> <chatId> "<msg>"`), and the `t5t` placeholder.
+- `SKILL.md` — the user-facing skill manifest with frontmatter (`name`, `description`) and the full `metabot` CLI reference: `memory`, `skills`, `agents` (incl. `talk <peer>/<bot> [<chatId>] "<msg>"` with project-derived chatId default), `inbox` (central spool for CC/Codex agents that have no resident bridge), and `t5t`.
 
 ## Source of truth
 

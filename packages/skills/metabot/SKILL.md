@@ -11,6 +11,7 @@ The `metabot` CLI is the single entry point to the metabot-core ecosystem. It wr
 metabot memory <cmd>   # shared knowledge / notes
 metabot skills <cmd>   # skill registry                (alias: skill)
 metabot agents <cmd>   # peer-bot address book
+metabot inbox  <cmd>   # central inbox for CLI agents (CC / Codex with no bridge)
 metabot t5t    <cmd>   # daily team status portal
 metabot help           # top-level help (also --help, -h, bare invocation)
 ```
@@ -106,7 +107,7 @@ metabot agents heartbeat [--bot-name <name>]
 metabot agents whoami
 metabot agents visible <botName>
 metabot agents hide    <botName>
-metabot agents talk <peer>[/<bot>] <chatId> "<message>"
+metabot agents talk <peer>[/<bot>] [<chatId>] "<message>"
 ```
 
 **`list`** — returns the visible registry. `--include-hidden` requires an admin token; member tokens get 403.
@@ -119,17 +120,83 @@ metabot agents talk <peer>[/<bot>] <chatId> "<message>"
 
 **`visible` / `hide`** — ownership-gated. Only the credential that registered the bot (or an admin token) can toggle visibility.
 
-**`talk`** is a thin convenience: it does `GET /api/agents` to resolve `<peer>` → `{url}`, then `POST <peerUrl>/api/talk` with `{botName, chatId, content}` using **your own** `METABOT_CORE_TOKEN` as the bearer. The peer bridge verifies the token by calling central `GET /api/whoami`; if it returns 200, the call is authorized. Use `<peer>/<bot>` to target a specific bot inside that peer; `<peer>` alone targets a bot of the same name on that peer.
+**`talk`** is a thin convenience: it does `GET /api/agents` to resolve `<peer>` → `{url}`, then either (a) `POST <peerUrl>/api/talk` for resident bridges, or (b) `POST <core>/api/inbox/<botName>` for CLI-only peers whose registered URL is the literal string `inbox:` (see [CLI-only agents](#cli-only-agents-inbox--project-as-chatid) below). The peer bridge verifies the token by calling central `GET /api/whoami`; if it returns 200, the call is authorized. Use `<peer>/<bot>` to target a specific bot inside that peer; `<peer>` alone targets a bot of the same name on that peer.
+
+**Default chatId — project-derived.** If you omit `<chatId>`, the CLI derives one from the current working directory: `proj:<basename>:<sha1(abs-path)[:8]>` (stable per absolute path, intentionally **not** cross-machine stable — see the inbox section). The derived id is echoed on stderr so you can tell when the default fired:
+
+```bash
+$ metabot agents talk alice/research-bot "ping"
+→ using project-derived chatId: proj:metabot:1a2b3c4d
+→ alice/research-bot @ proj:metabot:1a2b3c4d
+```
+
+Pass an explicit chatId when you want to share a thread across machines or with a non-CLI sender (Feishu, browser, etc.).
 
 **Semantics:**
 - **Asynchronous.** The target bot receives the message in its own chat/session and processes the turn there. Its reply lands in the target bot's chat (not as the return value of this command).
-- **The talk RPC is P2P.** The registry is an address book only. `metabot agents talk` shells out to the peer's `/api/talk` directly; metabot-core never proxies the message body.
+- **The talk RPC is P2P for resident bridges.** The registry is an address book only — for bridge peers, `metabot agents talk` shells out to the peer's `/api/talk` directly and metabot-core never proxies the message body. For CLI-only peers (`url: 'inbox:'`), the message is spooled centrally in metabot-core's `agent_inbox` table and drained by the target via `metabot inbox poll`.
 
 ```bash
 # Resolve the registry, then deliver
 metabot agents list
 metabot agents talk alice/research-bot chat_BBB "What did last week's retention dashboard show?"
 ```
+
+### CLI-only agents (`inbox:` + project-as-chatId)
+
+Claude Code and Codex have no resident bridge, so they can't accept inbound `POST /api/talk`. To make them addressable on the agent bus anyway, they register with a literal `url: 'inbox:'` marker (no scheme, no host — just the string). Senders observe the marker and reroute through metabot-core's central inbox; the CLI agent drains the queue with `metabot inbox poll`.
+
+**Project = chatId.** Without Feishu, there's no natural conversation id, so each project directory's absolute path is hashed into `proj:<basename>:<sha1>[:8]`. This is the default chatId for both `metabot agents talk` (when chatId is omitted) and `metabot inbox peek/poll/clear` (when `--chat` and `--all-chats` are both omitted). Two checkouts of the same repo at different paths or on different machines are deliberately treated as **different** chats — pass an explicit `--chat` if you want to merge them.
+
+```bash
+metabot inbox project-id   # echo the cwd-derived chatId without doing anything else
+```
+
+End-to-end registration:
+
+```bash
+# On machine A (the CC/Codex user) — register once per machine
+metabot inbox register                     # bot name defaults to cli:<ownerName>@<hostname>
+metabot inbox poll --loop                  # block forever, draining as messages arrive
+
+# On machine B (any sender with a metabot-core token)
+metabot agents talk cli:flood@laptop "follow-up on the deploy"
+# stderr: → using project-derived chatId: proj:<project>:<hash>
+# A's `inbox poll` prints one JSON line per delivered message
+```
+
+## `metabot inbox` — central inbox for CLI-only agents
+
+A small spool kept inside metabot-core (table `agent_inbox`) so CC/Codex peers — who can't accept inbound HTTP — can still receive `metabot agents talk` messages. Bots register with `url: 'inbox:'` (see the [CLI-only agents](#cli-only-agents-inbox--project-as-chatid) section above); senders observe the marker and reroute through `POST /api/inbox/<botName>`; the target drains the queue with `poll`. Each project directory is its own chatId by default.
+
+```bash
+metabot inbox register [--bot-name <name>]
+metabot inbox project-id
+metabot inbox peek    [--chat <id>] [--all-chats] [--limit 20]
+metabot inbox poll    [--chat <id>] [--wait 30] [--once|--loop]
+metabot inbox clear   [--chat <id>] [--all-chats]
+```
+
+**`register`** — registers an inbox-only agent on the bus. Default `--bot-name` is `cli:<ownerName>@<hostname>` (ownerName from `GET /api/whoami`, hostname from `os.hostname().split('.')[0]`). The registration uses `url: 'inbox:'` and `visible: true`. Re-running it from the same credential is idempotent; a different credential trying to claim the same name gets `403 name_squat` like any other agent registration.
+
+**`project-id`** — print the cwd-derived chatId and exit. Useful for sanity checks and for copy-pasting into an explicit `--chat` on a remote sender.
+
+**`peek`** — show queued messages without popping them. Without `--chat` or `--all-chats`, filters to the cwd-derived chatId and prints a stderr notice (`→ using project-derived chatId: …`). `--limit` defaults to 20 and is hard-capped at 200.
+
+**`poll`** — atomically pop the oldest queued message, long-polling up to `--wait` seconds. `--wait` defaults to 30 and is hard-capped at 60 (proxy idle limits). `--once` (default) returns after the first message or timeout; `--loop` keeps the call open forever and prints one JSON line per delivered message — the canonical mode for "open a terminal on machine A and leave it running". On `--once` timeout, prints a marker line `{"message":null,"waitedMs":<n>}` so pipelines can distinguish empty-poll from error. SIGINT/SIGTERM exits cleanly in `--loop` mode.
+
+```json
+{"id":"…","targetBot":"cli:flood@laptop","chatId":"proj:metabot:1a2b3c4d",
+ "fromBot":"alice","fromOwner":"alice@xvirobotics.com","content":"ping","enqueuedAt":"…"}
+```
+
+**`clear`** — delete queued messages. Defaults to the cwd chatId; `--all-chats` wipes every chat for the bot. Use this when a stale CLI session left messages behind that no longer make sense.
+
+**Auth.** All inbox routes are Bearer-only (web identity is excluded by the same structural fork that protects `/api/t5t/cli/*`). `peek` / `poll` / `clear` require **owner** of the target bot (`cred.ownerName === bot.ownerName`, or admin); `enqueue` (i.e. `POST /api/inbox/<botName>` triggered by `metabot agents talk`) only requires a valid Bearer — sending is open, draining is gated.
+
+**Anti-spoof.** The server stamps `fromBot`, `fromOwner`, `fromCredentialId` from the authenticated credential on every enqueue; any matching fields in the request body are ignored. The receiver can trust those three fields without further verification.
+
+**Storage.** SQLite table `agent_inbox(id, target_bot, chat_id, from_bot, from_owner, from_credential_id, content, enqueued_at)` with index `(target_bot, chat_id, enqueued_at)`. No TTL — use `clear` or `metabot inbox count` (if added) to manage size. The table lives in the same `central.db` as `agents`, `memory_*`, and `t5t_*`.
 
 ## `metabot t5t` — daily team status portal
 

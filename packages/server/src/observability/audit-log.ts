@@ -24,7 +24,11 @@ export type AuditOp =
   | 'wip'
   | 'kill'
   | 'issue'
-  | 'whoami';
+  | 'whoami'
+  | 'inbox_enqueue'
+  | 'inbox_pop'
+  | 'inbox_peek'
+  | 'inbox_clear';
 
 export interface AuditEntry {
   ts: string;

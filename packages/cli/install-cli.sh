@@ -9,7 +9,13 @@
 # Installs:
 #   - `metabot` on PATH (npm global or ~/.local fallback)
 #   - $HOME/.metabot-core/token (chmod 600) if METABOT_CORE_TOKEN was set
-#   - $HOME/.claude/skills/metabot/  (Claude Code skill for /metabot)
+#   - $HOME/.claude/skills/metabot/  (Claude / Kimi skill discovery path)
+#   - $HOME/.codex/skills/metabot/   (Codex skill discovery path)
+#
+# Engine selection:
+#   --engine claude|codex|both       which skill path(s) to populate
+#   METABOT_CLI_ENGINE=…             env equivalent; flag wins
+# Default: both. Same SKILL.md/README.md source for every engine.
 #
 # Does NOT install the Feishu bridge / bots.json / PM2 / engines. That path is
 # the full GitLab-based `install.sh` at the repo root.
@@ -21,6 +27,34 @@ CORE_URL="${METABOT_CORE_URL:-$CORE_URL_DEFAULT}"
 TARBALL_URL="$CORE_URL/cli/latest.tgz"
 TARBALL_TMP="$(mktemp -t metabot-cli.XXXXXX.tgz)"
 trap 'rm -f "$TARBALL_TMP"' EXIT
+
+ENGINE="${METABOT_CLI_ENGINE:-both}"
+
+# Parse --engine if passed. Long-form `--engine=…` and short space-separated
+# both supported; positional args ignored (the installer takes none).
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --engine)
+      ENGINE="${2:-}"
+      shift 2
+      ;;
+    --engine=*)
+      ENGINE="${1#--engine=}"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "$ENGINE" in
+  claude|codex|both) ;;
+  *)
+    printf 'error: --engine must be claude|codex|both (got %q)\n' "$ENGINE" >&2
+    exit 1
+    ;;
+esac
 
 c_red()   { printf '\033[31m%s\033[0m' "$*"; }
 c_green() { printf '\033[32m%s\033[0m' "$*"; }
@@ -112,26 +146,39 @@ if [[ -n "${METABOT_CORE_URL:-}" && "$METABOT_CORE_URL" != "$CORE_URL_DEFAULT" ]
   info "wrote url → $CONFIG_DIR/url ($METABOT_CORE_URL)"
 fi
 
-# --- Step 6: install /metabot skill ----------------------------------------
+# --- Step 6: install /metabot skill (per engine) ----------------------------
 SKILL_SRC="$PKG_ROOT/skills/metabot"
-SKILL_DST="$HOME/.claude/skills/metabot"
-if [[ -d "$SKILL_SRC" ]]; then
-  mkdir -p "$HOME/.claude/skills"
-  if [[ -d "$SKILL_DST" ]]; then
-    # Back up only if checksums differ; otherwise just overwrite silently.
-    SRC_HASH="$(find "$SKILL_SRC" -type f -name '*.md' -print0 | sort -z | xargs -0 cat | sha256sum | cut -d' ' -f1)"
-    DST_HASH="$(find "$SKILL_DST" -type f -name '*.md' -print0 | sort -z | xargs -0 cat 2>/dev/null | sha256sum | cut -d' ' -f1)"
-    if [[ "$SRC_HASH" != "$DST_HASH" ]]; then
-      BACKUP="$SKILL_DST.bak.$(date +%s)"
-      mv "$SKILL_DST" "$BACKUP"
-      info "backed up existing skill → $BACKUP"
+
+install_skill_to() {
+  # $1 = destination skill dir (e.g. $HOME/.claude/skills/metabot)
+  local dst="$1"
+  local parent
+  parent="$(dirname "$dst")"
+  if [[ ! -d "$SKILL_SRC" ]]; then
+    warn "bundled skill not found at $SKILL_SRC — skipped $dst"
+    return
+  fi
+  mkdir -p "$parent"
+  if [[ -d "$dst" ]]; then
+    local src_hash dst_hash
+    src_hash="$(find "$SKILL_SRC" -type f -name '*.md' -print0 | sort -z | xargs -0 cat | sha256sum | cut -d' ' -f1)"
+    dst_hash="$(find "$dst" -type f -name '*.md' -print0 | sort -z | xargs -0 cat 2>/dev/null | sha256sum | cut -d' ' -f1)"
+    if [[ "$src_hash" != "$dst_hash" ]]; then
+      local backup="$dst.bak.$(date +%s)"
+      mv "$dst" "$backup"
+      info "backed up existing skill → $backup"
     fi
   fi
-  mkdir -p "$SKILL_DST"
-  cp -R "$SKILL_SRC/." "$SKILL_DST/"
-  info "installed /metabot skill → $SKILL_DST"
-else
-  warn "bundled skill not found at $SKILL_SRC — skipped"
+  mkdir -p "$dst"
+  cp -R "$SKILL_SRC/." "$dst/"
+  info "installed /metabot skill → $dst"
+}
+
+if [[ "$ENGINE" == "claude" || "$ENGINE" == "both" ]]; then
+  install_skill_to "$HOME/.claude/skills/metabot"
+fi
+if [[ "$ENGINE" == "codex" || "$ENGINE" == "both" ]]; then
+  install_skill_to "$HOME/.codex/skills/metabot"
 fi
 
 # --- Step 7: self-check ----------------------------------------------------
@@ -166,10 +213,20 @@ if [[ -n "$INSTALL_PREFIX" ]]; then
   echo "  export PATH=\"\$HOME/.local/bin:\$PATH\""
 fi
 echo
+echo "Token persistence:"
+echo "  $CONFIG_DIR/token is auto-read by every metabot subcommand."
+echo "  No need to export METABOT_CORE_TOKEN in your shell rc."
+echo "  Rotate any time via $CORE_URL/cli."
+echo
 echo "Next steps:"
 echo "  metabot --help            # subcommands"
 echo "  metabot memory list       # browse central memory"
 echo "  metabot agents            # list peer bots"
+echo "  metabot inbox register    # accept messages without a resident bridge"
 echo "  metabot t5t board         # today's t5t"
 echo
-echo "Token can be rotated any time at: $CORE_URL/cli"
+case "$ENGINE" in
+  claude) echo "Engine: claude  (skill at ~/.claude/skills/metabot)" ;;
+  codex)  echo "Engine: codex   (skill at ~/.codex/skills/metabot)"  ;;
+  both)   echo "Engine: both    (skill at ~/.claude/skills/metabot + ~/.codex/skills/metabot)" ;;
+esac

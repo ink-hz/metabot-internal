@@ -21,6 +21,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 import { parseArgs, print, loadConfig } from '@xvirobotics/cli-core';
+import { deriveProjectChatId } from './project-id.js';
 
 const DEFAULT_BUS_URL = 'https://metabot-core.xvirobotics.com';
 
@@ -120,10 +121,17 @@ Subcommands:
                                         Only takes effect when the bot is hidden.
   unshare <botName> <ownerName>         Remove <ownerName> from the allowlist.
   shared  <botName>                     Print <botName>'s current allowlist.
-  talk <peer>[/<bot>] <chatId> "<msg>"  Send a message to a peer's bot via its /api/talk.
-                                        Auth: this command forwards your own
-                                        METABOT_CORE_TOKEN; the peer bridge verifies it
-                                        via central /api/whoami.
+  talk <peer>[/<bot>] [<chatId>] "<msg>"
+                                        Send a message to a peer's bot. When <chatId>
+                                        is omitted, defaults to the cwd-derived
+                                        project chatId.
+                                        If the peer's registry url is 'inbox:',
+                                        routes through metabot-core's central inbox
+                                        instead of /api/talk (use \`metabot inbox poll\`
+                                        on the receiving end). Otherwise POSTs to the
+                                        peer bridge's /api/talk with your own
+                                        METABOT_CORE_TOKEN; the bridge verifies via
+                                        central /api/whoami.
 
 Env:
   METABOT_CORE_URL              memory + agents URL (default ${DEFAULT_BUS_URL})
@@ -246,10 +254,23 @@ async function cmdShared(args: string[]): Promise<void> {
 async function cmdTalk(args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const target = positional[0];
-  const chatId = positional[1];
-  const content = positional[2];
-  if (!target || !chatId || content === undefined) {
-    throw new Error('metabot agents talk: <peer>[/<bot>] <chatId> "<message>" required');
+  // Allow omitting <chatId>: the cwd-derived chatId is the default so CC/Codex
+  // users don't have to invent one. When omitted, positional[1] is the content.
+  let chatId: string;
+  let content: string | undefined;
+  let chatIdSource: 'positional' | 'project' = 'positional';
+  if (positional.length >= 3) {
+    chatId = positional[1]!;
+    content = positional[2];
+  } else if (positional.length === 2) {
+    chatId = deriveProjectChatId();
+    content = positional[1];
+    chatIdSource = 'project';
+  } else {
+    throw new Error('metabot agents talk: <peer>[/<bot>] [<chatId>] "<message>" required');
+  }
+  if (!target || content === undefined) {
+    throw new Error('metabot agents talk: <peer>[/<bot>] [<chatId>] "<message>" required');
   }
   const slash = target.indexOf('/');
   const peerName = slash >= 0 ? target.slice(0, slash) : target;
@@ -266,6 +287,26 @@ async function cmdTalk(args: string[]): Promise<void> {
     );
   }
   if (!peer.url) throw new Error(`metabot agents talk: peer '${peerName}' has no url in registry`);
+
+  if (chatIdSource === 'project') {
+    process.stderr.write(`→ using project-derived chatId: ${chatId}\n`);
+  }
+
+  // `url:'inbox:'` marker means the peer is a CLI-only agent without a
+  // resident bridge. Route through the central inbox instead of POSTing to
+  // <peer.url>/api/talk (which would fail with ECONNREFUSED).
+  if (peer.url === 'inbox:') {
+    const resp = await busRequest(
+      cfg, 'POST', `/api/inbox/${encodeURIComponent(botName)}`, { chatId, content },
+    );
+    process.stdout.write(`→ ${peerName}/${botName} @ ${chatId} (inbox)\n`);
+    if (typeof resp === 'object' && resp !== null) {
+      // Surface the message id so the sender can correlate with audit logs.
+      const id = (resp as { message?: { id?: unknown } }).message?.id;
+      if (typeof id === 'string') process.stderr.write(`  id=${id}\n`);
+    }
+    return;
+  }
 
   const peerUrl = peer.url.replace(/\/+$/, '') + '/api/talk';
   const headers: Record<string, string> = {
