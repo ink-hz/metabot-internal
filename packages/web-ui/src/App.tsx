@@ -22,6 +22,31 @@ function Brand() {
   );
 }
 
+const SIDEBAR_STATE_KEY = 'metabot-core:sidebar-collapsed';
+
+function readSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_STATE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className="sidebar-toggle"
+      onClick={onToggle}
+      title={collapsed ? 'show sidebar  ( [ )' : 'hide sidebar  ( [ )'}
+      aria-label={collapsed ? 'show sidebar' : 'hide sidebar'}
+      aria-pressed={collapsed}
+    >
+      {collapsed ? '›' : '‹'}
+    </button>
+  );
+}
+
 function SearchBar() {
   const nav = useNavigate();
   const loc = useLocation();
@@ -70,6 +95,15 @@ function MetaBar({ manifest }: { manifest: Manifest | null }) {
 function Shell({ children }: { children: React.ReactNode }) {
   const loc = useLocation();
   const [manifest, setManifest] = useState<Manifest | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readSidebarCollapsed);
+
+  const toggleSidebar = () => {
+    setSidebarCollapsed((cur) => {
+      const next = !cur;
+      try { localStorage.setItem(SIDEBAR_STATE_KEY, next ? '1' : '0'); } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   useEffect(() => {
     let live = true;
@@ -82,12 +116,19 @@ function Shell({ children }: { children: React.ReactNode }) {
     return () => { live = false; };
   }, [loc.pathname]);
 
-  // global '/' to focus the search input
+  // global shortcuts:
+  //   '/'  focus search input
+  //   '['  toggle sidebar
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === '/' && document.activeElement?.tagName !== 'INPUT' && document.activeElement?.tagName !== 'TEXTAREA') {
+      const tag = document.activeElement?.tagName;
+      const inField = tag === 'INPUT' || tag === 'TEXTAREA';
+      if (e.key === '/' && !inField) {
         const el = document.querySelector<HTMLInputElement>('.search-bar input');
         if (el) { e.preventDefault(); el.focus(); el.select(); }
+      } else if (e.key === '[' && !inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault();
+        toggleSidebar();
       }
     };
     window.addEventListener('keydown', onKey);
@@ -95,9 +136,12 @@ function Shell({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <div className="shell">
+    <div className={`shell${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
       <header className="top-bar">
-        <Brand />
+        <div className="brand-row">
+          <SidebarToggle collapsed={sidebarCollapsed} onToggle={toggleSidebar} />
+          <Brand />
+        </div>
         <SearchBar />
         <nav className="actions">
           <NavLink to="/" end>memory</NavLink>

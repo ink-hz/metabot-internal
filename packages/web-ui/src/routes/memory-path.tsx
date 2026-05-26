@@ -171,7 +171,7 @@ function Body({ view, path }: { view: View; path: string }) {
         </div>
       </header>
       {doc.content_type === 'text/html' ? (
-        <HtmlDocFrame content={doc.content} />
+        <HtmlDocFrame content={doc.content} title={doc.title || doc.path} />
       ) : (
         <div
           className="md"
