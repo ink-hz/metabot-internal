@@ -2,7 +2,7 @@ import * as zlib from 'node:zlib';
 import type { SkillStore } from './skill-store.js';
 import type { Credential } from '../auth/credentials.js';
 import {
-  canPublishSkill, canUnpublishSkill, filterSkillsForCred, isVisibleToCred,
+  canPublishSkill, canUnpublishSkill, canOverwriteSkill, filterSkillsForCred, isVisibleToCred,
 } from './publish-acl.js';
 
 export interface RouteResult {
@@ -45,6 +45,11 @@ export function publishSkill(
 
   const skillMd = body.skillMd as string | undefined;
   if (!skillMd) return err(400, 'skillMd_required');
+
+  const existing = store.get(name);
+  if (existing && !canOverwriteSkill(existing, cred)) {
+    return err(403, 'skill_owned_by_other');
+  }
 
   // Tristate: field absent = preserve existing, null = explicit clear,
   // string = new base64-encoded pack. Without this, CLI publishes that omit
