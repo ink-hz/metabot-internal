@@ -4,30 +4,34 @@ This workspace is managed by **MetaBot** — an AI assistant accessible via Feis
 
 ## Available Skills
 
-### /metamemory — Shared Knowledge Store
-Read and write persistent memory documents across sessions. Use the `mm` shell shortcut for quick operations:
+### /metabot — Unified CLI (memory, skills, agents, t5t, bridge)
+
+`metabot` is the **single** CLI for everything: shared memory, skill hub, peer-bot agent bus, t5t status portal, and bridge process control. Legacy `mb` / `mm` / `mh` / `mbcore` shortcuts are all gone — install and `metabot update` actively clean any stragglers from `~/.local/bin/`. Use `metabot <subcommand>` everywhere.
 
 ```bash
-mm search <query>       # Search documents
-mm get <doc_id>         # Get document by ID
-mm list [folder_id]     # List documents
-mm folders              # Browse folder tree
-```
+# Shared memory (central knowledge store)
+metabot memory search <query>                   # Full-text search
+metabot memory get <id|path>                    # Read a doc
+metabot memory list [folder_id]                 # Browse the tree
+metabot memory create "<title>" "<content>"     # Create a doc
 
-For full API (create with tags, update, delete), use the `/metamemory` skill.
+# Skill hub
+metabot skills list                             # List published skills
+metabot skills install <name>                   # Install into .claude/skills/<name>
 
-### /metabot — Agent Bus & Bot Management
-Use the `metabot` CLI for quick operations:
-
-```bash
+# Agent bus — peer-bot directory + cross-bot talk
 metabot bots                                    # List all bots (local + peer)
-metabot talk <botName> <chatId> <prompt>        # Delegate task to a bot
 metabot peers                                   # List peers and their status
-metabot skills list                             # List published skills (central Skill Hub)
+metabot talk <botName> <chatId> <prompt>        # Delegate a task to a bot
+
+# Bridge process control + diagnostics
+metabot update | restart | logs | status        # Bridge lifecycle
 metabot health                                  # Health check
 ```
 
-For full API (create bots, sendCards, Skill Hub publish/install), use the `/metabot` skill.
+For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/retract, etc.), use the `/metabot` skill.
+
+Web 控制台（所有人统一入口）：https://metabot-core.xvirobotics.com — 飞连 OIDC SSO 登录，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
 ### Scheduling (Claude Code native)
 
@@ -65,6 +69,6 @@ lark-cli base records list ...                           # Query bitable
 ## Guidelines
 
 - **Search before creating** — always check if a file or document already exists before creating new ones.
-- **Use metamemory** — when you discover important knowledge, project patterns, or user preferences, save them to memory so future sessions can benefit.
+- **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ...` so future sessions can benefit.
 - **Output files** — when generating files the user needs (images, PDFs, reports), copy them to the outputs directory provided in the system prompt so they get sent to the chat automatically.
 - **Be concise in chat** — responses appear as Feishu/Telegram cards with limited space. Keep answers focused and use markdown formatting.
