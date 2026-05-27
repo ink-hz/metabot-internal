@@ -410,6 +410,21 @@ export class MemoryStore {
     return rowToDoc(row);
   }
 
+  /**
+   * Look up a document's path by id or path, without applying any ACL.
+   * Returns null when the document doesn't exist.
+   *
+   * Used by `/api/memory/*` route handlers to short-circuit hidden-path
+   * lookups (e.g. `/t5t/*`) without leaking content. Never expose the result
+   * to a caller — only use it to decide whether to 404 the request.
+   */
+  findDocumentPathById(idOrPath: string): string | null {
+    const row = (idOrPath.startsWith('/')
+      ? this.db.prepare('SELECT path FROM documents WHERE path = ?').get(normalizePath(idOrPath))
+      : this.db.prepare('SELECT path FROM documents WHERE id = ?').get(idOrPath)) as { path: string } | undefined;
+    return row ? row.path : null;
+  }
+
   listDocuments(opts: { folder_id?: string; prefix?: string; limit?: number; offset?: number }, cred: Credential): DocumentSummary[] {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 500);
     const offset = Math.max(opts.offset ?? 0, 0);
