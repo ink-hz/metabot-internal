@@ -84,21 +84,43 @@ export function canRead(cred: Credential, path: string): boolean {
 
 export function canWrite(cred: Credential, path: string): boolean {
   if (cred.role === 'admin') return true;
-  if (matchesOwnerNamespace(cred, path)) return true;
+  if (pathMatchesNamespace(path, selfNamespace(cred))) return true;
   return cred.writableNamespaces.some((ns) => pathMatchesNamespace(path, ns));
 }
 
 /**
- * User-level owner-bypass: any `/users/<ownerName>/...` path is always
- * accessible to a credential whose `ownerName` matches, regardless of what
- * `readableNamespaces` / `writableNamespaces` say. This is what lets the
- * same human's CLI cred on machine A and cred on machine B share a private
- * namespace — the per-credential namespace lists are keyed on `botName`
- * (which differs across machines) but ownership is keyed on `ownerName`.
+ * The single subtree a credential is allowed to write to by virtue of being
+ * itself (admin and explicit writableNamespaces are separate paths).
  *
- * Empty `ownerName` (legacy creds, or bootstrap admin) → no bypass. This
- * prevents an accidentally-empty value from matching `/users//foo` or
- * granting blanket access.
+ *   user-kind   (botName === ownerName, e.g. SSO / self-service web token):
+ *     /users/<ownerName>
+ *
+ *   agent-kind  (botName !== ownerName, e.g. bot token issued via
+ *               `metabot agents create`):
+ *     /users/<ownerName>/agents/<botName>
+ *
+ * Reads stay broader — `canRead` keeps `matchesOwnerNamespace` so an agent
+ * can see sibling agents and user-level docs under the same human.
+ *
+ * Empty `ownerName` (legacy creds, or bootstrap admin) → returns a string
+ * that `pathMatchesNamespace` rejects, so no accidental blanket grant.
+ */
+export function selfNamespace(cred: Credential): string {
+  if (!cred.ownerName) return '';
+  if (cred.botName === cred.ownerName) {
+    return `/users/${cred.ownerName}`;
+  }
+  return `/users/${cred.ownerName}/agents/${cred.botName}`;
+}
+
+/**
+ * User-level owner-bypass: any `/users/<ownerName>/...` path is always
+ * readable by a credential whose `ownerName` matches. Used only by `canRead`
+ * now — writes are narrowed to `selfNamespace`. This is what lets the same
+ * human's CLI cred on machine A and cred on machine B share visibility into
+ * a private namespace.
+ *
+ * Empty `ownerName` (legacy creds, or bootstrap admin) → no bypass.
  */
 function matchesOwnerNamespace(cred: Credential, path: string): boolean {
   if (!cred.ownerName) return false;

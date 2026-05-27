@@ -16,6 +16,23 @@ interface UserGroup {
   kind: 'user' | 'shared';
 }
 
+// Hoist the children of any `agents/` subfolder so bot folders render directly
+// under the user. Mirrors the server-side self-namespace model: writes land at
+// `/users/<owner>/agents/<bot>/...` but the `agents/` segment is plumbing — the
+// tree should show each bot as a peer of the user-level docs, not buried one
+// level deeper. Non-`agents` siblings (user-level docs / folders) pass through.
+function flattenAgentsLayer(userNode: FolderTreeNode): FolderTreeNode {
+  const out: FolderTreeNode = { ...userNode, children: [] };
+  for (const child of userNode.children) {
+    if (child.name === 'agents' && child.path.endsWith('/agents') && child.children.length > 0) {
+      out.children.push(...child.children);
+    } else {
+      out.children.push(child);
+    }
+  }
+  return out;
+}
+
 // Pure client-side bucket: walk the top-level children of the folder tree and
 // split into `/users/<name>` per-user groups + one synthetic "Shared / Public"
 // group that aggregates everything else. NEVER narrows readableNamespaces — the
@@ -27,7 +44,8 @@ function bucketTree(root: FolderTreeNode): UserGroup[] {
   // Look for `/users` at depth-1; its children are the per-user roots.
   const usersFolder = root.children.find((c) => c.name === 'users' && c.path === '/users');
   if (usersFolder) {
-    for (const userNode of usersFolder.children) {
+    for (const rawUserNode of usersFolder.children) {
+      const userNode = flattenAgentsLayer(rawUserNode);
       users.push({
         key: userNode.path,
         label: userNode.name,

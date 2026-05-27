@@ -159,13 +159,24 @@ describe('cmdCreate / cmdMkdir — write target', () => {
   /**
    * Stub global fetch. `whoami` controls the GET /api/whoami response;
    * every other call is recorded and answered with a 201.
+   *
+   * `ownerName` defaults to `botName` (user-kind whoami — like SSO / self-
+   * service web tokens) so existing pre-self-namespace expectations remain
+   * meaningful. Pass an explicit ownerName for agent-kind cases.
    */
-  function stubFetch(whoami?: { botName: string; role: string }): Call[] {
+  function stubFetch(whoami?: {
+    botName: string;
+    role: string;
+    ownerName?: string;
+    memoryPublic?: boolean;
+  }): Call[] {
     const calls: Call[] = [];
     const fake = (async (url: string, init: RequestInit) => {
       calls.push({ url, init });
       if (url.endsWith('/api/whoami')) {
-        return new Response(JSON.stringify(whoami ?? { botName: 'bot-x', role: 'member' }), {
+        const w = whoami ?? { botName: 'bot-x', role: 'member' };
+        const body = { ownerName: w.botName, ...w };
+        return new Response(JSON.stringify(body), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -254,29 +265,38 @@ describe('cmdCreate / cmdMkdir — write target', () => {
   });
 
   // ---- memoryPublic auto-prefix ----
-  it('create: member with memoryPublic:false opts out into /users/<botName>', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+  it('create: user-kind member with memoryPublic:false → /users/<ownerName>', async () => {
+    // user-kind: botName === ownerName (SSO / self-service web token)
+    const calls = stubFetch({ botName: 'alice@xvi.com', ownerName: 'alice@xvi.com', role: 'member', memoryPublic: false });
     await cmdCreate(cfg, parseArgs(['Private Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/users/bot-x/private-note');
+    expect(bodyOf(post).path).toBe('/users/alice@xvi.com/private-note');
   });
 
-  it('mkdir: member with memoryPublic:false opts out into /users/<botName>', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+  it('create: agent-kind member with memoryPublic:false → /users/<owner>/agents/<bot>', async () => {
+    // agent-kind: botName !== ownerName (bot token issued via `metabot agents create`)
+    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member', memoryPublic: false });
+    await cmdCreate(cfg, parseArgs(['Private Note', 'hello']));
+    const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
+    expect(bodyOf(post).path).toBe('/users/alice/agents/cli-bot/private-note');
+  });
+
+  it('mkdir: agent-kind member with memoryPublic:false → /users/<owner>/agents/<bot>', async () => {
+    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member', memoryPublic: false });
     await cmdMkdir(cfg, parseArgs(['private-folder']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
-    expect(bodyOf(post).path).toBe('/users/bot-x/private-folder');
+    expect(bodyOf(post).path).toBe('/users/alice/agents/cli-bot/private-folder');
   });
 
   it('create: explicit memoryPublic:true also lands in /shared/<botName>', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: true } as unknown as { botName: string; role: string });
+    const calls = stubFetch({ botName: 'bot-x', ownerName: 'alice', role: 'member', memoryPublic: true });
     await cmdCreate(cfg, parseArgs(['Public Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
     expect(bodyOf(post).path).toBe('/shared/bot-x/public-note');
   });
 
   it('create: --path still wins even when memoryPublic:false (explicit beats default)', async () => {
-    const calls = stubFetch({ botName: 'bot-x', role: 'member', memoryPublic: false } as unknown as { botName: string; role: string });
+    const calls = stubFetch({ botName: 'bot-x', ownerName: 'alice', role: 'member', memoryPublic: false });
     await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/shared/bot-x/forcing-shared']));
     // whoami call shouldn't happen at all when --path is set
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
@@ -287,16 +307,31 @@ describe('cmdCreate / cmdMkdir — write target', () => {
 
 describe('defaultWritePrefix — pure helper', () => {
   it('admin → undefined (root default preserved)', () => {
-    expect(defaultWritePrefix({ botName: 'a', role: 'admin' })).toBeUndefined();
-  });
-  it('member, private (explicit false) → /users/<bot>', () => {
-    expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: false }))
-      .toBe('/users/b');
+    expect(defaultWritePrefix({ botName: 'a', ownerName: '', role: 'admin' })).toBeUndefined();
   });
   it('member, public (default / explicit true / undefined) → /shared/<bot>', () => {
-    expect(defaultWritePrefix({ botName: 'b', role: 'member' })).toBe('/shared/b');
-    expect(defaultWritePrefix({ botName: 'b', role: 'member', memoryPublic: true }))
+    expect(defaultWritePrefix({ botName: 'b', ownerName: 'alice', role: 'member' }))
       .toBe('/shared/b');
+    expect(defaultWritePrefix({ botName: 'b', ownerName: 'alice', role: 'member', memoryPublic: true }))
+      .toBe('/shared/b');
+  });
+  it('member, private, user-kind (botName === ownerName) → /users/<ownerName>', () => {
+    // SSO / self-service web token: cred.botName === cred.ownerName === email
+    expect(defaultWritePrefix({
+      botName: 'alice@xvi.com',
+      ownerName: 'alice@xvi.com',
+      role: 'member',
+      memoryPublic: false,
+    })).toBe('/users/alice@xvi.com');
+  });
+  it('member, private, agent-kind (botName !== ownerName) → /users/<owner>/agents/<bot>', () => {
+    // Bot token issued via `metabot agents create`
+    expect(defaultWritePrefix({
+      botName: 'cli-bot',
+      ownerName: 'alice',
+      role: 'member',
+      memoryPublic: false,
+    })).toBe('/users/alice/agents/cli-bot');
   });
 });
 

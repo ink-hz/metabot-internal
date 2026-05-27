@@ -66,12 +66,13 @@ function slugify(title: string): string {
 
 interface Whoami {
   botName: string;
+  ownerName: string;
   role: string;
   /**
    * Server returns this for member bots that have an agent-registry row.
    * `true` (default for newly-registered bots) means the CLI auto-prefixes
    * writes into `/shared/<botName>/...` (visible to every member). `false`
-   * opts out into the per-bot private `/users/<botName>/...` namespace.
+   * opts out into the per-owner private subtree (see `defaultWritePrefix`).
    * Absent is treated as `true` (matching server default) so brand-new
    * bots that haven't gone through whoami yet still land in /shared.
    */
@@ -94,21 +95,27 @@ async function whoami(cfg: Config): Promise<Whoami> {
 
 /**
  * Decide the default folder prefix for `create`/`mkdir` when the caller
- * didn't pass `--path` or `--folder`. Members → `/shared/<bot>` (default,
- * cross-bot readable) or `/users/<bot>` (private when the bot opted out
- * via `metabot memory visibility private` or `memoryPublic: false` in
- * bots.json). Admins fall back to root (their `writableNamespaces` already
- * contains `/`). Undefined `memoryPublic` is treated as the server-side
- * default (true) so brand-new bots that haven't gone through whoami yet
- * still land in /shared.
+ * didn't pass `--path` or `--folder`.
+ *
+ *   admin                                     → undefined (writableNamespaces=['/'])
+ *   memoryPublic !== false                    → /shared/<botName>          (cross-bot readable, flat)
+ *   memoryPublic === false (opted private):
+ *     botName === ownerName (SSO/web token)   → /users/<ownerName>         (user-kind self namespace)
+ *     botName !== ownerName (agent token)     → /users/<ownerName>/agents/<botName>  (agent-kind self namespace)
+ *
+ * Mirrors the server-side `selfNamespace(cred)` in auth/credentials.ts.
+ * Reads stay broader (canRead allows the full /users/<ownerName>/ subtree
+ * for same-owner creds), but writes are confined to this exact prefix so
+ * sibling agents can't overwrite each other.
  *
  * Exported for tests; production callers should use it via `cmdCreate` /
  * `cmdMkdir`.
  */
 export function defaultWritePrefix(me: Whoami): string | undefined {
   if (me.role === 'admin') return undefined;
-  const base = me.memoryPublic === false ? '/users' : '/shared';
-  return `${base}/${me.botName}`;
+  if (me.memoryPublic !== false) return `/shared/${me.botName}`;
+  if (me.botName === me.ownerName) return `/users/${me.ownerName}`;
+  return `/users/${me.ownerName}/agents/${me.botName}`;
 }
 
 // ---- Commands ----
