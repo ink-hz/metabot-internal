@@ -101,7 +101,7 @@ describe('E2E flow', () => {
     expect(afterRevoke.body.error).toBe('credential_revoked');
   });
 
-  it('member without publishSkill cannot publish', async () => {
+  it('member without publishSkill flag can still publish (gate opened)', async () => {
     kit = await startTestServer('e2e-publish');
     const { baseUrl, adminToken } = kit;
 
@@ -109,10 +109,20 @@ describe('E2E flow', () => {
       botName: 'no-pub', ownerName: 'np', role: 'member',
     });
     const token = issueRes.body.token as string;
-    const denied = await call(baseUrl, 'POST', '/api/skills/x/publish', token, {
+    const ok = await call(baseUrl, 'POST', '/api/skills/x/publish', token, {
       skillMd: '---\nname: x\n---\nbody',
     });
+    expect(ok.status).toBe(201);
+
+    // But a different member can NOT overwrite it.
+    const other = await call(baseUrl, 'POST', '/admin/credentials/issue', adminToken, {
+      botName: 'squatter', ownerName: 'someone-else', role: 'member',
+    });
+    const denied = await call(baseUrl, 'POST', '/api/skills/x/publish', other.body.token as string, {
+      skillMd: '---\nname: x\n---\nhostile',
+    });
     expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('skill_owned_by_other');
   });
 
   // Regression: oauth2-proxy v7 decodes %2F → / upstream, and Caddy collapses

@@ -10,6 +10,26 @@ export function canUnpublishSkill(cred: Credential): boolean {
 }
 
 /**
+ * Owner-protected overwrite: when publishing a skill name that already exists,
+ * the caller must be the original owner (or admin). This prevents member B
+ * from squatting on member A's skill name. Mirrors `isVisibleToCred`'s
+ * user-level owner-bypass (match by `ownerName`, not credentialId, so the
+ * same human on a different machine can still republish).
+ *
+ * Legacy rows (`ownerName` empty/undefined) are admin-only to overwrite —
+ * matches the legacy-row guard in `isVisibleToCred` and avoids accidentally
+ * letting any empty-owner cred claim them.
+ */
+export function canOverwriteSkill(
+  existing: { ownerName?: string },
+  cred: Credential,
+): boolean {
+  if (cred.role === 'admin') return true;
+  if (!existing.ownerName || !cred.ownerName) return false;
+  return existing.ownerName === cred.ownerName;
+}
+
+/**
  * Members see only `published` + `shared`. Admins see everything (return
  * undefined to skip the visibility filter).
  *

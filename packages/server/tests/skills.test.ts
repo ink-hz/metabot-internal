@@ -2,8 +2,9 @@ import { describe, it, expect, afterEach } from 'vitest';
 import * as zlib from 'node:zlib';
 import { makeKit, type TestKit } from './helpers.js';
 import {
-  canPublishSkill, visibilityFilter, filterSkillsForCred, isVisibleToCred,
+  canPublishSkill, canOverwriteSkill, visibilityFilter, filterSkillsForCred, isVisibleToCred,
 } from '../src/skills/publish-acl.js';
+import * as skillRoutes from '../src/skills/skill-routes.js';
 import type { Credential } from '../src/auth/credentials.js';
 
 let kit: TestKit | undefined;
@@ -86,14 +87,34 @@ describe('SkillStore + publish-acl', () => {
     expect(publicOnly[0].name).toBe('pub');
   });
 
-  it('canPublishSkill: admin yes, member only if flag set', () => {
+  it('canPublishSkill: any authenticated cred (admin + member, flag ignored)', () => {
     kit = makeKit('skill-publish-acl');
     const admin = issue(kit, 'admin', 'admin');
     const m1 = issue(kit, 'm1', 'member', false);
     const m2 = issue(kit, 'm2', 'member', true);
     expect(canPublishSkill(admin)).toBe(true);
-    expect(canPublishSkill(m1)).toBe(false);
+    expect(canPublishSkill(m1)).toBe(true);
     expect(canPublishSkill(m2)).toBe(true);
+  });
+
+  it('canOverwriteSkill: admin always; same ownerName ok; cross-owner denied; legacy admin-only', () => {
+    kit = makeKit('skill-overwrite-acl');
+    const admin = issue(kit, 'admin', 'admin');
+    const alice1 = issueWithOwner(kit, 'alice-bot-1', 'alice', 'member');
+    const alice2 = issueWithOwner(kit, 'alice-bot-2', 'alice', 'member');
+    const bob = issueWithOwner(kit, 'bob-bot', 'bob', 'member');
+    const noOwner = issueWithOwner(kit, 'lonely', '', 'member');
+
+    const aliceSkill = { ownerName: 'alice' };
+    const legacySkill = { ownerName: undefined };
+
+    expect(canOverwriteSkill(aliceSkill, admin)).toBe(true);
+    expect(canOverwriteSkill(aliceSkill, alice1)).toBe(true);
+    expect(canOverwriteSkill(aliceSkill, alice2)).toBe(true);  // same human, other machine
+    expect(canOverwriteSkill(aliceSkill, bob)).toBe(false);
+    expect(canOverwriteSkill(legacySkill, alice1)).toBe(false); // legacy: admin only
+    expect(canOverwriteSkill(legacySkill, admin)).toBe(true);
+    expect(canOverwriteSkill(aliceSkill, noOwner)).toBe(false); // empty-owner cred never matches
   });
 
   it('visibilityFilter: admin sees all (undefined), member sees published+shared', () => {
@@ -181,5 +202,85 @@ describe('SkillStore + publish-acl', () => {
     expect(kit.skills.remove('to-remove')).toBe(true);
     expect(kit.skills.remove('to-remove')).toBe(false);
     expect(kit.skills.get('to-remove')).toBeUndefined();
+  });
+});
+
+describe('publishSkill route — open-to-members + overwrite protection', () => {
+  it('member can publish a brand-new skill (201)', () => {
+    kit = makeKit('skill-route-member-new');
+    const alice = issueWithOwner(kit, 'alice-bot', 'alice', 'member', false);
+    const res = skillRoutes.publishSkill(
+      kit.skills, 'my-cool-skill',
+      { skillMd: SKILL_MD, visibility: 'published' },
+      alice,
+    );
+    expect(res.status).toBe(201);
+    const rec = kit.skills.get('my-cool-skill')!;
+    expect(rec.ownerName).toBe('alice');
+    expect(rec.version).toBe(1);
+  });
+
+  it('member can republish their own skill (version bumps)', () => {
+    kit = makeKit('skill-route-member-own-republish');
+    const alice1 = issueWithOwner(kit, 'alice-bot-1', 'alice', 'member', false);
+    const alice2 = issueWithOwner(kit, 'alice-bot-2', 'alice', 'member', false);
+
+    expect(skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD }, alice1).status).toBe(201);
+    // Same owner, different machine → still allowed (user-level bypass).
+    const res2 = skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD + '\nv2' }, alice2);
+    expect(res2.status).toBe(201);
+    expect(kit.skills.get('foo')!.version).toBe(2);
+  });
+
+  it('member B cannot overwrite member A\'s skill (403 skill_owned_by_other)', () => {
+    kit = makeKit('skill-route-member-cross-owner');
+    const alice = issueWithOwner(kit, 'alice-bot', 'alice', 'member', false);
+    const bob = issueWithOwner(kit, 'bob-bot', 'bob', 'member', false);
+
+    expect(skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD }, alice).status).toBe(201);
+    const res = skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD + '\nbob' }, bob);
+    expect(res.status).toBe(403);
+    expect((res.body as { error: string }).error).toBe('skill_owned_by_other');
+    // Alice's content untouched.
+    expect(kit.skills.get('foo')!.version).toBe(1);
+    expect(kit.skills.get('foo')!.ownerName).toBe('alice');
+  });
+
+  it('admin can overwrite any skill', () => {
+    kit = makeKit('skill-route-admin-overwrite');
+    const alice = issueWithOwner(kit, 'alice-bot', 'alice', 'member', false);
+    const admin = issue(kit, 'root', 'admin');
+    expect(skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD }, alice).status).toBe(201);
+    const res = skillRoutes.publishSkill(kit.skills, 'foo', { skillMd: SKILL_MD + '\nadmin' }, admin);
+    expect(res.status).toBe(201);
+    expect(kit.skills.get('foo')!.version).toBe(2);
+  });
+
+  it('legacy skill (no ownerName) is admin-only to overwrite', () => {
+    kit = makeKit('skill-route-legacy');
+    // Seed a legacy row directly (no ownerName).
+    kit.skills.publish({ name: 'legacy', skillMd: SKILL_MD });
+    const member = issueWithOwner(kit, 'm-bot', 'm-owner', 'member', false);
+    const admin = issue(kit, 'root', 'admin');
+
+    const res1 = skillRoutes.publishSkill(kit.skills, 'legacy', { skillMd: SKILL_MD + '\nclaim' }, member);
+    expect(res1.status).toBe(403);
+    expect(kit.skills.get('legacy')!.version).toBe(1);
+
+    const res2 = skillRoutes.publishSkill(kit.skills, 'legacy', { skillMd: SKILL_MD + '\nadmin' }, admin);
+    expect(res2.status).toBe(201);
+    expect(kit.skills.get('legacy')!.version).toBe(2);
+  });
+
+  it('all three visibilities accepted from a member (private/shared/published)', () => {
+    kit = makeKit('skill-route-member-visibilities');
+    const alice = issueWithOwner(kit, 'alice-bot', 'alice', 'member', false);
+    for (const v of ['private', 'shared', 'published'] as const) {
+      const res = skillRoutes.publishSkill(
+        kit.skills, `skill-${v}`, { skillMd: SKILL_MD, visibility: v }, alice,
+      );
+      expect(res.status).toBe(201);
+      expect(kit.skills.get(`skill-${v}`)!.visibility).toBe(v);
+    }
   });
 });
