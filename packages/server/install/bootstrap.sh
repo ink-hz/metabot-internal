@@ -9,17 +9,22 @@
 #
 # What this does:
 #   1. Resolve METABOT_HOME (--dir > env > $HOME/metabot).
-#   2. If $METABOT_HOME/.git + install.sh exist → delegate to the existing
-#      install.sh (which handles `git pull --ff-only`). This is the migration
-#      path for users who originally cloned from GitHub/GitLab — zero behavior
-#      change for them.
-#   3. Otherwise (fresh box or tarball-mode upgrade):
-#       - Download latest.tgz from $METABOT_CORE_URL/install/latest.tgz
-#       - Extract into $METABOT_HOME (preserves .env / bots.json / logs /
-#         data — they are not in the tarball)
-#       - exec install.sh with METABOT_SKIP_GIT=1 so its Phase 2 skips the
-#         clone/pull branch and proceeds straight to npm install +
-#         configuration prompts + PM2 start.
+#   2. Download latest.tgz from $METABOT_CORE_URL/install/latest.tgz.
+#   3. Extract into $METABOT_HOME, overwriting code files (`bin/`, `src/`,
+#      `packages/`, `install.sh`, etc.). User state — `.env`, `bots.json`,
+#      `logs/`, `data/` — is NOT in the tarball and survives trivially.
+#      Any pre-existing `.git/` is also preserved (tarball excludes it), so
+#      developers who hand-clone can still `git pull` later if they want,
+#      but the bootstrap itself never touches a remote.
+#   4. exec install.sh with METABOT_SKIP_GIT=1 so its Phase 2 skips the
+#      clone/pull branch entirely and proceeds straight to npm install +
+#      configuration prompts + PM2 start.
+#
+# Why no .git delegation: GitHub `xvirobotics/metabot` is a selectively-
+# cherry-picked OSS mirror that lags the GitLab monorepo, and most internal
+# users lack GitLab SSH credentials. Always pulling tarball makes the refresh
+# story uniform across fresh installs, GitHub clones, and GitLab clones —
+# nobody silently runs stale code, nobody needs SSH keys.
 #
 # Refresh model: same as /cli/latest.tgz — always-latest, pinned by atomic
 # publish. Re-run the one-liner to refresh; `metabot update` on tarball
@@ -89,19 +94,16 @@ for cmd in curl tar; do
   fi
 done
 
-# ----- 4. existing .git checkout → hand off to its install.sh (git pull path) -----
-if [[ -d "$METABOT_HOME/.git" && -f "$METABOT_HOME/install.sh" ]]; then
-  info "Existing git checkout at $METABOT_HOME"
-  info "Delegating to its install.sh (git pull path) — tarball mode skipped."
-  cd "$METABOT_HOME"
-  if [[ ${#PASSTHRU_ARGS[@]} -gt 0 ]]; then
-    exec bash "$METABOT_HOME/install.sh" "${PASSTHRU_ARGS[@]}"
-  else
-    exec bash "$METABOT_HOME/install.sh"
-  fi
+# ----- 4. heads-up if we're overlaying onto an existing git checkout -----
+# We do NOT delegate to its install.sh — that would `git pull` from a stale
+# GitHub mirror (and even on a GitLab clone, we want a uniform tarball
+# refresh story regardless of remote). `.git/` is excluded from the tarball
+# so it's left intact; `git pull` still works manually for anyone who wants it.
+if [[ -d "$METABOT_HOME/.git" ]]; then
+  info "Existing .git/ at $METABOT_HOME left intact — tarball will overlay code only."
 fi
 
-# ----- 5. fresh / tarball-mode install: download + extract -----
+# ----- 5. download + extract tarball (always) -----
 CORE_URL="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
 TARBALL_URL="$CORE_URL/install/latest.tgz"
 TMPDIR_BOOT="$(mktemp -d -t metabot-install.XXXXXX)"
@@ -129,11 +131,17 @@ fi
 
 mkdir -p "$METABOT_HOME"
 info "Extracting into $METABOT_HOME"
-# --keep-newer-files: preserves any locally-modified files newer than the
-#   tarball (e.g. user-edited install.sh between bootstrap runs).
-# .env / bots.json / logs/ / data/ are NOT in the tarball, so they survive
-# trivially.
-tar xzf "$TARBALL_PATH" -C "$METABOT_HOME" --keep-newer-files
+# Plain `tar xzf` overwrites tarball-tracked files in-place. We don't use
+# --keep-newer-files because the pack script stamps every entry with a fixed
+# `--mtime='UTC 2026-01-01'` for deterministic output — local files modified
+# any time after that (i.e. essentially all of them on a real machine) would
+# be silently kept, defeating the purpose of an overlay refresh.
+#
+# Files NOT in the tarball survive trivially because tar never deletes:
+#   - .env / bots.json / logs/ / data/  (user state, never packed)
+#   - .git/  (excluded so manual `git pull` still possible if desired)
+#   - node_modules/  (excluded; Phase 3 npm install reconciles)
+tar xzf "$TARBALL_PATH" -C "$METABOT_HOME"
 
 if [[ ! -f "$METABOT_HOME/install.sh" ]]; then
   error "Extraction completed but install.sh is missing at $METABOT_HOME/install.sh"

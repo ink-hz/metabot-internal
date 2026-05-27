@@ -79,6 +79,29 @@ describe('pack-metabot.sh', () => {
     expect(mode).not.toBe(0);
   });
 
+  it('bootstrap always extracts the tarball (no .git delegation that would `git pull` stale GitHub mirrors)', () => {
+    const src = fs.readFileSync(BOOTSTRAP_PATH, 'utf-8');
+    // Look at non-comment lines only — explanatory prose may mention these
+    // patterns even when the active code doesn't.
+    const codeOnly = src
+      .split('\n')
+      .map((l) => l.replace(/(^|[^\\])#.*$/, '$1'))
+      .filter((l) => l.trim().length > 0)
+      .join('\n');
+
+    // Active code must set the env gate so install.sh skips Phase 2 entirely.
+    expect(codeOnly).toMatch(/export\s+METABOT_SKIP_GIT=1/);
+    // No code path may delegate to the in-tree install.sh based on .git/ — that
+    // would send GitHub-clone users into a stale-mirror git pull.
+    expect(codeOnly).not.toMatch(
+      /-d\s+"\$METABOT_HOME\/\.git"[\s\S]{0,200}exec\s+bash\s+"\$METABOT_HOME\/install\.sh"/,
+    );
+    // `--keep-newer-files` is a footgun with our deterministic
+    // `--mtime='UTC 2026-01-01'`: local files modified after that date
+    // silently survive, defeating the overlay refresh.
+    expect(codeOnly).not.toContain('--keep-newer-files');
+  });
+
   it('tarball includes the bot-host runtime entrypoints', () => {
     // Phase 2 / 3 entry points the bootstrap exec's into.
     expect(tarListing).toMatch(/(^|\n)\.?\/?install\.sh\b/);
