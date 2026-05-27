@@ -1,5 +1,6 @@
 import type { MemoryStore } from './memory-store.js';
 import type { Credential } from '../auth/credentials.js';
+import { isHiddenFromMemoryView } from './hidden-paths.js';
 
 export interface RouteResult {
   status: number;
@@ -15,20 +16,39 @@ function statusFromException(e: unknown): number {
   return typeof s === 'number' ? s : 400;
 }
 
+function isHiddenIdOrPath(store: MemoryStore, idOrPath: string, kind: 'folder' | 'document'): boolean {
+  if (idOrPath.startsWith('/')) return isHiddenFromMemoryView(idOrPath);
+  const path = kind === 'folder'
+    ? store.findFolderById(idOrPath)?.path ?? null
+    : store.findDocumentPathById(idOrPath);
+  return path !== null && isHiddenFromMemoryView(path);
+}
+
+function pruneHiddenSubtrees<T extends { path: string; children: T[] }>(node: T): T {
+  return {
+    ...node,
+    children: node.children
+      .filter((c) => !isHiddenFromMemoryView(c.path))
+      .map(pruneHiddenSubtrees),
+  };
+}
+
 // ---- Folder handlers ----
 
 export function listFolders(store: MemoryStore, query: URLSearchParams, cred: Credential): RouteResult {
   const prefix = query.get('prefix') || undefined;
-  const folders = store.listFolders(prefix, cred);
+  if (prefix && isHiddenFromMemoryView(prefix)) return { status: 200, body: { folders: [] } };
+  const folders = store.listFolders(prefix, cred).filter((f) => !isHiddenFromMemoryView(f.path));
   return { status: 200, body: { folders } };
 }
 
 export function getFolderTree(store: MemoryStore, cred: Credential): RouteResult {
   const tree = store.getFolderTree(cred);
-  return { status: 200, body: tree };
+  return { status: 200, body: pruneHiddenSubtrees(tree) };
 }
 
 export function getFolder(store: MemoryStore, idOrPath: string, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'folder')) return err(404, 'folder_not_found');
   const folder = idOrPath.startsWith('/')
     ? store.findFolderByPath(idOrPath)
     : store.findFolderById(idOrPath);
@@ -41,6 +61,7 @@ export function createFolder(store: MemoryStore, body: Record<string, unknown>, 
   const name = body.name as string | undefined;
   const pathHint = body.path as string | undefined;
   if (!name && !pathHint) return err(400, 'name_or_path_required');
+  if (pathHint && isHiddenFromMemoryView(pathHint)) return err(403, 'hidden_namespace');
   try {
     const folder = store.createFolder({
       name: name ?? '',
@@ -54,6 +75,7 @@ export function createFolder(store: MemoryStore, body: Record<string, unknown>, 
 }
 
 export function deleteFolder(store: MemoryStore, idOrPath: string, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'folder')) return err(404, 'folder_not_found');
   try {
     store.deleteFolder(idOrPath, cred);
     return { status: 200, body: { ok: true } };
@@ -65,16 +87,23 @@ export function deleteFolder(store: MemoryStore, idOrPath: string, cred: Credent
 // ---- Document handlers ----
 
 export function listDocuments(store: MemoryStore, query: URLSearchParams, cred: Credential): RouteResult {
+  const prefix = query.get('prefix') || undefined;
+  if (prefix && isHiddenFromMemoryView(prefix)) return { status: 200, body: { documents: [] } };
+  const folderId = query.get('folder_id') || undefined;
+  if (folderId && isHiddenIdOrPath(store, folderId, 'folder')) {
+    return { status: 200, body: { documents: [] } };
+  }
   const docs = store.listDocuments({
-    folder_id: query.get('folder_id') || undefined,
-    prefix: query.get('prefix') || undefined,
+    folder_id: folderId,
+    prefix,
     limit: query.get('limit') ? parseInt(query.get('limit')!, 10) : undefined,
     offset: query.get('offset') ? parseInt(query.get('offset')!, 10) : undefined,
-  }, cred);
+  }, cred).filter((d) => !isHiddenFromMemoryView(d.path));
   return { status: 200, body: { documents: docs } };
 }
 
 export function getDocument(store: MemoryStore, idOrPath: string, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'document')) return err(404, 'document_not_found');
   const doc = store.getDocument(idOrPath, cred);
   if (!doc) return err(404, 'document_not_found');
   return { status: 200, body: doc };
@@ -84,11 +113,14 @@ export function createDocument(store: MemoryStore, body: Record<string, unknown>
   const title = (body.title as string) ?? '';
   const pathHint = body.path as string | undefined;
   if (!title && !pathHint) return err(400, 'title_or_path_required');
+  if (pathHint && isHiddenFromMemoryView(pathHint)) return err(403, 'hidden_namespace');
+  const folderId = typeof body.folder_id === 'string' ? (body.folder_id as string) : undefined;
+  if (folderId && isHiddenIdOrPath(store, folderId, 'folder')) return err(403, 'hidden_namespace');
   try {
     const doc = store.createDocument({
       title,
       path: pathHint,
-      folder_id: (body.folder_id as string) || undefined,
+      folder_id: folderId,
       content: typeof body.content === 'string' ? body.content : '',
       content_type: typeof body.content_type === 'string' ? (body.content_type as string) : undefined,
       tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
@@ -101,13 +133,18 @@ export function createDocument(store: MemoryStore, body: Record<string, unknown>
 }
 
 export function updateDocument(store: MemoryStore, idOrPath: string, body: Record<string, unknown>, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'document')) return err(404, 'document_not_found');
+  const targetFolder = typeof body.folder_id === 'string' ? (body.folder_id as string) : undefined;
+  if (targetFolder && isHiddenIdOrPath(store, targetFolder, 'folder')) {
+    return err(403, 'hidden_namespace');
+  }
   try {
     const doc = store.updateDocument(idOrPath, {
       title: typeof body.title === 'string' ? (body.title as string) : undefined,
       content: typeof body.content === 'string' ? (body.content as string) : undefined,
       content_type: typeof body.content_type === 'string' ? (body.content_type as string) : undefined,
       tags: Array.isArray(body.tags) ? (body.tags as string[]) : undefined,
-      folder_id: typeof body.folder_id === 'string' ? (body.folder_id as string) : undefined,
+      folder_id: targetFolder,
     }, cred);
     if (!doc) return err(404, 'document_not_found');
     return { status: 200, body: doc };
@@ -117,6 +154,7 @@ export function updateDocument(store: MemoryStore, idOrPath: string, body: Recor
 }
 
 export function deleteDocument(store: MemoryStore, idOrPath: string, cred: Credential): RouteResult {
+  if (isHiddenIdOrPath(store, idOrPath, 'document')) return err(404, 'document_not_found');
   try {
     const ok = store.deleteDocument(idOrPath, cred);
     if (!ok) return err(404, 'document_not_found');
@@ -130,7 +168,7 @@ export function search(store: MemoryStore, query: URLSearchParams, cred: Credent
   const q = query.get('q');
   if (!q || !q.trim()) return err(400, 'q_required');
   const limit = parseInt(query.get('limit') || '20', 10) || 20;
-  const results = store.searchDocuments(q, limit, cred);
+  const results = store.searchDocuments(q, limit, cred).filter((r) => !isHiddenFromMemoryView(r.path));
   return { status: 200, body: { results } };
 }
 
