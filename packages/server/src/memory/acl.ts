@@ -1,7 +1,16 @@
-import { Credential, canRead as credCanRead, canWrite as credCanWrite } from '../auth/credentials.js';
+import { Credential, canRead as credCanRead, canReadDoc as credCanReadDoc, canWrite as credCanWrite } from '../auth/credentials.js';
 
 export function canReadPath(cred: Credential, path: string): boolean {
   return credCanRead(cred, path);
+}
+
+/**
+ * Document-level read: path-based access OR an explicit `shared` flag. Used by
+ * the document read paths (get/list/search) so a shared doc is visible across
+ * namespaces without living under `/shared/`.
+ */
+export function canReadDoc(cred: Credential, path: string, shared: boolean): boolean {
+  return credCanReadDoc(cred, path, shared);
 }
 
 export function canWritePath(cred: Credential, path: string): boolean {

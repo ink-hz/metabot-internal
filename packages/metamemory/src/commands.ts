@@ -70,11 +70,12 @@ interface Whoami {
   role: string;
   /**
    * Server returns this for member bots that have an agent-registry row.
-   * `true` (default for newly-registered bots) means the CLI auto-prefixes
-   * writes into `/shared/<botName>/...` (visible to every member). `false`
-   * opts out into the per-owner private subtree (see `defaultWritePrefix`).
-   * Absent is treated as `true` (matching server default) so brand-new
-   * bots that haven't gone through whoami yet still land in /shared.
+   * It no longer affects the *write path* (writes always land in the caller's
+   * own namespace — see `defaultWritePrefix`). It now controls the *default
+   * `shared` flag* for new docs: `true` (default for newly-registered bots)
+   * means new docs are cross-bot readable unless `--no-share` overrides;
+   * `false` means new docs are private unless `--share` overrides. Absent is
+   * treated as `true` (matching the server default).
    */
   memoryPublic?: boolean;
 }
@@ -83,9 +84,8 @@ interface Whoami {
  * Resolve the caller's identity via GET /api/whoami.
  *
  * Used lazily by `create`/`mkdir` to default a write into the caller's own
- * namespace (`/users/<botName>/...` or `/shared/<botName>/...` when the bot
- * has opted into public-default via `metabot memory visibility public`). Root
- * is not in a member credential's writableNamespaces, so without this
+ * namespace (`/users/<ownerName>/...` or `/users/<ownerName>/agents/<botName>`).
+ * Root is not in a member credential's writableNamespaces, so without this
  * defaulting every member write 403s.
  */
 async function whoami(cfg: Config): Promise<Whoami> {
@@ -95,27 +95,45 @@ async function whoami(cfg: Config): Promise<Whoami> {
 
 /**
  * Decide the default folder prefix for `create`/`mkdir` when the caller
- * didn't pass `--path` or `--folder`.
+ * didn't pass `--path` or `--folder`. Always the caller's own namespace —
+ * sharing is now a per-doc `shared` flag, not a path, so writes are confined
+ * to the self namespace regardless of public/private:
  *
- *   admin                                     → undefined (writableNamespaces=['/'])
- *   memoryPublic !== false                    → /shared/<botName>          (cross-bot readable, flat)
- *   memoryPublic === false (opted private):
- *     botName === ownerName (SSO/web token)   → /users/<ownerName>         (user-kind self namespace)
- *     botName !== ownerName (agent token)     → /users/<ownerName>/agents/<botName>  (agent-kind self namespace)
+ *   admin                                   → undefined (writableNamespaces=['/'])
+ *   botName === ownerName (SSO/web token)   → /users/<ownerName>
+ *   botName !== ownerName (agent token)     → /users/<ownerName>/agents/<botName>
  *
- * Mirrors the server-side `selfNamespace(cred)` in auth/credentials.ts.
- * Reads stay broader (canRead allows the full /users/<ownerName>/ subtree
- * for same-owner creds), but writes are confined to this exact prefix so
- * sibling agents can't overwrite each other.
+ * Mirrors the server-side `selfNamespace(cred)` in auth/credentials.ts — the
+ * exact subtree `canWrite` permits. Reads stay broader (a shared doc is
+ * readable anywhere; same-owner creds see the whole /users/<ownerName>/
+ * subtree), but writes are confined here so sibling agents can't overwrite
+ * each other.
  *
  * Exported for tests; production callers should use it via `cmdCreate` /
  * `cmdMkdir`.
  */
 export function defaultWritePrefix(me: Whoami): string | undefined {
   if (me.role === 'admin') return undefined;
-  if (me.memoryPublic !== false) return `/shared/${me.botName}`;
   if (me.botName === me.ownerName) return `/users/${me.ownerName}`;
   return `/users/${me.ownerName}/agents/${me.botName}`;
+}
+
+/**
+ * Resolve `--share` / `--no-share` into an explicit boolean, or `undefined`
+ * when neither is set (server then defaults from the agent's `memoryPublic`).
+ * Both set → throws (exit 2).
+ */
+export function resolveShareFlag(flags: Record<string, string | true>): boolean | undefined {
+  const share = flags.share;
+  const noShare = flags['no-share'];
+  if (share !== undefined && noShare !== undefined) {
+    const err = new Error('--share and --no-share are mutually exclusive');
+    (err as Error & { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  if (share !== undefined) return true;
+  if (noShare !== undefined) return false;
+  return undefined;
 }
 
 // ---- Commands ----
@@ -195,6 +213,7 @@ export async function cmdCreate(cfg: Config, args: ParsedArgs): Promise<void> {
       path: docPath,
       folder_id: folderId,
       tags: parseTags(args.flags.tags),
+      shared: resolveShareFlag(args.flags),
       created_by: typeof args.flags.by === 'string' ? args.flags.by : undefined,
       content_type: contentType,
     },
@@ -216,6 +235,8 @@ export async function cmdUpdate(cfg: Config, args: ParsedArgs): Promise<void> {
   if (tags !== undefined) patch.tags = tags;
   if (content !== undefined && content !== '') patch.content = content;
   if (contentType !== undefined) patch.content_type = contentType;
+  const shared = resolveShareFlag(args.flags);
+  if (shared !== undefined) patch.shared = shared;
   const body = await request(cfg, {
     method: 'PATCH',
     path: `/api/memory/documents/${encodeIdOrPath(id)}`,
@@ -262,9 +283,39 @@ export async function cmdHealth(cfg: Config): Promise<void> {
 }
 
 /**
- * `metabot memory visibility [public|private]` — read or toggle whether the
- * calling bot's default-write path is `/shared/<bot>/...` (public) or
- * `/users/<bot>/...` (private). With no argument, reports the current state.
+ * `metabot memory share <doc_id> [on|off]` — toggle a single document's
+ * `shared` flag. Defaults to `on` when the second arg is omitted. A shared
+ * doc is readable by any authenticated bot regardless of where it lives; an
+ * un-shared doc is readable only within its author's own namespace.
+ */
+export async function cmdShare(cfg: Config, args: ParsedArgs): Promise<void> {
+  const id = args.positional[0];
+  if (!id) throw new Error('share: <doc_id> required');
+  const arg = (args.positional[1] ?? 'on').toLowerCase();
+  let shared: boolean;
+  if (arg === 'on' || arg === 'true' || arg === 'yes') shared = true;
+  else if (arg === 'off' || arg === 'false' || arg === 'no') shared = false;
+  else {
+    const err = new Error(`share: expected 'on' or 'off', got '${arg}'`);
+    (err as Error & { exitCode?: number }).exitCode = 2;
+    throw err;
+  }
+  const body = await request(cfg, {
+    method: 'PATCH',
+    path: `/api/memory/documents/${encodeIdOrPath(id)}`,
+    body: { shared },
+  });
+  print(body);
+}
+
+/**
+ * `metabot memory visibility [public|private]` — read or toggle the calling
+ * bot's *default share* for new documents. `public` → new docs default to
+ * `shared:true` (cross-bot readable); `private` → new docs default to
+ * `shared:false`. Either way docs are written to the bot's own namespace; this
+ * only sets the default `shared` flag, which `--share`/`--no-share` (or
+ * `memory share`) can still override per document. With no argument, reports
+ * the current state.
  *
  * Auth: owner-credential of the bot (or admin). The server enforces this on
  * PATCH /api/agents/:botName/memory-visibility.
@@ -273,8 +324,8 @@ export async function cmdVisibility(cfg: Config, args: ParsedArgs): Promise<void
   const arg = args.positional[0];
   const me = await whoami(cfg);
   if (!arg) {
-    // Mirror defaultWritePrefix: undefined memoryPublic is treated as the
-    // server-side default (public-by-default).
+    // Mirror the server-side default-share behavior: undefined memoryPublic is
+    // treated as the server default (share-by-default).
     const isPublic = me.memoryPublic !== false;
     const state = isPublic ? 'public' : 'private';
     print({ botName: me.botName, memoryPublic: isPublic, state });
@@ -307,13 +358,16 @@ Commands:
   folders
   create <title> [content]    [--folder <id>] [--path </abs/path>]
                               [--tags a,b,c] [--by <name>]
+                              [--share | --no-share]
                               [--html | --content-type <mime>]
   update <doc_id> [content]   [--title <t>] [--tags a,b,c]
+                              [--share | --no-share]
                               [--html | --content-type <mime>]
+  share <doc_id> [on|off]     toggle a single doc's shared flag (default: on)
   mkdir <name> [parent_id]    [--path </abs/path>]
   delete <doc_id>
-  visibility [public|private] read or toggle this bot's default write target
-                              (public → /shared/<bot>/..., private → /users/<bot>/...)
+  visibility [public|private] read or toggle this bot's DEFAULT share for new
+                              docs (public → shared:true, private → shared:false)
   health
   help
 
@@ -331,9 +385,17 @@ Write target (create / mkdir):
   Pass --path </absolute/path> to write at an explicit path; the server
   ACL-checks it and auto-creates ancestor folders. With neither --folder
   nor --path (nor a parent_id for mkdir), the write defaults into your own
-  namespace — /shared/<botName>/... (public, default) so other bots can
-  read it. Run 'metabot memory visibility private' to opt out into
-  /users/<bot>/... (only the owner bot reads). Admins keep the root default.
+  namespace — /users/<owner>/... (or /users/<owner>/agents/<bot>/ for agent
+  tokens). Writes are always confined to your own namespace. Admins keep the
+  root default.
+
+Sharing (read access):
+  Documents live in your own namespace; who can READ them is controlled by a
+  per-doc 'shared' flag, not the path. A new doc's default comes from the
+  bot's visibility ('metabot memory visibility public|private'). Override per
+  doc with --share / --no-share on create/update, or flip an existing doc with
+  'metabot memory share <doc_id> on|off'. A shared doc is readable by any
+  authenticated bot; an un-shared doc is readable only within your namespace.
 `,
   );
 }

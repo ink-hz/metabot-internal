@@ -620,7 +620,7 @@ export function startServer(options: ServerOptions): ServerHandle {
       }
       if (pathname === '/api/memory/documents' && method === 'POST') {
         const body = await parseJsonBody(req);
-        return jsonResult(res, memoryRoutes.createDocument(memoryStore, body, cred));
+        return jsonResult(res, memoryRoutes.createDocument(memoryStore, agentStore, body, cred));
       }
       if (pathname.startsWith('/api/memory/documents/') && method === 'GET') {
         const idOrPath = decodeMemoryIdOrPath(pathname.slice('/api/memory/documents/'.length));

@@ -7,6 +7,7 @@ import type { Logger } from 'pino';
 import Database from 'better-sqlite3';
 import { CredentialsStore } from '../src/auth/credentials-store.js';
 import { MemoryStore } from '../src/memory/memory-store.js';
+import { AgentStore } from '../src/agents/agent-store.js';
 import { SkillStore } from '../src/skills/skill-store.js';
 import { AuditLog } from '../src/observability/audit-log.js';
 import { startServer, type ServerHandle } from '../src/server.js';
@@ -33,6 +34,7 @@ export interface TestKit {
   logger: Logger;
   credentials: CredentialsStore;
   memory: MemoryStore;
+  agents: AgentStore;
   skills: SkillStore;
   audit: AuditLog;
   cleanup(): void;
@@ -44,10 +46,11 @@ export function makeKit(label?: string): TestKit {
   const db = openDb(dir);
   const credentials = new CredentialsStore(db, logger);
   const memory = new MemoryStore(db, logger);
+  const agents = new AgentStore(db, logger);
   const skills = new SkillStore(db, logger);
   const audit = new AuditLog({ dir: path.join(dir, 'audit'), enabled: true, logger });
   return {
-    dir, db, logger, credentials, memory, skills, audit,
+    dir, db, logger, credentials, memory, agents, skills, audit,
     cleanup() {
       try { credentials.close(); } catch { /* ignore */ }
       try { db.close(); } catch { /* ignore */ }

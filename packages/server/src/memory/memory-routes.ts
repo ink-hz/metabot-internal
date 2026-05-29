@@ -1,4 +1,5 @@
 import type { MemoryStore } from './memory-store.js';
+import type { AgentStore } from '../agents/agent-store.js';
 import type { Credential } from '../auth/credentials.js';
 import { isHiddenFromMemoryView } from './hidden-paths.js';
 
@@ -109,7 +110,7 @@ export function getDocument(store: MemoryStore, idOrPath: string, cred: Credenti
   return { status: 200, body: doc };
 }
 
-export function createDocument(store: MemoryStore, body: Record<string, unknown>, cred: Credential): RouteResult {
+export function createDocument(store: MemoryStore, agents: AgentStore, body: Record<string, unknown>, cred: Credential): RouteResult {
   const title = (body.title as string) ?? '';
   const pathHint = body.path as string | undefined;
   if (!title && !pathHint) return err(400, 'title_or_path_required');
@@ -124,12 +125,24 @@ export function createDocument(store: MemoryStore, body: Record<string, unknown>
       content: typeof body.content === 'string' ? body.content : '',
       content_type: typeof body.content_type === 'string' ? (body.content_type as string) : undefined,
       tags: Array.isArray(body.tags) ? (body.tags as string[]) : [],
+      shared: resolveShared(body.shared, agents, cred),
       created_by: (body.created_by as string) || undefined,
     }, cred);
     return { status: 201, body: doc };
   } catch (e: unknown) {
     return err(statusFromException(e), (e as Error).message || 'error');
   }
+}
+
+/**
+ * Resolve a new document's `shared` flag. An explicit boolean in the request
+ * body always wins (per-doc override); otherwise the default comes from the
+ * authoring agent's `memoryPublic` config — public bots share by default,
+ * private bots don't. Unregistered/unknown bots default to private.
+ */
+function resolveShared(raw: unknown, agents: AgentStore, cred: Credential): boolean {
+  if (typeof raw === 'boolean') return raw;
+  return agents.getByName(cred.botName)?.memoryPublic ?? false;
 }
 
 export function updateDocument(store: MemoryStore, idOrPath: string, body: Record<string, unknown>, cred: Credential): RouteResult {
@@ -144,6 +157,7 @@ export function updateDocument(store: MemoryStore, idOrPath: string, body: Recor
       content: typeof body.content === 'string' ? (body.content as string) : undefined,
       content_type: typeof body.content_type === 'string' ? (body.content_type as string) : undefined,
       tags: Array.isArray(body.tags) ? (body.tags as string[]) : undefined,
+      shared: typeof body.shared === 'boolean' ? (body.shared as boolean) : undefined,
       folder_id: targetFolder,
     }, cred);
     if (!doc) return err(404, 'document_not_found');

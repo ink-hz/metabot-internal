@@ -188,7 +188,7 @@ describe('memory-routes reject writes to hidden namespace', () => {
   it('createDocument with hidden path → 403', () => {
     kit = seed();
     const admin = issue(kit, 'admin', 'admin');
-    const res = memoryRoutes.createDocument(kit.memory, {
+    const res = memoryRoutes.createDocument(kit.memory, kit.agents, {
       title: 'sneaky', path: '/t5t/entries/sneaky', content: 'x',
     }, admin);
     expect(res.status).toBe(403);
@@ -198,7 +198,7 @@ describe('memory-routes reject writes to hidden namespace', () => {
     kit = seed();
     const admin = issue(kit, 'admin', 'admin');
     const folder = kit.memory.findFolderByPath('/t5t/entries')!;
-    const res = memoryRoutes.createDocument(kit.memory, {
+    const res = memoryRoutes.createDocument(kit.memory, kit.agents, {
       title: 'sneaky', folder_id: folder.id, content: 'x',
     }, admin);
     expect(res.status).toBe(403);

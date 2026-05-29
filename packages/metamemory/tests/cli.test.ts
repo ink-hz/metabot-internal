@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, DEFAULT_URL } from '../src/config.js';
 import { request } from '../src/client.js';
-import { parseArgs, resolveContentTypeFlag, cmdCreate, cmdMkdir, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
+import { parseArgs, resolveContentTypeFlag, resolveShareFlag, cmdCreate, cmdMkdir, cmdVisibility, defaultWritePrefix } from '../src/commands.js';
 
 describe('parseArgs', () => {
   it('splits positional and flags', () => {
@@ -216,12 +216,13 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
-  it('create: bare invocation by a member defaults into /shared/<botName> (public-default)', async () => {
+  it('create: bare invocation by a member defaults into its own /users/<bot> namespace', async () => {
+    // user-kind stub (ownerName defaults to botName) → /users/<bot>
     const calls = stubFetch({ botName: 'bot-x', role: 'member' });
     await cmdCreate(cfg, parseArgs(['Smoke Test CLI', 'hello']));
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/shared/bot-x/smoke-test-cli');
+    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-test-cli');
   });
 
   it('create: bare invocation by an admin keeps the root default (no path)', async () => {
@@ -249,12 +250,12 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
-  it('mkdir: bare invocation by a member defaults into /shared/<botName> (public-default)', async () => {
+  it('mkdir: bare invocation by a member defaults into its own /users/<bot> namespace', async () => {
     const calls = stubFetch({ botName: 'bot-x', role: 'member' });
     await cmdMkdir(cfg, parseArgs(['smoke-folder']));
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(true);
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
-    expect(bodyOf(post).path).toBe('/shared/bot-x/smoke-folder');
+    expect(bodyOf(post).path).toBe('/users/bot-x/smoke-folder');
   });
 
   it('mkdir: bare invocation by an admin keeps the root default (no path)', async () => {
@@ -264,44 +265,77 @@ describe('cmdCreate / cmdMkdir — write target', () => {
     expect(bodyOf(post).path).toBeUndefined();
   });
 
-  // ---- memoryPublic auto-prefix ----
-  it('create: user-kind member with memoryPublic:false → /users/<ownerName>', async () => {
+  // ---- write target is always the self namespace (independent of memoryPublic) ----
+  it('create: user-kind member → /users/<ownerName>', async () => {
     // user-kind: botName === ownerName (SSO / self-service web token)
-    const calls = stubFetch({ botName: 'alice@xvi.com', ownerName: 'alice@xvi.com', role: 'member', memoryPublic: false });
+    const calls = stubFetch({ botName: 'alice@xvi.com', ownerName: 'alice@xvi.com', role: 'member' });
     await cmdCreate(cfg, parseArgs(['Private Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
     expect(bodyOf(post).path).toBe('/users/alice@xvi.com/private-note');
   });
 
-  it('create: agent-kind member with memoryPublic:false → /users/<owner>/agents/<bot>', async () => {
+  it('create: agent-kind member → /users/<owner>/agents/<bot>', async () => {
     // agent-kind: botName !== ownerName (bot token issued via `metabot agents create`)
-    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member', memoryPublic: false });
+    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member' });
     await cmdCreate(cfg, parseArgs(['Private Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
     expect(bodyOf(post).path).toBe('/users/alice/agents/cli-bot/private-note');
   });
 
-  it('mkdir: agent-kind member with memoryPublic:false → /users/<owner>/agents/<bot>', async () => {
-    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member', memoryPublic: false });
+  it('mkdir: agent-kind member → /users/<owner>/agents/<bot>', async () => {
+    const calls = stubFetch({ botName: 'cli-bot', ownerName: 'alice', role: 'member' });
     await cmdMkdir(cfg, parseArgs(['private-folder']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/folders'))!;
     expect(bodyOf(post).path).toBe('/users/alice/agents/cli-bot/private-folder');
   });
 
-  it('create: explicit memoryPublic:true also lands in /shared/<botName>', async () => {
+  it('create: memoryPublic no longer changes the write path (still self namespace)', async () => {
     const calls = stubFetch({ botName: 'bot-x', ownerName: 'alice', role: 'member', memoryPublic: true });
     await cmdCreate(cfg, parseArgs(['Public Note', 'hello']));
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/shared/bot-x/public-note');
+    expect(bodyOf(post).path).toBe('/users/alice/agents/bot-x/public-note');
   });
 
-  it('create: --path still wins even when memoryPublic:false (explicit beats default)', async () => {
-    const calls = stubFetch({ botName: 'bot-x', ownerName: 'alice', role: 'member', memoryPublic: false });
-    await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/shared/bot-x/forcing-shared']));
+  it('create: --share / --no-share forwards the shared flag in the body', async () => {
+    const shareCalls = stubFetch();
+    await cmdCreate(cfg, parseArgs(['Doc', 'hi', '--path', '/users/bot-x/d', '--share']));
+    expect(bodyOf(shareCalls.find((c) => c.url.endsWith('/api/memory/documents'))!).shared).toBe(true);
+    vi.unstubAllGlobals();
+    const noShareCalls = stubFetch();
+    await cmdCreate(cfg, parseArgs(['Doc', 'hi', '--path', '/users/bot-x/d', '--no-share']));
+    expect(bodyOf(noShareCalls.find((c) => c.url.endsWith('/api/memory/documents'))!).shared).toBe(false);
+  });
+
+  it('create: no share flag → shared omitted (server defaults from agent config)', async () => {
+    const calls = stubFetch();
+    await cmdCreate(cfg, parseArgs(['Doc', 'hi', '--path', '/users/bot-x/d']));
+    expect(bodyOf(calls.find((c) => c.url.endsWith('/api/memory/documents'))!).shared).toBeUndefined();
+  });
+
+  it('create: --path still wins as the explicit write target', async () => {
+    const calls = stubFetch({ botName: 'bot-x', ownerName: 'alice', role: 'member' });
+    await cmdCreate(cfg, parseArgs(['Override', 'hello', '--path', '/users/bot-x/forced']));
     // whoami call shouldn't happen at all when --path is set
     expect(calls.some((c) => c.url.endsWith('/api/whoami'))).toBe(false);
     const post = calls.find((c) => c.url.endsWith('/api/memory/documents'))!;
-    expect(bodyOf(post).path).toBe('/shared/bot-x/forcing-shared');
+    expect(bodyOf(post).path).toBe('/users/bot-x/forced');
+  });
+});
+
+describe('resolveShareFlag — pure helper', () => {
+  it('neither flag → undefined (server defaults from agent config)', () => {
+    expect(resolveShareFlag({})).toBeUndefined();
+  });
+  it('--share → true', () => {
+    expect(resolveShareFlag({ share: true })).toBe(true);
+  });
+  it('--no-share → false', () => {
+    expect(resolveShareFlag({ 'no-share': true })).toBe(false);
+  });
+  it('both → throws exit 2', () => {
+    let caught: (Error & { exitCode?: number }) | undefined;
+    try { resolveShareFlag({ share: true, 'no-share': true }); } catch (e) { caught = e as Error & { exitCode?: number }; }
+    expect(caught?.exitCode).toBe(2);
   });
 });
 
@@ -309,28 +343,22 @@ describe('defaultWritePrefix — pure helper', () => {
   it('admin → undefined (root default preserved)', () => {
     expect(defaultWritePrefix({ botName: 'a', ownerName: '', role: 'admin' })).toBeUndefined();
   });
-  it('member, public (default / explicit true / undefined) → /shared/<bot>', () => {
-    expect(defaultWritePrefix({ botName: 'b', ownerName: 'alice', role: 'member' }))
-      .toBe('/shared/b');
-    expect(defaultWritePrefix({ botName: 'b', ownerName: 'alice', role: 'member', memoryPublic: true }))
-      .toBe('/shared/b');
-  });
-  it('member, private, user-kind (botName === ownerName) → /users/<ownerName>', () => {
+  it('member, user-kind (botName === ownerName) → /users/<ownerName>, regardless of memoryPublic', () => {
     // SSO / self-service web token: cred.botName === cred.ownerName === email
     expect(defaultWritePrefix({
-      botName: 'alice@xvi.com',
-      ownerName: 'alice@xvi.com',
-      role: 'member',
-      memoryPublic: false,
+      botName: 'alice@xvi.com', ownerName: 'alice@xvi.com', role: 'member',
+    })).toBe('/users/alice@xvi.com');
+    expect(defaultWritePrefix({
+      botName: 'alice@xvi.com', ownerName: 'alice@xvi.com', role: 'member', memoryPublic: true,
     })).toBe('/users/alice@xvi.com');
   });
-  it('member, private, agent-kind (botName !== ownerName) → /users/<owner>/agents/<bot>', () => {
+  it('member, agent-kind (botName !== ownerName) → /users/<owner>/agents/<bot>, regardless of memoryPublic', () => {
     // Bot token issued via `metabot agents create`
     expect(defaultWritePrefix({
-      botName: 'cli-bot',
-      ownerName: 'alice',
-      role: 'member',
-      memoryPublic: false,
+      botName: 'cli-bot', ownerName: 'alice', role: 'member',
+    })).toBe('/users/alice/agents/cli-bot');
+    expect(defaultWritePrefix({
+      botName: 'cli-bot', ownerName: 'alice', role: 'member', memoryPublic: true,
     })).toBe('/users/alice/agents/cli-bot');
   });
 });

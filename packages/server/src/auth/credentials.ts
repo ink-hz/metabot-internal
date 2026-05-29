@@ -89,6 +89,23 @@ export function canWrite(cred: Credential, path: string): boolean {
 }
 
 /**
+ * Document-level read check — the sharing primitive under the path-constrained
+ * write model. A doc is readable when EITHER the path-based rules grant access
+ * (admin, own namespace, legacy `/shared/`, or an explicit readable namespace)
+ * OR the doc is explicitly marked `shared`.
+ *
+ * This decouples *where* a doc lives (always its author's own namespace, since
+ * `canWrite` confines writes to `selfNamespace`) from *who* may read it (anyone,
+ * once shared). The `shared` flag defaults from the owning agent's
+ * `memoryPublic` config and is overridable per document. See
+ * [[decision-memory-share-flag]].
+ */
+export function canReadDoc(cred: Credential, path: string, shared: boolean): boolean {
+  if (shared) return true;
+  return canRead(cred, path);
+}
+
+/**
  * The single subtree a credential is allowed to write to by virtue of being
  * itself (admin and explicit writableNamespaces are separate paths).
  *

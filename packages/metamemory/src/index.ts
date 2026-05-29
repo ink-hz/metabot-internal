@@ -10,6 +10,7 @@ import {
   cmdUpdate,
   cmdMkdir,
   cmdDelete,
+  cmdShare,
   cmdHealth,
   cmdVisibility,
   printHelp,
@@ -66,6 +67,9 @@ export async function main(argv: string[]): Promise<void> {
       case 'delete':
       case 'rm':
         await cmdDelete(cfg, args);
+        break;
+      case 'share':
+        await cmdShare(cfg, args);
         break;
       case 'health':
         await cmdHealth(cfg);
