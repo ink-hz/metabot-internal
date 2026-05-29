@@ -2,7 +2,7 @@ import * as crypto from 'node:crypto';
 import type Database from 'better-sqlite3';
 import type { Logger } from 'pino';
 import type { Credential } from '../auth/credentials.js';
-import { canReadPath, canWritePath, joinPath, normalizePath, readableRoots } from './acl.js';
+import { canReadDoc, canReadPath, canWritePath, joinPath, normalizePath, readableRoots } from './acl.js';
 
 export const ALLOWED_CONTENT_TYPES = ['text/markdown', 'text/html'] as const;
 export type ContentType = (typeof ALLOWED_CONTENT_TYPES)[number];
@@ -46,6 +46,7 @@ export interface Document {
   content: string;
   content_type: ContentType;
   tags: string[];
+  shared: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -58,6 +59,7 @@ export interface DocumentSummary {
   path: string;
   content_type: ContentType;
   tags: string[];
+  shared: boolean;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -70,6 +72,7 @@ export interface SearchResult {
   content_type: ContentType;
   snippet: string;
   tags: string[];
+  shared: boolean;
   created_by: string;
   updated_at: string;
 }
@@ -81,6 +84,7 @@ export interface DocumentCreateInput {
   content?: string;
   content_type?: string;
   tags?: string[];
+  shared?: boolean;
   created_by?: string;
 }
 
@@ -89,6 +93,7 @@ export interface DocumentUpdateInput {
   content?: string;
   content_type?: string;
   tags?: string[];
+  shared?: boolean;
   folder_id?: string;
 }
 
@@ -156,6 +161,7 @@ export class MemoryStore {
         content      BLOB NOT NULL DEFAULT '',
         content_type TEXT NOT NULL DEFAULT 'text/markdown',
         tags         TEXT NOT NULL DEFAULT '[]',
+        shared       INTEGER NOT NULL DEFAULT 0,
         created_by   TEXT NOT NULL DEFAULT '',
         created_at   TEXT NOT NULL,
         updated_at   TEXT NOT NULL
@@ -189,6 +195,17 @@ export class MemoryStore {
       this.db.exec(
         "ALTER TABLE documents ADD COLUMN content_type TEXT NOT NULL DEFAULT 'text/markdown'",
       );
+    }
+
+    // Idempotent column migration for `shared` (added 2026-05-29). The
+    // doc-level sharing flag that replaced path-based `/shared/` sharing.
+    // Existing rows default to 0 (private); a one-time backfill marks legacy
+    // `/shared/...` docs as shared so they stay cross-readable after the read
+    // model stops blanket-allowing the `/shared` path. See
+    // [[decision-memory-share-flag]].
+    if (!cols.some((c) => c.name === 'shared')) {
+      this.db.exec('ALTER TABLE documents ADD COLUMN shared INTEGER NOT NULL DEFAULT 0');
+      this.db.exec("UPDATE documents SET shared = 1 WHERE path LIKE '/shared/%'");
     }
 
     // Seed root folder
@@ -387,15 +404,17 @@ export class MemoryStore {
     const id = crypto.randomUUID();
     const now = nowISO();
     const tags = JSON.stringify(data.tags || []);
+    const shared = data.shared === true;
     this.db.prepare(
-      'INSERT INTO documents (id, title, folder_id, path, content, content_type, tags, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, title, folderId, docPath, data.content || '', contentType, tags, data.created_by || cred.botName, now, now);
+      'INSERT INTO documents (id, title, folder_id, path, content, content_type, tags, shared, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    ).run(id, title, folderId, docPath, data.content || '', contentType, tags, shared ? 1 : 0, data.created_by || cred.botName, now, now);
 
     return {
       id, title, folder_id: folderId, path: docPath,
       content: data.content || '',
       content_type: contentType,
       tags: data.tags || [],
+      shared,
       created_by: data.created_by || cred.botName,
       created_at: now, updated_at: now,
     };
@@ -406,7 +425,7 @@ export class MemoryStore {
       ? this.db.prepare('SELECT * FROM documents WHERE path = ?').get(normalizePath(idOrPath))
       : this.db.prepare('SELECT * FROM documents WHERE id = ?').get(idOrPath)) as RawDocRow | undefined;
     if (!row) return null;
-    if (!canReadPath(cred, row.path)) return null;
+    if (!canReadDoc(cred, row.path, row.shared === 1)) return null;
     return rowToDoc(row);
   }
 
@@ -434,22 +453,22 @@ export class MemoryStore {
       const folder = this.findFolderById(opts.folder_id);
       if (!folder || !canReadPath(cred, folder.path)) return [];
       rows = this.db.prepare(
-        'SELECT id, title, folder_id, path, content_type, tags, created_by, created_at, updated_at FROM documents WHERE folder_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?',
+        'SELECT id, title, folder_id, path, content_type, tags, shared, created_by, created_at, updated_at FROM documents WHERE folder_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?',
       ).all(opts.folder_id, limit, offset) as RawDocRow[];
     } else if (opts.prefix) {
       const p = normalizePath(opts.prefix);
       const like = p === '/' ? '%' : p + '%';
       rows = this.db.prepare(
-        'SELECT id, title, folder_id, path, content_type, tags, created_by, created_at, updated_at FROM documents WHERE path = ? OR path LIKE ? ORDER BY updated_at DESC LIMIT ? OFFSET ?',
+        'SELECT id, title, folder_id, path, content_type, tags, shared, created_by, created_at, updated_at FROM documents WHERE path = ? OR path LIKE ? ORDER BY updated_at DESC LIMIT ? OFFSET ?',
       ).all(p, like, limit, offset) as RawDocRow[];
     } else {
       rows = this.db.prepare(
-        'SELECT id, title, folder_id, path, content_type, tags, created_by, created_at, updated_at FROM documents ORDER BY updated_at DESC LIMIT ? OFFSET ?',
+        'SELECT id, title, folder_id, path, content_type, tags, shared, created_by, created_at, updated_at FROM documents ORDER BY updated_at DESC LIMIT ? OFFSET ?',
       ).all(limit, offset) as RawDocRow[];
     }
 
     return rows
-      .filter((r) => canReadPath(cred, r.path))
+      .filter((r) => canReadDoc(cred, r.path, r.shared === 1))
       .map((r) => ({
         id: r.id,
         title: r.title,
@@ -457,6 +476,7 @@ export class MemoryStore {
         path: r.path,
         content_type: normalizeStoredContentType(r.content_type),
         tags: parseTags(r.tags),
+        shared: r.shared === 1,
         created_by: r.created_by,
         created_at: r.created_at,
         updated_at: r.updated_at,
@@ -475,6 +495,7 @@ export class MemoryStore {
     const title = data.title ?? row.title;
     const content = data.content ?? row.content.toString();
     const tags = data.tags ?? parseTags(row.tags);
+    const shared = data.shared ?? (row.shared === 1);
     const folderId = data.folder_id ?? row.folder_id;
     const contentType = data.content_type === undefined
       ? normalizeStoredContentType(row.content_type)
@@ -493,12 +514,12 @@ export class MemoryStore {
 
     const now = nowISO();
     this.db.prepare(
-      'UPDATE documents SET title = ?, content = ?, content_type = ?, tags = ?, folder_id = ?, path = ?, updated_at = ? WHERE id = ?',
-    ).run(title, content, contentType, JSON.stringify(tags), folderId, docPath, now, row.id);
+      'UPDATE documents SET title = ?, content = ?, content_type = ?, tags = ?, shared = ?, folder_id = ?, path = ?, updated_at = ? WHERE id = ?',
+    ).run(title, content, contentType, JSON.stringify(tags), shared ? 1 : 0, folderId, docPath, now, row.id);
 
     return {
       id: row.id, title, folder_id: folderId, path: docPath,
-      content, content_type: contentType, tags,
+      content, content_type: contentType, tags, shared,
       created_by: row.created_by,
       created_at: row.created_at,
       updated_at: now,
@@ -520,7 +541,7 @@ export class MemoryStore {
   searchDocuments(query: string, limit: number, cred: Credential): SearchResult[] {
     const escaped = escapeFts5Query(query);
     const rows = this.db.prepare(`
-      SELECT d.id, d.title, d.path, d.content_type, d.tags, d.created_by, d.updated_at,
+      SELECT d.id, d.title, d.path, d.content_type, d.tags, d.shared, d.created_by, d.updated_at,
              snippet(documents_fts, 1, '<mark>', '</mark>', '...', 32) as snippet
       FROM documents_fts fts
       JOIN documents d ON d.id = fts.doc_id
@@ -530,12 +551,13 @@ export class MemoryStore {
     `).all(escaped, Math.min(Math.max(limit, 1), 100)) as RawSearchRow[];
 
     return rows
-      .filter((r) => canReadPath(cred, r.path))
+      .filter((r) => canReadDoc(cred, r.path, r.shared === 1))
       .map((r) => ({
         id: r.id, title: r.title, path: r.path,
         content_type: normalizeStoredContentType(r.content_type),
         snippet: r.snippet || '',
         tags: parseTags(r.tags),
+        shared: r.shared === 1,
         created_by: r.created_by || '',
         updated_at: r.updated_at,
       }));
@@ -561,6 +583,7 @@ interface RawDocRow {
   content: Buffer | string;
   content_type?: string | null;
   tags: string;
+  shared: 0 | 1;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -572,6 +595,7 @@ interface RawSearchRow {
   path: string;
   content_type?: string | null;
   tags: string;
+  shared: 0 | 1;
   created_by: string;
   updated_at: string;
   snippet: string | null;
@@ -590,6 +614,7 @@ function rowToDoc(row: RawDocRow): Document {
     content: row.content?.toString() ?? '',
     content_type: normalizeStoredContentType(row.content_type),
     tags: parseTags(row.tags),
+    shared: row.shared === 1,
     created_by: row.created_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
