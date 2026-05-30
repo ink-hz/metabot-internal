@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
@@ -53,8 +54,47 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     this.spawn();
   }
 
+  /**
+   * Pre-accept the per-folder trust dialog for `cwd` in ~/.claude.json.
+   *
+   * On the FIRST interactive run in a directory, `claude` shows a blocking
+   * "Is this a project you trust?" prompt — even under
+   * --dangerously-skip-permissions. That dialog renders a `❯` menu pointer,
+   * which fools waitForReady()'s input-box detector: we then "type" the
+   * prompt into the menu and the session is corrupted. metabot uses a fresh
+   * per-chat working directory, so EVERY new chat's first turn would hit
+   * this. Seeding `projects[cwd].hasTrustDialogAccepted = true` (exactly how
+   * claude records an accepted dialog) suppresses it entirely.
+   *
+   * Best-effort + targeted: we read-modify-write only the single nested flag
+   * so we don't clobber the rest of the file. Failures are logged, not fatal.
+   */
+  private ensureFolderTrusted(cwd: string): void {
+    const cfgPath = path.join(os.homedir(), '.claude.json');
+    try {
+      let cfg: Record<string, any> = {};
+      try {
+        cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+      } catch {
+        // missing/empty/corrupt — start from an empty object
+        cfg = {};
+      }
+      if (!cfg.projects || typeof cfg.projects !== 'object') cfg.projects = {};
+      const entry = (cfg.projects[cwd] && typeof cfg.projects[cwd] === 'object')
+        ? cfg.projects[cwd]
+        : (cfg.projects[cwd] = {});
+      if (entry.hasTrustDialogAccepted === true) return; // already trusted
+      entry.hasTrustDialogAccepted = true;
+      fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+      this.log.info({ cwd }, 'pty-session: pre-accepted folder trust in ~/.claude.json');
+    } catch (err) {
+      this.log.warn({ err, cwd }, 'pty-session: failed to pre-accept folder trust (may hit trust dialog)');
+    }
+  }
+
   private spawn(): void {
     const { opts } = this;
+    this.ensureFolderTrusted(opts.cwd);
     const args: string[] = [];
 
     if (opts.resume) {
@@ -73,8 +113,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       args.push('--model', opts.model);
     }
 
-    // Build a clean env: merge caller env on top of process.env, then strip
-    // gateway/SDK vars so claude uses the interactive subscription pool.
+    // Build the child env: process.env + caller overrides.
     const env: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined) env[k] = v;
@@ -83,6 +122,17 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       for (const [k, v] of Object.entries(opts.env)) {
         if (v !== undefined) env[k] = v;
       }
+    }
+    // A PTY session is INTERACTIVE by definition. The parent (metabot) runs
+    // under the Agent SDK, so its env carries CLAUDE_CODE_ENTRYPOINT=sdk-cli /
+    // CLAUDECODE. We MUST strip those so the spawned `claude` uses the
+    // interactive entrypoint marker — that marker is what selects the Claude
+    // Code SUBSCRIPTION billing pool (vs the Agent-SDK credit pool) post
+    // June-2026. ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN are deliberately
+    // KEPT so traffic still routes through TeamClaude for Max-account load
+    // balancing — the entrypoint marker passes through that transparent proxy.
+    for (const k of ['CLAUDE_CODE_ENTRYPOINT', 'CLAUDECODE']) {
+      delete env[k];
     }
 
     const claudePath = opts.pathToClaudeExecutable ?? 'claude';
