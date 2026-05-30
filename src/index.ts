@@ -98,9 +98,58 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger): Promise<Fei
   return { name: botConfig.name, bridge, wsClient, config: botConfig, sender, feishuClient: client };
 }
 
+/**
+ * Filter the loaded bot set by env so a SECOND metabot instance can run just
+ * one bot (e.g. to dogfood the PTY backend) without disturbing production:
+ *   - METABOT_ONLY_BOTS=<a,b>    keep only these bot names (whitelist)
+ *   - METABOT_EXCLUDE_BOTS=<a,b> drop these bot names (blacklist)
+ * Both are comma-separated and applied across every platform array. The
+ * production instance EXCLUDES the test bot; the test instance runs ONLY it
+ * (on a different API_PORT). This avoids two processes fighting over one
+ * bot's Feishu long-connection.
+ */
+function applyBotFilter(appConfig: ReturnType<typeof loadAppConfig>, logger: Logger): void {
+  const parse = (v?: string) =>
+    new Set((v ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+  const only = parse(process.env.METABOT_ONLY_BOTS);
+  const exclude = parse(process.env.METABOT_EXCLUDE_BOTS);
+  if (only.size === 0 && exclude.size === 0) return;
+
+  const keep = (name: string): boolean => {
+    if (only.size > 0 && !only.has(name)) return false;
+    if (exclude.has(name)) return false;
+    return true;
+  };
+  const before = {
+    feishu: appConfig.feishuBots.length,
+    telegram: appConfig.telegramBots.length,
+    web: appConfig.webBots.length,
+    wechat: appConfig.wechatBots.length,
+  };
+  appConfig.feishuBots = appConfig.feishuBots.filter((b) => keep(b.name));
+  appConfig.telegramBots = appConfig.telegramBots.filter((b) => keep(b.name));
+  appConfig.webBots = appConfig.webBots.filter((b) => keep(b.name));
+  appConfig.wechatBots = appConfig.wechatBots.filter((b) => keep(b.name));
+  logger.info(
+    {
+      only: [...only],
+      exclude: [...exclude],
+      before,
+      after: {
+        feishu: appConfig.feishuBots.length,
+        telegram: appConfig.telegramBots.length,
+        web: appConfig.webBots.length,
+        wechat: appConfig.wechatBots.length,
+      },
+    },
+    'Bot filter applied (METABOT_ONLY_BOTS / METABOT_EXCLUDE_BOTS)',
+  );
+}
+
 async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
+  applyBotFilter(appConfig, logger);
 
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;

@@ -89,7 +89,10 @@ const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 30_000; // 30 seconds
 const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
 const MAX_SETTIMEOUT_MS = 2_147_483_647; // 2^31 - 1 (~24.8 days)
-const PERSIST_DIR = path.join(os.homedir(), '.metabot');
+// Honor SESSION_STORE_DIR so a secondary metabot instance (same working tree,
+// different PM2 app) can isolate its scheduled-tasks.json instead of racing the
+// production instance over the same plain-JSON file (no WAL → full rewrites).
+const PERSIST_DIR = process.env.SESSION_STORE_DIR || path.join(os.homedir(), '.metabot');
 const PERSIST_FILE = path.join(PERSIST_DIR, 'scheduled-tasks.json');
 
 /**
