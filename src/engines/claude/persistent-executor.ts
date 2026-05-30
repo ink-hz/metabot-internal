@@ -37,6 +37,8 @@ import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { apply1MContextSettings } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { ptyQuery } from './pty/pty-query.js';
+import type { PtyQueryOptions, PtyPromptSource } from './pty/contract.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -150,6 +152,12 @@ export interface PersistentExecutorOptions {
   spontaneousBufferLimit?: number;
   /** Called on every Agent Teams hook fire (TaskCreated/TaskCompleted/TeammateIdle). */
   onTeamEvent?: (event: TeamEvent) => void;
+  /**
+   * Turn backend: 'sdk' (default, Agent SDK query()) or 'pty' (drive a real
+   * interactive `claude` over a PTY + reconstruct SDKMessages from the session
+   * jsonl). 'pty' keeps Claude Code subscription billing post-June-2026.
+   */
+  backend?: 'sdk' | 'pty';
 }
 
 export type ExecutorState =
@@ -425,12 +433,37 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // separate card (StreamProcessor + sendPlanContent).
     queryOptions.canUseTool = makeCanUseTool(this.options.logger);
 
-    const stream = query({
-      prompt: this.inputQueue,
-      options: queryOptions as any,
-    });
-    this.queryHandle = stream;
-    this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    const backend = this.options.backend ?? 'sdk';
+    if (backend === 'pty') {
+      // PTY backend: drive a real interactive `claude` over a PTY and
+      // reconstruct SDKMessages from the session jsonl. Keeps Claude Code
+      // subscription billing (via TeamClaude) past the June-2026 SDK cutoff.
+      const append =
+        queryOptions.systemPrompt && typeof queryOptions.systemPrompt === 'object'
+          ? (queryOptions.systemPrompt as { append?: string }).append
+          : undefined;
+      const ptyOptions: PtyQueryOptions = {
+        cwd: this.options.cwd,
+        resume,
+        model: this.options.model,
+        systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
+        logger: this.options.logger,
+        pathToClaudeExecutable: CLAUDE_EXECUTABLE,
+      };
+      const stream = ptyQuery({
+        prompt: this.inputQueue as unknown as PtyPromptSource,
+        options: ptyOptions,
+      });
+      this.queryHandle = stream as unknown as Query;
+      this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    } else {
+      const stream = query({
+        prompt: this.inputQueue,
+        options: queryOptions as any,
+      });
+      this.queryHandle = stream;
+      this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    }
 
     this.consumePromise = this.consumeLoop();
     this.transition('ready');

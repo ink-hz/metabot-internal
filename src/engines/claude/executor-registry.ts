@@ -34,6 +34,8 @@ export interface RegistryOptions {
   defaultModel?: string;
   /** Default API key for new executors. */
   defaultApiKey?: string;
+  /** Turn backend for new executors: 'sdk' (default) or 'pty'. */
+  backend?: 'sdk' | 'pty';
 }
 
 /**
@@ -138,6 +140,7 @@ export class ExecutorRegistry extends EventEmitter {
       onTeamEvent: opts.onTeamEvent,
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
+      backend: this.opts.backend,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Auto-cleanup when executor closes for any reason
