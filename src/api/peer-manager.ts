@@ -71,7 +71,10 @@ const AGENT_BUS_FAIL_LOG_THRESHOLD = 3;
  * address is found (multi-homed public-only hosts, container with hostNetwork
  * disabled, etc.).
  */
-const VIRTUAL_IFACE_PATTERNS = [
+// Container/host bridge interfaces. These can carry RFC1918 addresses
+// (docker0=172.17.0.1, custom bridges br-<hash> anywhere in 172.16-31.x) that
+// are NOT the shared intranet, so they are skipped in every selection path.
+const CONTAINER_IFACE_PATTERNS = [
   /^docker/i,
   /^br-/i,
   /^veth/i,
@@ -81,10 +84,42 @@ const VIRTUAL_IFACE_PATTERNS = [
   /^kube-/i,
   /^virbr/i,
   /^vmnet/i,
+];
+
+// VPN tunnel interfaces (WireGuard, Tailscale, generic tun, macOS utun). The
+// shared intranet may be delivered over one of these (e.g. a corporate VPN
+// hands out a 172.31.x address on utun*/wg*), so they are skipped only by the
+// generic rank-based fallback — the intranet-CIDR pass below still considers
+// them, which is what lets a tunnel-delivered intranet IP win.
+const VPN_IFACE_PATTERNS = [
   /^tailscale/i,
   /^wg/i,
   /^utun/i,
+  /^tun/i,
 ];
+
+const VIRTUAL_IFACE_PATTERNS = [...CONTAINER_IFACE_PATTERNS, ...VPN_IFACE_PATTERNS];
+
+/**
+ * True when `addr` (dotted IPv4) falls inside the `a.b.c.d/bits` CIDR. Invalid
+ * inputs return false rather than throwing.
+ */
+function cidrContains(cidr: string, addr: string): boolean {
+  const [base, bitsRaw] = cidr.split('/');
+  const bits = parseInt(bitsRaw ?? '', 10);
+  if (!base || Number.isNaN(bits) || bits < 0 || bits > 32) return false;
+  const toInt = (ip: string): number | undefined => {
+    const parts = ip.split('.').map((n) => parseInt(n, 10));
+    if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return undefined;
+    return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+  };
+  const baseInt = toInt(base);
+  const addrInt = toInt(addr);
+  if (baseInt === undefined || addrInt === undefined) return false;
+  // /0 means "everything"; a 32-bit shift is UB in JS, so special-case it.
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (baseInt & mask) === (addrInt & mask);
+}
 
 function rfc1918Rank(addr: string): number {
   // Lower rank = preferred.
@@ -99,7 +134,30 @@ function rfc1918Rank(addr: string): number {
 
 export function pickPrivateIPv4(
   ifaces: NodeJS.Dict<os.NetworkInterfaceInfo[]> = os.networkInterfaces(),
+  intranetCidr?: string,
 ): string | undefined {
+  // Pass 1 — intranet CIDR. When the shared intranet segment is known (e.g.
+  // 172.31.0.0/16), pick the address inside it from any non-container interface.
+  // VPN tunnels are intentionally allowed here so a tunnel-delivered intranet IP
+  // wins over a non-routable physical LAN address (192.168.x). Container/host
+  // bridges stay skipped so a docker custom bridge inside the CIDR can't squat.
+  if (intranetCidr && intranetCidr.trim()) {
+    const cidr = intranetCidr.trim();
+    const matches: Array<{ ifname: string; address: string }> = [];
+    for (const [ifname, list] of Object.entries(ifaces)) {
+      if (!list) continue;
+      if (CONTAINER_IFACE_PATTERNS.some((re) => re.test(ifname))) continue;
+      for (const info of list) {
+        if (info.family !== 'IPv4' || info.internal) continue;
+        if (cidrContains(cidr, info.address)) matches.push({ ifname, address: info.address });
+      }
+    }
+    matches.sort((x, y) => x.ifname.localeCompare(y.ifname));
+    if (matches[0]) return matches[0].address;
+  }
+
+  // Pass 2 — generic fallback. Skips all virtual interfaces (containers + VPN)
+  // and ranks remaining RFC1918 addresses 10/8 → 172.16/12 → 192.168/16.
   type Candidate = { ifname: string; address: string; rank: number };
   const candidates: Candidate[] = [];
   for (const [ifname, list] of Object.entries(ifaces)) {
@@ -178,11 +236,17 @@ export class PeerManager {
         this.selfUrl = rawSelf;
       } else {
         const port = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;
-        const privateIp = pickPrivateIPv4();
+        // Known intranet segment — an address inside this CIDR is preferred even
+        // when it lives on a VPN tunnel interface. Defaults to the org intranet
+        // (172.31.0.0/16); set METABOT_INTRANET_CIDR='' to disable the override.
+        const intranetCidr = process.env.METABOT_INTRANET_CIDR !== undefined
+          ? process.env.METABOT_INTRANET_CIDR.trim()
+          : '172.31.0.0/16';
+        const privateIp = pickPrivateIPv4(os.networkInterfaces(), intranetCidr);
         if (privateIp) {
           this.selfUrl = `http://${privateIp}:${port}`;
           this.logger.info(
-            { selfUrl: this.selfUrl, privateIp },
+            { selfUrl: this.selfUrl, privateIp, intranetCidr: intranetCidr || undefined },
             'METABOT_AGENT_SELF_URL not set — auto-detected from private IPv4 (set METABOT_AGENT_SELF_URL to override)',
           );
         } else {

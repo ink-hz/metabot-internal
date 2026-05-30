@@ -795,4 +795,48 @@ describe('pickPrivateIPv4', () => {
     };
     expect(pickPrivateIPv4(ifaces)).toBe('10.0.0.5');
   });
+
+  describe('intranet CIDR override', () => {
+    it('prefers an address inside the CIDR over a higher-ranked one', () => {
+      const ifaces: IfaceDict = {
+        eth0: [ipv4('10.0.0.5')], // rank 0, would win without CIDR
+        eth1: [ipv4('172.31.32.2')], // intranet
+      };
+      expect(pickPrivateIPv4(ifaces, '172.31.0.0/16')).toBe('172.31.32.2');
+    });
+
+    it('picks the intranet address even when it lives on a VPN tunnel iface', () => {
+      const ifaces: IfaceDict = {
+        eth0: [ipv4('192.168.1.103')], // physical office LAN, not routable
+        utun0: [ipv4('172.31.40.7')], // VPN-delivered intranet — must win
+      };
+      expect(pickPrivateIPv4(ifaces, '172.31.0.0/16')).toBe('172.31.40.7');
+      // and without the CIDR the tunnel is skipped → falls back to the LAN addr
+      expect(pickPrivateIPv4(ifaces)).toBe('192.168.1.103');
+    });
+
+    it('still skips container/bridge ifaces even if they sit inside the CIDR', () => {
+      const ifaces: IfaceDict = {
+        'br-deadbeef': [ipv4('172.31.0.1')], // docker custom bridge — must NOT squat
+        wg0: [ipv4('172.31.55.9')], // real intranet over wireguard
+      };
+      expect(pickPrivateIPv4(ifaces, '172.31.0.0/16')).toBe('172.31.55.9');
+    });
+
+    it('falls back to rank logic when no address matches the CIDR', () => {
+      const ifaces: IfaceDict = {
+        eth0: [ipv4('192.168.1.5')],
+        eth1: [ipv4('10.0.0.5')],
+      };
+      expect(pickPrivateIPv4(ifaces, '172.31.0.0/16')).toBe('10.0.0.5');
+    });
+
+    it('ignores an empty CIDR string (pure fallback behavior)', () => {
+      const ifaces: IfaceDict = {
+        eth0: [ipv4('192.168.1.5')],
+        eth1: [ipv4('172.20.0.5')],
+      };
+      expect(pickPrivateIPv4(ifaces, '')).toBe('172.20.0.5');
+    });
+  });
 });
