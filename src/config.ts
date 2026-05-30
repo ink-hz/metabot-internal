@@ -175,12 +175,19 @@ function required(name: string): string {
   return value;
 }
 
-function expandUserPath(value: string): string {
+export function expandUserPath(value: string): string {
   if (value === '~') return os.homedir();
   if (value.startsWith('~/') || value.startsWith('~\\')) {
     return path.join(os.homedir(), value.slice(2));
   }
-  return value;
+  if (!value) return value;
+  // Resolve relative paths (".", "./x", "x/y") to absolute. Required because
+  // the PTY backend derives a session's jsonl path by escaping cwd
+  // (cwd.replace(/\//g,'-')); a relative cwd like "." escapes to "." and the
+  // scanner tails a non-existent dir → claude runs but the Feishu card renders
+  // BLANK. (Seen 2026-05-30: the `metabot` bot's defaultWorkingDirectory was
+  // ".".) Absolute paths pass through unchanged.
+  return path.isAbsolute(value) ? value : path.resolve(value);
 }
 
 // --- Feishu JSON entry (used in bots.json) ---
