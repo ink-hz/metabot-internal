@@ -26,11 +26,27 @@ import { randomUUID } from 'node:crypto';
 import type { FSWatcher } from 'node:fs';
 import type { PtyHookBridge } from './contract.js';
 
+export interface HookBridgeOptions {
+  /**
+   * Include TaskCreated/TaskCompleted/TeammateIdle command hooks in the
+   * generated settings.json. Default: false.
+   *
+   * These hook events are REJECTED by the current claude CLI settings
+   * validator — including them causes a validation dialog that blocks the
+   * TUI from starting. Kept behind this flag for phase 2 when the CLI
+   * schema is updated or we find a workaround. The SDK path still receives
+   * team events via JS callbacks; PTY team-event observation is deferred.
+   */
+  teamEvents?: boolean;
+}
+
 /**
  * Create a new PtyHookBridge instance. Each instance owns a temp directory
  * for its sentinel/event files and generated settings.json.
  */
-export function createHookBridge(): PtyHookBridge {
+export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
+  const enableTeamEvents = options?.teamEvents === true;
+
   const bridgeId = randomUUID().slice(0, 8);
   const bridgeDir = join(tmpdir(), `metabot-pty-${bridgeId}`);
   mkdirSync(bridgeDir, { recursive: true });
@@ -54,37 +70,33 @@ export function createHookBridge(): PtyHookBridge {
     // We `cat` stdin into the sentinel file so the watcher sees it change.
     const stopCommand = `cat > ${sentinelPath}`;
 
-    // Team hooks: append the stdin JSON (which Claude pipes) as a line to
-    // the team events JSONL file. We prefix with the hook event name so the
-    // reader can distinguish TaskCreated/TaskCompleted/TeammateIdle.
-    const taskCreatedCommand = `printf '{"kind":"TaskCreated","payload":' && cat && printf '}\\n' >> ${teamEventPath}`;
-    const taskCompletedCommand = `printf '{"kind":"TaskCompleted","payload":' && cat && printf '}\\n' >> ${teamEventPath}`;
-    const teammateIdleCommand = `printf '{"kind":"TeammateIdle","payload":' && cat && printf '}\\n' >> ${teamEventPath}`;
-
-    const settings = {
-      hooks: {
-        Stop: [
-          {
-            hooks: [{ type: 'command', command: stopCommand }],
-          },
-        ],
-        TaskCreated: [
-          {
-            hooks: [{ type: 'command', command: taskCreatedCommand }],
-          },
-        ],
-        TaskCompleted: [
-          {
-            hooks: [{ type: 'command', command: taskCompletedCommand }],
-          },
-        ],
-        TeammateIdle: [
-          {
-            hooks: [{ type: 'command', command: teammateIdleCommand }],
-          },
-        ],
-      },
+    const hooks: Record<string, unknown> = {
+      Stop: [
+        {
+          hooks: [{ type: 'command', command: stopCommand }],
+        },
+      ],
     };
+
+    // phase 2: team-event hooks are rejected by the current claude CLI
+    // settings validator. Only include them when explicitly opted in.
+    if (enableTeamEvents) {
+      const taskCreatedCommand = `{ printf '{"kind":"TaskCreated","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
+      const taskCompletedCommand = `{ printf '{"kind":"TaskCompleted","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
+      const teammateIdleCommand = `{ printf '{"kind":"TeammateIdle","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
+
+      hooks.TaskCreated = [
+        { hooks: [{ type: 'command', command: taskCreatedCommand }] },
+      ];
+      hooks.TaskCompleted = [
+        { hooks: [{ type: 'command', command: taskCompletedCommand }] },
+      ];
+      hooks.TeammateIdle = [
+        { hooks: [{ type: 'command', command: teammateIdleCommand }] },
+      ];
+    }
+
+    const settings = { hooks };
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
     return settingsPath;
