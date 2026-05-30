@@ -42,7 +42,13 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
     // Compute jsonl path: ~/.claude/projects/<escaped-cwd>/<sessionId>.jsonl
     // Escaped cwd: every '/' replaced by '-' (leading slash → leading dash).
-    const escaped = opts.cwd.replace(/\//g, '-');
+    // cwd MUST be absolute here — a relative cwd (e.g. ".") escapes to "." and
+    // the tail points at the wrong dir, so the scanner reads nothing and the
+    // Feishu card renders blank. Config should already absolutize this
+    // (expandUserPath), but resolve defensively so the path derivation matches
+    // exactly what claude itself does (it derives its jsonl dir from its cwd).
+    const resolvedCwd = path.resolve(opts.cwd);
+    const escaped = resolvedCwd.replace(/\//g, '-');
     this.jsonlPath = path.join(
       os.homedir(),
       '.claude',
@@ -139,13 +145,16 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const cols = opts.cols ?? 120;
     const rows = opts.rows ?? 40;
 
-    this.log.info({ sessionId: this.sessionId, args, cwd: opts.cwd }, 'pty-session: spawning claude');
+    // Spawn with the SAME absolute cwd used to derive jsonlPath, so claude's
+    // own jsonl-dir derivation matches ours regardless of metabot's process cwd.
+    const spawnCwd = path.resolve(opts.cwd);
+    this.log.info({ sessionId: this.sessionId, args, cwd: spawnCwd }, 'pty-session: spawning claude');
 
     this.term = pty.spawn(claudePath, args, {
       name: 'xterm-256color',
       cols,
       rows,
-      cwd: opts.cwd,
+      cwd: spawnCwd,
       env,
     });
 
