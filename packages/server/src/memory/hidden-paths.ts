@@ -8,8 +8,13 @@
  * Important: T5T's own routes (`/api/t5t/*`) and `t5t-store.ts` go through the
  * `MemoryStore` directly, bypassing this filter. Hidden paths are only filtered
  * at the `/api/memory/*` route layer.
+ *
+ * `/instances` and `/qa-scratch` are dead, empty namespaces left over from
+ * earlier versions (no current code reads or writes them). Hidden here so they
+ * stop cluttering the web memory tree; can be physically dropped later with an
+ * admin credential.
  */
-export const MEMORY_HIDDEN_PREFIXES = ['/t5t'] as const;
+export const MEMORY_HIDDEN_PREFIXES = ['/t5t', '/instances', '/qa-scratch'] as const;
 
 export function isHiddenFromMemoryView(path: string): boolean {
   return MEMORY_HIDDEN_PREFIXES.some((p) => path === p || path.startsWith(p + '/'));
