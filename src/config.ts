@@ -52,6 +52,19 @@ export interface BotConfigBase {
     apiKey: string | undefined;
     outputsBaseDir: string;
     downloadsDir: string;
+    /**
+     * Which backend drives Claude Code turns:
+     *   - 'pty' (default) — a real interactive `claude` TUI driven over a PTY,
+     *                       with structured output reconstructed from the
+     *                       session jsonl. Keeps Claude Code SUBSCRIPTION
+     *                       billing after the mid-June 2026 Agent-SDK cutoff
+     *                       (routed through TeamClaude for Max-account load
+     *                       balancing). Only applies to the persistent executor.
+     *   - 'sdk'           — the legacy Agent SDK `query()`. Opt-out fallback;
+     *                       loses subscription billing after the June 2026 cutoff.
+     * Per-bot field (or env CLAUDE_BACKEND=sdk) overrides back to the SDK path.
+     */
+    backend: 'sdk' | 'pty';
   };
   /** Kimi-specific overrides. Populated only when engine === 'kimi'. Phase 2. */
   kimi?: {
@@ -202,6 +215,8 @@ interface EngineJsonFields {
   engine?: EngineName;
   kimi?: KimiJsonConfig;
   codex?: CodexJsonConfig;
+  /** Claude turn backend: 'pty' (default) or 'sdk' (legacy opt-out). Overrides env CLAUDE_BACKEND. */
+  backend?: 'sdk' | 'pty';
 }
 
 export interface FeishuBotJsonEntry extends EngineJsonFields {
@@ -388,9 +403,12 @@ function buildClaudeConfig(entry: {
   apiKey?: string;
   outputsBaseDir?: string;
   downloadsDir?: string;
+  backend?: 'sdk' | 'pty';
 }): BotConfigBase['claude'] {
+  const backendEnv = process.env.CLAUDE_BACKEND;
   return {
     defaultWorkingDirectory: expandUserPath(entry.defaultWorkingDirectory),
+    backend: entry.backend ?? (backendEnv === 'sdk' ? 'sdk' : 'pty'),
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
     model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-opus-4-8',
@@ -435,6 +453,7 @@ function feishuBotFromEnv(): BotConfig {
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+      backend: process.env.CLAUDE_BACKEND === 'sdk' ? 'sdk' : 'pty',
     },
   };
 }
@@ -456,6 +475,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
+      backend: process.env.CLAUDE_BACKEND === 'sdk' ? 'sdk' : 'pty',
     },
   };
 }
@@ -477,6 +497,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
+      backend: process.env.CLAUDE_BACKEND === 'sdk' ? 'sdk' : 'pty',
     },
   };
 }

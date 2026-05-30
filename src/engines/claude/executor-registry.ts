@@ -34,6 +34,8 @@ export interface RegistryOptions {
   defaultModel?: string;
   /** Default API key for new executors. */
   defaultApiKey?: string;
+  /** Turn backend for new executors: 'pty' (default) or 'sdk' (legacy). */
+  backend?: 'sdk' | 'pty';
 }
 
 /**
@@ -57,6 +59,13 @@ interface PoolEntry {
   executor: PersistentClaudeExecutor;
   /** For LRU bumping; insertion order in the Map encodes recency. */
   chatId: string;
+  /**
+   * Effective model this executor was spawned with (`opts.model ?? defaultModel`).
+   * The model binds at spawn (interactive `claude --model` / SDK queryOptions),
+   * so when a later acquire requests a DIFFERENT model the executor must be
+   * respawned — see {@link ExecutorRegistry.acquire}.
+   */
+  model?: string;
 }
 
 export class ExecutorRegistry extends EventEmitter {
@@ -101,18 +110,32 @@ export class ExecutorRegistry extends EventEmitter {
       try { await pending; } catch { /* shutdown errors are logged at the source */ }
     }
 
+    const effectiveModel = opts.model ?? this.opts.defaultModel;
     const existing = this.executors.get(chatId);
     if (existing) {
       const state = existing.executor.getState();
-      if (state === 'ready' || state === 'restarting' || state === 'starting') {
-        // Healthy — bump LRU position
+      const healthy = state === 'ready' || state === 'restarting' || state === 'starting';
+      if (healthy && existing.model === effectiveModel) {
+        // Healthy + same model — bump LRU position
         this.executors.delete(chatId);
         this.executors.set(chatId, existing);
         return existing.executor;
       }
-      // Unhealthy — drop from map (will recreate below)
-      this.opts.logger.info({ chatId, state }, 'ExecutorRegistry: replacing unhealthy executor');
-      this.executors.delete(chatId);
+      if (healthy) {
+        // Model changed (e.g. /model switch). The model binds at spawn, so
+        // reusing this executor would keep the OLD model. Release + respawn —
+        // the new executor RESUMES the same session (opts.resumeSessionId), so
+        // the conversation is preserved, just continued on the new model.
+        this.opts.logger.info(
+          { chatId, from: existing.model, to: effectiveModel },
+          'ExecutorRegistry: model changed — respawning executor',
+        );
+        await this.release(chatId, 'model-change');
+      } else {
+        // Unhealthy — drop from map (will recreate below)
+        this.opts.logger.info({ chatId, state }, 'ExecutorRegistry: replacing unhealthy executor');
+        this.executors.delete(chatId);
+      }
     }
 
     // Make room if at capacity (LRU = first-inserted Map key)
@@ -132,12 +155,13 @@ export class ExecutorRegistry extends EventEmitter {
       cwd: opts.cwd,
       resumeSessionId: opts.resumeSessionId,
       apiKey: this.opts.defaultApiKey,
-      model: opts.model ?? this.opts.defaultModel,
+      model: effectiveModel,
       logger: this.opts.logger,
       idleTimeoutMs: this.opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS,
       onTeamEvent: opts.onTeamEvent,
       apiContext: opts.apiContext,
       outputsDir: opts.outputsDir,
+      backend: this.opts.backend,
     };
     const executor = new PersistentClaudeExecutor(execOpts);
     // Auto-cleanup when executor closes for any reason
@@ -150,7 +174,7 @@ export class ExecutorRegistry extends EventEmitter {
       }
     });
     await executor.start();
-    this.executors.set(chatId, { executor, chatId });
+    this.executors.set(chatId, { executor, chatId, model: effectiveModel });
     this.opts.logger.info({ chatId, poolSize: this.executors.size }, 'ExecutorRegistry: acquired new executor');
     this.emit('executor-added', chatId);
     return executor;

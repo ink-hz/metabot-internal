@@ -302,6 +302,17 @@ export class MessageBridge {
     questions: PendingQuestion['questions'];
     cardMessageId: string;
   }>();
+  /**
+   * Pending client-side slash-command picker (e.g. bare `/effort`). Unlike a
+   * between-turn AskUserQuestion, this does NOT resolve a hook — on reply we
+   * re-inject `<command> <choice>` as a fresh prompt so the interactive
+   * `claude` runs the client-side slash command. Single slot per chatId.
+   */
+  private pendingSlashPickers = new Map<string, {
+    command: string;
+    options: string[];
+    cardMessageId: string;
+  }>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -513,6 +524,7 @@ export class MessageBridge {
         maxConcurrent,
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
+        backend: this.config.claude.backend,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -774,6 +786,189 @@ export class MessageBridge {
       toolCalls: [],
     });
     return true;
+  }
+
+  /**
+   * Registry of bare client-side slash commands we surface as a picker card.
+   * Each maps to the selectable argument values. Only meaningful for the
+   * interactive `claude` backend (client-side slash commands aren't a SDK
+   * concept), but harmless elsewhere — the chosen `<command> <value>` simply
+   * passes through to the agent like any other unrecognized slash command.
+   */
+  private static readonly SLASH_PICKERS: Record<string, { question: string; header: string; options: Array<{ label: string; description: string }> }> = {
+    '/effort': {
+      question: 'Set the reasoning effort level',
+      header: 'Effort',
+      options: [
+        { label: 'max', description: 'Absolute highest capability — no token limit, slowest' },
+        { label: 'xhigh', description: 'Extended exploration for deep agentic/coding work' },
+        { label: 'high', description: 'Complex reasoning — quality over speed/cost' },
+        { label: 'medium', description: 'Balanced speed, cost & performance (default)' },
+        { label: 'low', description: 'Fastest — high-volume / latency-sensitive work' },
+      ],
+    },
+  };
+
+  /**
+   * If `msg` is a bare slash command we know how to present as a picker (e.g.
+   * `/effort` with no argument), send a numbered question card and remember it.
+   * Returns true if consumed. The actual command runs once the user replies
+   * (see {@link tryHandleSlashPickerReply}).
+   */
+  private async tryHandleSlashPicker(msg: IncomingMessage): Promise<boolean> {
+    const { chatId, text } = msg;
+    const parts = text.trim().split(/\s+/);
+    // Only intercept when there's NO argument — `/effort high` should still
+    // pass straight through to the agent.
+    if (parts.length !== 1) return false;
+    const cmd = parts[0].toLowerCase();
+    const spec = MessageBridge.SLASH_PICKERS[cmd];
+    if (!spec) return false;
+
+    const pendingQuestion: PendingQuestion = {
+      toolUseId: `slash-picker:${cmd}`,
+      questions: [
+        { question: spec.question, header: spec.header, options: spec.options, multiSelect: false },
+      ],
+    };
+    const card: CardState = {
+      status: 'waiting_for_input',
+      userPrompt: cmd,
+      responseText: '',
+      toolCalls: [],
+      pendingQuestion,
+    };
+
+    const send = this.sender.sendQuestionCard
+      ? this.sender.sendQuestionCard.bind(this.sender)
+      : this.sender.sendCard.bind(this.sender);
+    let cardMessageId: string | undefined;
+    try {
+      cardMessageId = await send(chatId, card);
+    } catch (err) {
+      this.logger.error({ err, chatId, cmd }, 'MessageBridge: failed to send slash picker card');
+      return false;
+    }
+    if (!cardMessageId) {
+      this.logger.warn({ chatId, cmd }, 'MessageBridge: slash picker card returned no messageId');
+      return false;
+    }
+
+    this.pendingSlashPickers.set(chatId, {
+      command: cmd,
+      options: spec.options.map((o) => o.label),
+      cardMessageId,
+    });
+    this.logger.info({ chatId, cmd, cardMessageId }, 'MessageBridge: slash picker card opened');
+    return true;
+  }
+
+  /**
+   * Treat the user's typed reply as a choice for a pending slash picker.
+   * Maps a numbered reply (or an exact option name) to the option value, then
+   * re-injects `<command> <value>` through the normal message pipeline so the
+   * client-side slash command runs. Returns true if consumed.
+   */
+  private async tryHandleSlashPickerReply(msg: IncomingMessage): Promise<boolean> {
+    const { chatId, text } = msg;
+    const pending = this.pendingSlashPickers.get(chatId);
+    if (!pending) return false;
+
+    const trimmed = text.trim();
+    let choice: string | undefined;
+    const num = parseInt(trimmed, 10);
+    if (Number.isFinite(num) && num >= 1 && num <= pending.options.length) {
+      choice = pending.options[num - 1];
+    } else {
+      const lower = trimmed.toLowerCase();
+      choice = pending.options.find((o) => o.toLowerCase() === lower);
+    }
+
+    if (!choice) {
+      await this.sender.sendText(
+        chatId,
+        `请回复选项编号（1-${pending.options.length}）或选项名（${pending.options.join(' / ')}）。`,
+      );
+      return true;
+    }
+
+    this.pendingSlashPickers.delete(chatId);
+    const injected = `${pending.command} ${choice}`;
+
+    // A client-side slash command (e.g. `/effort high`) changes a setting with
+    // NO model turn — routing it through executeQuery would spawn a "thinking"
+    // card that just renders an empty result. If the chat is idle we instead
+    // submit it silently (no card) and simply confirm on the picker card. When
+    // a turn is already in flight we can't start another (the persistent
+    // executor serialises turns), so fall back to the normal queueing path.
+    const busy = this.runningTasks.has(chatId) || this.continuationTasks.has(chatId);
+    if (busy) {
+      this.logger.info({ chatId, command: pending.command, choice }, 'MessageBridge: slash picker resolved while busy — re-injecting via queue');
+      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+        status: 'complete',
+        userPrompt: pending.command,
+        responseText: `> **Selected:** ${choice}`,
+        toolCalls: [],
+      });
+      await this.handleMessage({ ...msg, text: injected });
+      return true;
+    }
+
+    this.logger.info({ chatId, command: pending.command, choice }, 'MessageBridge: slash picker resolved — submitting silently');
+    await this.submitSilentSlashCommand(chatId, injected);
+    await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+      status: 'complete',
+      userPrompt: pending.command,
+      responseText: `✅ **${pending.command.slice(1)}** set to \`${choice}\``,
+      toolCalls: [],
+    });
+    return true;
+  }
+
+  /**
+   * Submit a client-side slash command to the agent WITHOUT a chat card. Used
+   * for picker selections (`/effort <level>`) that change a setting and produce
+   * no model output. Drives one executor turn and drains its stream to the
+   * terminal result (the PTY slash-watchdog synthesises one within seconds),
+   * capturing the session id like a normal turn. Best-effort — must only be
+   * called when the chat is idle (no turn in flight).
+   */
+  private async submitSilentSlashCommand(chatId: string, command: string): Promise<void> {
+    const { session, engineName } = this.prepareSessionForExecution(chatId);
+    const abortController = new AbortController();
+    const outputsDir = this.outputsManager.prepareDir(chatId);
+    const apiContext = { botName: this.config.name, chatId };
+
+    let handle: ExecutionHandle | undefined;
+    const safety = setTimeout(() => {
+      try { handle?.finish(); } catch { /* ignore */ }
+      abortController.abort();
+    }, 30_000);
+
+    try {
+      handle = await this.runOneTurn(chatId, engineName, {
+        prompt: command,
+        cwd: session.workingDirectory,
+        abortController,
+        outputsDir,
+        apiContext,
+        model: session.model,
+      });
+      for await (const message of handle.stream) {
+        if (abortController.signal.aborted) break;
+        const sid = (message as { session_id?: string }).session_id;
+        if (sid && (sid !== session.sessionId || session.sessionIdEngine !== engineName)) {
+          this.sessionManager.setSessionId(chatId, sid, engineName);
+        }
+        if (message.type === 'result') break;
+      }
+    } catch (err) {
+      this.logger.warn({ err, chatId, command }, 'MessageBridge: silent slash command errored');
+    } finally {
+      clearTimeout(safety);
+      try { handle?.finish(); } catch { /* ignore */ }
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
   }
 
   /**
@@ -1294,6 +1489,11 @@ export class MessageBridge {
 
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {
+      // Bare client-side slash commands (no argument) that we surface as a
+      // selectable Feishu picker card instead of passing the argless command
+      // through to the TUI (which would just open an autocomplete menu).
+      if (await this.tryHandleSlashPicker(msg)) return;
+
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
 
@@ -1323,6 +1523,13 @@ export class MessageBridge {
     // the still-hanging hook for 6 minutes. See:
     // [[bug_feishu_v2_mobile_action_buttons]] history and
     // PersistentClaudeExecutor.askUserQuestionHook.
+    // Reply to a client-side slash-command picker (e.g. the /effort card).
+    // Must run before the between-turn reply check (same rationale: no
+    // runningTasks entry exists) — it re-injects `<command> <choice>`.
+    if (await this.tryHandleSlashPickerReply(msg)) {
+      return;
+    }
+
     if (await this.tryHandleBetweenTurnQuestionReply(msg)) {
       return;
     }
