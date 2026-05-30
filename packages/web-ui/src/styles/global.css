@@ -233,30 +233,6 @@ a:hover { border-bottom-color: var(--phosphor); }
   color: var(--amber);
 }
 
-.meta-bar {
-  display: flex;
-  gap: 24px;
-  padding: 6px 24px;
-  border-bottom: 1px solid var(--hairline);
-  background: var(--ink-000);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.2em;
-  color: var(--bone-300);
-}
-.meta-bar .dot {
-  display: inline-block;
-  width: 6px;
-  height: 6px;
-  background: var(--phosphor);
-  border-radius: 50%;
-  margin-right: 8px;
-  vertical-align: middle;
-  box-shadow: 0 0 6px var(--phosphor);
-}
-.meta-bar .dot.warn { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
-.meta-bar .dot.error { background: var(--rust); box-shadow: 0 0 6px var(--rust); }
-
 .main {
   display: grid;
   grid-template-columns: 320px 1fr;
@@ -1539,9 +1515,6 @@ a:hover { border-bottom-color: var(--phosphor); }
   }
   .actions .signout { border-left: 0; padding-left: 10px; }
   .theme-toggle { flex: 0 0 auto; }
-
-  /* meta bar wraps instead of overflowing */
-  .meta-bar { flex-wrap: wrap; gap: 6px 14px; padding: 6px 14px; font-size: 9px; }
 
   /* sidebar defaults collapsed on phones (App.tsx); when opened it's a
      scrollable drawer above the content, not a fixed-height stub */

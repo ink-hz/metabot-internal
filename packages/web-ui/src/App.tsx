@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { api, type Manifest } from './lib/api';
 import { Home } from './routes/home';
 import { MemoryPath } from './routes/memory-path';
 import { SkillsList } from './routes/skills-list';
@@ -119,21 +118,7 @@ function SearchBar() {
   );
 }
 
-function MetaBar({ manifest }: { manifest: Manifest | null }) {
-  const ct = manifest?.capabilities.content_types?.join(' · ') || '—';
-  return (
-    <div className="meta-bar">
-      <span><span className="dot" />{manifest ? `${manifest.instance.name}` : 'connecting…'}</span>
-      <span>schema v{manifest?.schemaVersion ?? '?'}</span>
-      <span>content · {ct}</span>
-      <span>飞连 SSO</span>
-    </div>
-  );
-}
-
 function Shell({ children }: { children: React.ReactNode }) {
-  const loc = useLocation();
-  const [manifest, setManifest] = useState<Manifest | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(readSidebarCollapsed);
   const [theme, setTheme] = useState<Theme>(readTheme);
 
@@ -156,17 +141,6 @@ function Shell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
   }, [theme]);
-
-  useEffect(() => {
-    let live = true;
-    api.manifest()
-      .then((m) => { if (live) setManifest(m); })
-      .catch(() => {
-        // 401 is handled inside api.request → hard redirect to /oauth2/sign_in.
-        // Other errors leave manifest null; the MetaBar shows "connecting…".
-      });
-    return () => { live = false; };
-  }, [loc.pathname]);
 
   // global shortcuts:
   //   '/'  focus search input
@@ -212,7 +186,6 @@ function Shell({ children }: { children: React.ReactNode }) {
           </a>
         </nav>
       </header>
-      <MetaBar manifest={manifest} />
       {children}
     </div>
   );
