@@ -108,6 +108,55 @@ export interface PtyQueryOptions {
   /** PTY geometry. Defaults: 120x40. */
   cols?: number;
   rows?: number;
+  /**
+   * Resolve an interactive tool that the TUI renders as a blocking menu.
+   *
+   * In SDK mode AskUserQuestion answers arrive as a `tool_result` on the input
+   * stream (and ExitPlanMode is auto-approved via `canUseTool`). The PTY can
+   * only TYPE into the TUI, so instead ptyQuery detects these tool_use records
+   * in the jsonl and asks the executor (which owns the Feishu question/plan
+   * machinery) how to respond; ptyQuery then drives the native menu via
+   * keystrokes. Returning is the SAME resolve path the bridge already uses
+   * (executor.resolveQuestion → pendingQuestionResolvers).
+   *
+   * Called once per detected interactive tool_use. For ExitPlanMode it should
+   * return `{ kind: 'approve' }` promptly; for AskUserQuestion it resolves only
+   * after the user answers (or the executor's 6-min timeout).
+   */
+  onInteractiveTool?: (tool: PtyInteractiveTool) => Promise<PtyInteractiveResponse>;
+}
+
+/** An interactive tool_use detected in the session jsonl. */
+export interface PtyInteractiveTool {
+  /** Tool name: 'AskUserQuestion' | 'ExitPlanMode'. */
+  name: string;
+  /** The tool_use id (used as the resolver key). */
+  toolUseId: string;
+  /** The raw tool_use.input (questions[] for AskUserQuestion, plan for ExitPlanMode). */
+  input: unknown;
+}
+
+/** How ptyQuery should drive the TUI menu for a detected interactive tool. */
+export type PtyInteractiveResponse =
+  | {
+      kind: 'answers';
+      /** Map of question header/text → chosen label or custom free text. */
+      answers: Record<string, string>;
+      /** Parsed questions (header + ordered option labels + multiSelect flag). */
+      questions: PtyParsedQuestion[];
+    }
+  | { kind: 'approve' }
+  | { kind: 'cancel' };
+
+/** A single AskUserQuestion question, parsed into the fields the keystroke layer needs. */
+export interface PtyParsedQuestion {
+  /** Header/title (the key used in the answers map). */
+  header: string;
+  /** The question text (fallback answers-map key). */
+  question: string;
+  /** Option labels in menu order. */
+  options: string[];
+  multiSelect: boolean;
 }
 
 /**
@@ -154,6 +203,13 @@ export interface PtyClaudeSession {
   ready(): Promise<void>;
   /** Type a prompt string into the TUI and submit it. */
   typePrompt(text: string): Promise<void>;
+  /**
+   * Write raw bytes to the PTY (no prompt-submit framing). Used by the
+   * interactive-tool keystroke layer to drive native TUI menus.
+   */
+  sendKeys(data: string): void;
+  /** ANSI-stripped snapshot of the recent PTY output ring (for menu parsing). */
+  snapshot(): string;
   /** Send an interrupt (ESC / Ctrl-C) to cancel the in-flight turn. */
   interrupt(): Promise<void>;
   /** Kill the PTY process and clean up. */
@@ -174,6 +230,14 @@ export interface PtyClaudeSessionOptions {
   cols?: number;
   rows?: number;
   logger: Logger;
+  /**
+   * Fired when the underlying `claude` process exits. ptyQuery uses this to
+   * detect an UNEXPECTED death (crash, killed menu, etc.) while a turn is still
+   * in flight, so it can synthesize a terminal `result` and avoid orphaning the
+   * caller's turn. A normal dispose() also triggers the process exit; the
+   * consumer distinguishes via its own disposed flag.
+   */
+  onExit?: (info: { exitCode: number; signal?: number }) => void;
 }
 
 // ── JsonlScanner (W2) ────────────────────────────────────────────────────────
@@ -226,6 +290,8 @@ export interface SynthesizeResultArgs {
   resultText?: string;
   isError?: boolean;
   numTurns?: number;
+  /** Real model name (from the assistant jsonl records), e.g. claude-opus-4-8. */
+  model?: string;
   usage?: {
     inputTokens?: number;
     outputTokens?: number;

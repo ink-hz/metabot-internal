@@ -38,7 +38,12 @@ import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { apply1MContextSettings } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
-import type { PtyQueryOptions, PtyPromptSource } from './pty/contract.js';
+import type {
+  PtyQueryOptions,
+  PtyPromptSource,
+  PtyInteractiveTool,
+  PtyInteractiveResponse,
+} from './pty/contract.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -153,9 +158,9 @@ export interface PersistentExecutorOptions {
   /** Called on every Agent Teams hook fire (TaskCreated/TaskCompleted/TeammateIdle). */
   onTeamEvent?: (event: TeamEvent) => void;
   /**
-   * Turn backend: 'sdk' (default, Agent SDK query()) or 'pty' (drive a real
-   * interactive `claude` over a PTY + reconstruct SDKMessages from the session
-   * jsonl). 'pty' keeps Claude Code subscription billing post-June-2026.
+   * Turn backend: 'pty' (default, drive a real interactive `claude` over a PTY
+   * + reconstruct SDKMessages from the session jsonl) or 'sdk' (legacy Agent SDK
+   * query()). 'pty' keeps Claude Code subscription billing post-June-2026.
    */
   backend?: 'sdk' | 'pty';
 }
@@ -433,7 +438,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // separate card (StreamProcessor + sendPlanContent).
     queryOptions.canUseTool = makeCanUseTool(this.options.logger);
 
-    const backend = this.options.backend ?? 'sdk';
+    const backend = this.options.backend ?? 'pty';
     if (backend === 'pty') {
       // PTY backend: drive a real interactive `claude` over a PTY and
       // reconstruct SDKMessages from the session jsonl. Keeps Claude Code
@@ -449,6 +454,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
         systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
         logger: this.options.logger,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
+        onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
       };
       const stream = ptyQuery({
         prompt: this.inputQueue as unknown as PtyPromptSource,
@@ -830,6 +836,63 @@ export class PersistentClaudeExecutor extends EventEmitter {
       session_id: this.sessionId || '',
     };
     this.inputQueue.enqueue(msg);
+  }
+
+  /**
+   * PTY-backend bridge for tools the interactive `claude` TUI renders as a
+   * blocking menu (AskUserQuestion, ExitPlanMode). In SDK mode these are
+   * resolved by the PreToolUse hook (AskUserQuestion) and `canUseTool`
+   * (ExitPlanMode); the PTY has neither, so ptyQuery detects the tool_use in
+   * the session jsonl and calls this to learn HOW to respond, then drives the
+   * native menu via keystrokes.
+   *
+   * This deliberately reuses the SAME machinery as the SDK path so the bridge
+   * needs no changes:
+   *   - AskUserQuestion → register a `pendingQuestionResolvers` entry and (when
+   *     between turns) emit `between-turn-question`, exactly like
+   *     askUserQuestionHook. The bridge renders the question card and calls
+   *     `resolveQuestion(toolUseId, answers)` as usual, resolving the await.
+   *   - ExitPlanMode → approve immediately (matches makeCanUseTool's auto-allow
+   *     under bypassPermissions). The plan body is shipped to the user by the
+   *     bridge from the ExitPlanMode tool_use it already sees in the stream.
+   */
+  private async handleInteractiveTool(
+    tool: PtyInteractiveTool,
+  ): Promise<PtyInteractiveResponse> {
+    const log = this.options.logger;
+    if (tool.name === 'ExitPlanMode') {
+      log.info({ toolUseId: tool.toolUseId }, 'PersistentExecutor: PTY auto-approving ExitPlanMode');
+      return { kind: 'approve' };
+    }
+    if (tool.name === 'AskUserQuestion') {
+      const questions = parseAskUserQuestionInput(tool.input);
+      const id = tool.toolUseId;
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        this.pendingQuestionResolvers.set(id, resolve);
+        if (!this.activeTurn) {
+          log.info({ toolUseId: id, questionCount: questions.length }, 'PersistentExecutor: PTY between-turn AskUserQuestion');
+          this.emit('between-turn-question', { toolUseId: id, questions });
+        }
+        setTimeout(() => {
+          if (this.pendingQuestionResolvers.delete(id)) {
+            log.warn({ toolUseId: id }, 'PersistentExecutor: PTY AskUserQuestion timed out (6 min)');
+            resolve({});
+          }
+        }, 6 * 60 * 1000);
+      });
+      return {
+        kind: 'answers',
+        answers,
+        questions: questions.map((q) => ({
+          header: q.header,
+          question: q.question,
+          options: q.options.map((o) => o.label),
+          multiSelect: q.multiSelect,
+        })),
+      };
+    }
+    log.warn({ tool: tool.name }, 'PersistentExecutor: unknown interactive tool');
+    return { kind: 'cancel' };
   }
 
   private pushSpontaneous(msg: SDKMessage): void {

@@ -205,12 +205,13 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     if (args.usage.costUSD !== undefined) {
       msg.total_cost_usd = args.usage.costUSD;
     }
-    // modelUsage expects a per-model breakdown; we don't know the model name
-    // from the stop hook alone, so we use a placeholder key. The consumer
-    // (processResultMessage) picks the model with the highest cost.
+    // modelUsage expects a per-model breakdown. The consumer
+    // (processResultMessage) picks the model with the highest cost and surfaces
+    // that key as the displayed model name — so use the REAL model captured off
+    // the assistant jsonl records, falling back to a placeholder only if unknown.
     if (args.usage.inputTokens !== undefined || args.usage.outputTokens !== undefined) {
       msg.modelUsage = {
-        'pty-session': {
+        [args.model || 'unknown']: {
           inputTokens: args.usage.inputTokens ?? 0,
           outputTokens: args.usage.outputTokens ?? 0,
           contextWindow: 200000,

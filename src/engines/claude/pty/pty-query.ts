@@ -41,6 +41,10 @@ import { createPtyClaudeSession } from './pty-session.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
+import { driveInteractiveTool } from './interactive-driver.js';
+
+/** Tool names the TUI renders as a blocking menu we must drive via keystrokes. */
+const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -74,6 +78,8 @@ function extractPromptText(m: PtyUserMessage): string | null {
 interface UsageAccum {
   inputTokens?: number;
   outputTokens?: number;
+  /** Real model name from the assistant record's `message.model`. */
+  model?: string;
 }
 
 export const ptyQuery = (args: {
@@ -93,8 +99,15 @@ export const ptyQuery = (args: {
   let sessionId = options.resume ?? '';
   let lastUsage: UsageAccum = {};
   let disposed = false;
+  // True between the moment we type a prompt and the moment that turn's
+  // terminal `result` is emitted (Stop hook). The exit watchdog uses it to
+  // decide whether an unexpected claude death orphaned an in-flight turn.
+  let turnInFlight = false;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
+  // Interactive tool_use ids we've already started driving, so a re-read of the
+  // same jsonl record never double-fires the keystroke handler.
+  const handledInteractive = new Set<string>();
 
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
   let appendSystemPrompt: string | undefined;
@@ -117,6 +130,7 @@ export const ptyQuery = (args: {
       cols: options.cols,
       rows: options.rows,
       logger,
+      onExit: handleSessionExit,
     });
     if (!sessionId) sessionId = session.sessionId;
 
@@ -125,6 +139,9 @@ export const ptyQuery = (args: {
     // Stop-hook → synthesize a terminal `result` after a short drain delay.
     hookBridge.onTurnComplete(() => {
       if (disposed) return;
+      // Mark the turn complete IMMEDIATELY (not in the drain timeout below) so
+      // the slash-command idle watchdog stands down and never double-emits.
+      turnInFlight = false;
       const usage = { ...lastUsage };
       // Reset for the next turn.
       lastUsage = {};
@@ -133,6 +150,7 @@ export const ptyQuery = (args: {
         out.enqueue(
           synthesizeResult({
             sessionId,
+            model: usage.model,
             usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
           }),
         );
@@ -161,6 +179,7 @@ export const ptyQuery = (args: {
           const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
           if (sid) sessionId = sid;
         }
+        detectInteractiveTools(rec);
         const adapted = adaptJsonlRecord(rec);
         if (!adapted) continue;
         if (Array.isArray(adapted)) {
@@ -174,16 +193,80 @@ export const ptyQuery = (args: {
     }
   }
 
-  /** Pull token usage off an assistant record so synthesizeResult can report it. */
+  /**
+   * Inspect an assistant record for AskUserQuestion / ExitPlanMode tool_use
+   * blocks. The interactive `claude` renders these as a blocking TUI menu; we
+   * ask the executor how to respond, then drive the menu via keystrokes. Fired
+   * as a detached task so a long-blocking AskUserQuestion (awaiting the user's
+   * Feishu reply) never stalls the scanner loop.
+   */
+  function detectInteractiveTools(rec: RawJsonlRecord): void {
+    if (rec.type !== 'assistant') return;
+    if (!options.onInteractiveTool) return; // SDK-parity callback not wired
+    const msg = rec.message as { content?: unknown } | undefined;
+    const content = msg?.content;
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      const b = block as { type?: string; name?: string; id?: string; input?: unknown };
+      if (b.type !== 'tool_use' || !b.name || !INTERACTIVE_TOOLS.has(b.name)) continue;
+      const toolUseId = b.id ?? '';
+      if (!toolUseId || handledInteractive.has(toolUseId)) continue;
+      handledInteractive.add(toolUseId);
+      void handleInteractiveTool({ name: b.name, toolUseId, input: b.input });
+    }
+  }
+
+  async function handleInteractiveTool(tool: {
+    name: string;
+    toolUseId: string;
+    input: unknown;
+  }): Promise<void> {
+    if (disposed || !options.onInteractiveTool) return;
+    try {
+      const response = await options.onInteractiveTool(tool);
+      if (!session) await boot;
+      if (!session || disposed) {
+        // The answer arrived after the session was torn down (e.g. claude died
+        // while we awaited the user's reply). The exit watchdog has already
+        // synthesized a terminal `result`, so this answer is moot — drop it.
+        logger.warn(
+          { tool: tool.name, toolUseId: tool.toolUseId, disposed },
+          'ptyQuery: interactive answer arrived after session ended — dropping',
+        );
+        return;
+      }
+      await driveInteractiveTool({ session, tool, response, logger });
+    } catch (err) {
+      logger.warn({ err, tool: tool.name }, 'ptyQuery: interactive tool handling failed');
+    }
+  }
+
+  /**
+   * Pull token usage off an assistant record so synthesizeResult can report it.
+   *
+   * Context-window occupation = input_tokens + cache_read_input_tokens +
+   * cache_creation_input_tokens (matches stream-processor's SDK path). In an
+   * interactive session with prompt caching, `input_tokens` alone is just the
+   * tiny uncached delta — the conversation history lives in the cache_* fields.
+   * Summing only input_tokens produced the bogus "ctx: 33/200k" display.
+   * The latest assistant record reflects the most recent API call's full
+   * context, so overwriting per-record (not accumulating) is correct.
+   */
   function trackUsage(rec: RawJsonlRecord): void {
     if (rec.type !== 'assistant') return;
     const msg = rec.message as Record<string, unknown> | undefined;
     const usage = msg?.usage as Record<string, unknown> | undefined;
     if (!usage) return;
-    const inT = usage.input_tokens as number | undefined;
+    const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+    const totalInput =
+      num(usage.input_tokens) +
+      num(usage.cache_read_input_tokens) +
+      num(usage.cache_creation_input_tokens);
     const outT = usage.output_tokens as number | undefined;
-    if (typeof inT === 'number') lastUsage.inputTokens = inT;
+    if (totalInput > 0) lastUsage.inputTokens = totalInput;
     if (typeof outT === 'number') lastUsage.outputTokens = outT;
+    const model = msg?.model as string | undefined;
+    if (typeof model === 'string' && model) lastUsage.model = model;
   }
 
   // ── Prompt loop ──────────────────────────────────────────────────────────
@@ -200,13 +283,93 @@ export const ptyQuery = (args: {
         }
         if (!session) await boot; // ensure session exists
         if (!session || disposed) break;
+        turnInFlight = true; // a new turn starts the moment we submit the prompt
         await session.typePrompt(text);
+        // Client-side slash commands (/effort, /model, /status, …) change a
+        // setting WITHOUT a model turn → no assistant record, no Stop hook, so
+        // no `result` would ever be synthesized and the caller's turn hangs.
+        // Watch for the TUI returning to idle without running the model and
+        // synthesize a `result` ourselves. Custom-skill slash commands that DO
+        // invoke the model show the "esc to interrupt" affordance → the watchdog
+        // stands down and the normal Stop-hook path completes the turn.
+        if (text.trim().startsWith('/')) void watchSlashCommandCompletion();
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: prompt loop ended with error');
     }
     // Prompt source finished → no more turns will be started. Tear down.
     await dispose();
+  }
+
+  // ── Slash-command idle watchdog ────────────────────────────────────────────
+  /** Grace period for a model turn to START (show "esc to interrupt"). */
+  const SLASH_GRACE_MS = 6_000;
+  /** Absolute cap before we stop watching (let the Stop/exit watchdogs handle). */
+  const SLASH_MAX_MS = 30_000;
+  /** "Model is actively running" signal in the (squished) TUI footer. */
+  const RUNNING_MARKER = 'esctointerrupt';
+
+  /**
+   * After a slash-command prompt, decide whether it ran the model or was a
+   * client-side no-turn command. If the model never started (no "esc to
+   * interrupt") and the TUI returned to idle, synthesize a terminal `result`
+   * so the caller's turn completes instead of hanging.
+   */
+  async function watchSlashCommandCompletion(): Promise<void> {
+    const start = Date.now();
+    let sawRunning = false;
+    while (!disposed) {
+      if (!turnInFlight) return; // Stop hook already completed this turn
+      const tail = (session?.snapshot() ?? '').slice(-2000).toLowerCase().replace(/\s+/g, '');
+      if (tail.includes(RUNNING_MARKER)) sawRunning = true;
+      const elapsed = Date.now() - start;
+      if (sawRunning) return; // real model turn — let the Stop-hook path finish it
+      if (elapsed > SLASH_GRACE_MS) {
+        // No model turn ever started → client-side command. Complete the turn.
+        turnInFlight = false;
+        logger.info('ptyQuery: slash command ran with no model turn — synthesizing result');
+        out.enqueue(
+          synthesizeResult({
+            sessionId,
+            model: lastUsage.model,
+            usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+          }),
+        );
+        return;
+      }
+      if (elapsed > SLASH_MAX_MS) return; // bail; Stop/exit watchdog is the backstop
+      await sleep(300);
+    }
+  }
+
+  // ── Exit watchdog ──────────────────────────────────────────────────────────
+  /**
+   * The claude PTY process exited. If we initiated the teardown (`disposed`),
+   * this is the normal path and dispose() already finished `out`. Otherwise the
+   * process died unexpectedly (crash, killed/cancelled menu, OOM). If a turn was
+   * still in flight — e.g. claude blocked on an AskUserQuestion menu and we were
+   * awaiting the user's Feishu reply when the process died — no Stop hook will
+   * ever fire, so we MUST synthesize a terminal `result` ourselves. Without it
+   * the caller's `for await` never sees a turn end and the executor wedges.
+   */
+  function handleSessionExit(info: { exitCode: number; signal?: number }): void {
+    if (disposed) return; // normal teardown via dispose()
+    logger.warn({ ...info, turnInFlight }, 'ptyQuery: claude exited unexpectedly');
+    if (turnInFlight) {
+      turnInFlight = false;
+      out.enqueue(
+        synthesizeResult({
+          sessionId,
+          isError: true,
+          resultText: 'claude process exited before the turn completed',
+          model: lastUsage.model,
+          usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+        }),
+      );
+    }
+    // The session is gone; no further turns can run on it. Tear down so the
+    // caller's iteration ends cleanly instead of hanging forever.
+    void dispose();
   }
 
   // ── Lifecycle ────────────────────────────────────────────────────────────

@@ -158,6 +158,11 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
     this.term.onExit(({ exitCode, signal }) => {
       this.log.info({ exitCode, signal }, 'pty-session: claude process exited');
+      try {
+        this.opts.onExit?.({ exitCode, signal });
+      } catch (err) {
+        this.log.warn({ err }, 'pty-session: onExit callback threw');
+      }
     });
   }
 
@@ -215,6 +220,32 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     await sleep(100);
     this.term.write('\x03');
     await sleep(100);
+  }
+
+  /**
+   * Write raw bytes to the PTY without any prompt-submit framing. Used by the
+   * interactive-tool keystroke layer to drive native TUI menus (AskUserQuestion
+   * / ExitPlanMode): digit selects, arrow keys navigate, `\r` confirms. Unlike
+   * typePrompt(), this does NOT wait/double-Enter — the caller composes the
+   * exact key sequence.
+   */
+  sendKeys(data: string): void {
+    if (!this.term || this.disposed) return;
+    this.term.write(data);
+  }
+
+  /**
+   * Return an ANSI-stripped snapshot of the recent PTY output ring. The
+   * keystroke layer parses this to detect a rendered menu and (for the dynamic
+   * ExitPlanMode menu) locate which numbered option to press. Control bytes and
+   * SGR/cursor/OSC escapes are removed so simple text regexes work.
+   */
+  snapshot(): string {
+    return this.ring
+      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
+      .replace(/\x1b[()][AB0]/g, '')
+      .replace(/\x1b\][^\x07]*\x07/g, '')
+      .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
   }
 
   async dispose(): Promise<void> {
