@@ -44,6 +44,7 @@ function fakeSession(snapshot: string): { session: PtyClaudeSession; keys: strin
     typePrompt: async () => {},
     sendKeys: (d: string) => { keys.push(d); },
     snapshot: () => snapshot,
+    screen: () => snapshot,
     interrupt: async () => {},
     dispose: async () => {},
   } as PtyClaudeSession;

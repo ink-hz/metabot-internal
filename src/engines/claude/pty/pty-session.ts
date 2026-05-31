@@ -11,6 +11,10 @@ import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
 import type { IPty } from 'node-pty';
+// @xterm/headless is CommonJS — import the default and destructure.
+import xterm from '@xterm/headless';
+const { Terminal } = xterm;
+type XtermTerminal = InstanceType<typeof Terminal>;
 import type { Logger } from '../../../utils/logger.js';
 import type {
   PtyClaudeSession as IPtyClaudeSession,
@@ -28,6 +32,16 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
 
   private term: IPty | null = null;
   private ring = '';
+  /**
+   * Headless terminal emulator fed the SAME PTY bytes as `ring`. Unlike the
+   * append-log `ring`, this maintains the true SCREEN GRID (cursor moves
+   * resolved, no duplicated/glued frames), so `screen()` can be parsed reliably
+   * for structured menus (the AskUserQuestion question/options/checkboxes). The
+   * raw `ring`/`snapshot()` is kept for the existing substring-based detectors.
+   */
+  private vt: XtermTerminal;
+  private readonly cols: number;
+  private readonly rows: number;
   private readyPromise: Promise<void> | null = null;
   private disposed = false;
   private readonly log: Logger;
@@ -36,6 +50,9 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   constructor(opts: PtyClaudeSessionOptions) {
     this.opts = opts;
     this.log = opts.logger;
+    this.cols = opts.cols ?? 120;
+    this.rows = opts.rows ?? 40;
+    this.vt = new Terminal({ cols: this.cols, rows: this.rows, allowProposedApi: true });
 
     // Session id: adopt resume id or self-generate.
     this.sessionId = opts.resume ?? randomUUID();
@@ -163,6 +180,8 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       if (this.ring.length > RING_CAP) {
         this.ring = this.ring.slice(-RING_CAP);
       }
+      // Feed the same bytes to the headless screen emulator (best-effort).
+      try { this.vt.write(data); } catch { /* ignore parser hiccups */ }
     });
 
     this.term.onExit(({ exitCode, signal }) => {
@@ -308,6 +327,28 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
       .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '');
   }
 
+  /**
+   * Return the CURRENT terminal SCREEN as clean text rows (the visible
+   * viewport), reconstructed from the headless emulator. Cursor positioning is
+   * resolved into a proper grid, so menu structure — the AskUserQuestion
+   * question, numbered options, `[ ]` checkboxes, and tab bar — reads back
+   * exactly as displayed, with no append-log duplication or glued spacing.
+   * Trailing blank lines are trimmed.
+   */
+  screen(): string {
+    try {
+      const buf = this.vt.buffer.active;
+      const rows: string[] = [];
+      for (let y = buf.baseY; y < buf.baseY + this.rows; y++) {
+        const line = buf.getLine(y);
+        rows.push(line ? line.translateToString(true) : '');
+      }
+      return rows.join('\n').replace(/\s+$/, '');
+    } catch {
+      return '';
+    }
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     this.disposed = true;
@@ -318,6 +359,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     await sleep(300);
     this.term.kill();
     this.term = null;
+    try { this.vt.dispose(); } catch { /* ignore */ }
   }
 }
 
