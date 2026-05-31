@@ -10,10 +10,12 @@
  *     Pressing the DIGIT N immediately selects AND submits option N (no Enter).
  *     "Type something" (= options.length+1) opens a free-text box: press its
  *     digit, type the text, press Enter.
- *   - ExitPlanMode menu: `Would you like to proceed?` then dynamic options.
- *     Digit-submit works; the "clear context" / "manually approve" options must
- *     be AVOIDED, so we parse the rendered menu to find the digit of
- *     "Yes, and bypass permissions" (matches the SDK's bypassPermissions allow).
+ *   - ExitPlanMode menu: a numbered selection menu whose wording varies by
+ *     claude build (2.1.158 "Would you like to proceed? 1.Yes,bypass…" vs the
+ *     simpler "Exit plan mode? 1.Yes 2.No"). We detect it STRUCTURALLY (see
+ *     isExitPlanMenu / parseSelectionMenu) rather than by button text, and pick
+ *     the proceed digit by preferring "bypass permissions", avoiding the
+ *     "manually approve" / decline options (findBypassPermissionsDigit).
  */
 
 import type { Logger } from '../../../utils/logger.js';
@@ -123,32 +125,79 @@ async function approveExitPlanMode(session: PtyClaudeSession, logger: Logger): P
 }
 
 /**
- * Parse the ExitPlanMode menu and return the digit of the option that proceeds
- * WITHOUT clearing context or re-enabling permission prompts. Prefers an exact
- * "Yes, and bypass permissions"; falls back to the first "Yes," option that is
- * neither "clear context" nor "manually approve".
+ * Parse the on-screen numbered menu into `{ digit, label, pointer }` entries.
+ *
+ * claude renders a blocking selection menu as one option per line:
+ *   `❯ 1. Yes, and bypass permissions` / `  2. No` …
+ * The ANSI-stripped snapshot GLUES intra-line words (no spaces survive) but
+ * keeps newlines, so we match each line's squished form `N.<label>` where the
+ * label starts with a LETTER — that excludes version strings like "2.1.158".
+ * The `❯`/`>` pointer glyph survives the strip, so we record which option is
+ * the highlighted default. Last occurrence of each digit wins (most recent
+ * redraw, since the PTY ring accumulates re-renders).
+ */
+export interface MenuOption {
+  digit: string;
+  label: string;
+  pointer: boolean;
+}
+export function parseMenuOptions(tail: string): MenuOption[] {
+  const byDigit = new Map<string, { label: string; pointer: boolean }>();
+  for (const line of tail.split('\n')) {
+    const pointer = /[❯>›▸▶]/.test(line);
+    const sq = squish(line);
+    // Leading pointer/bullet glyphs may precede the digit; the label must begin
+    // with a letter so "2.1.158" / "10s" don't masquerade as options.
+    const m = /(?:^|[^0-9])(\d)\.([a-z].*)$/.exec(sq);
+    if (m) byDigit.set(m[1], { label: m[2], pointer });
+  }
+  return [...byDigit.entries()]
+    .sort((a, b) => Number(a[0]) - Number(b[0]))
+    .map(([digit, v]) => ({ digit, ...v }));
+}
+
+/**
+ * A plan-approval (or any blocking) selection menu, recognised STRUCTURALLY:
+ * at least two options whose digits are consecutive (1,2 or 2,3 …). This is
+ * wording-independent, so it survives claude rebrands of the button text.
+ * Returns the parsed options, or null if no menu structure is present.
+ */
+export function parseSelectionMenu(tail: string): MenuOption[] | null {
+  const opts = parseMenuOptions(tail);
+  if (opts.length < 2) return null;
+  const nums = opts.map((o) => Number(o.digit));
+  const consecutive = nums.some((n) => nums.includes(n + 1));
+  return consecutive ? opts : null;
+}
+
+/**
+ * Return the digit of the option that PROCEEDS without re-enabling per-edit
+ * permission prompts, across every observed menu shape:
+ *   - 2.1.158 "Would you like to proceed?": 1.Yes,bypass / 2.Yes,manual / 3.No,refine / 4.Tell Claude
+ *   - simpler "Exit plan mode?": 1.Yes / 2.No
+ *   - legacy: 1.Yes / 2.Yes,bypass / 3.No,keep planning
+ * Preference: an explicit "bypass permissions" option; else the affirmative
+ * "Yes" option that is not "manually approve"; else the highlighted default;
+ * else the first option. Returns null only when no numbered options exist.
  */
 export function findBypassPermissionsDigit(tail: string): string | null {
-  // Menu lines look like "2. Yes, and bypass permissions", one option per line.
-  // The ANSI strip glues intra-line words, so match against the squished line.
-  // Last occurrence of each digit wins (most recent redraw).
-  const byDigit = new Map<string, string>();
-  for (const line of tail.split('\n')) {
-    const sq = squish(line);
-    const m = /(\d)\.(yes.*)/.exec(sq); // only "Yes,..." options interest us
-    if (m) byDigit.set(m[1], m[2]);
+  const opts = parseMenuOptions(tail);
+  if (opts.length === 0) return null;
+  // 1) explicit "and bypass permissions" (and not a "clear context" variant).
+  for (const o of opts) {
+    if (o.label.includes('bypasspermissions') && !o.label.includes('clearcontext')) return o.digit;
   }
-  if (byDigit.size === 0) return null;
-  const entries = [...byDigit.entries()].sort((a, b) => Number(a[0]) - Number(b[0]));
-  // 1) "and bypass permissions" but NOT "clear context".
-  for (const [digit, text] of entries) {
-    if (text.includes('bypasspermissions') && !text.includes('clearcontext')) return digit;
+  // 2) first affirmative "Yes…" that isn't the manual-approve / clear-context one.
+  for (const o of opts) {
+    if (o.label.startsWith('yes') && !o.label.includes('manuallyapprove') && !o.label.includes('clearcontext')) {
+      return o.digit;
+    }
   }
-  // 2) any "Yes," that's not clear-context and not manual-approve.
-  for (const [digit, text] of entries) {
-    if (!text.includes('clearcontext') && !text.includes('manuallyapprove')) return digit;
-  }
-  return null;
+  // 3) the highlighted default, if it isn't an obvious decline.
+  const ptr = opts.find((o) => o.pointer);
+  if (ptr && !ptr.label.startsWith('no') && !ptr.label.startsWith('tell')) return ptr.digit;
+  // 4) last resort: the first option (the default affirmative in every menu seen).
+  return opts[0].digit;
 }
 
 // ── AskUserQuestion ──────────────────────────────────────────────────────────
@@ -334,30 +383,36 @@ function squish(s: string): string {
 /**
  * Detect the ExitPlanMode approval menu on a (raw) screen tail.
  *
- * The menu TITLE varies by claude version ("Ready to code?" in 2.1.x,
- * "Would you like to proceed?" earlier), so we key off the stable, plan-menu-
- * specific OPTION text "No, keep planning" combined with one of the "Yes"
- * proceed options. That pairing never appears in plan body text or other
- * permission menus, so it's a false-positive-safe signal. Exported + reused by
- * both the driver and the pty-query screen watcher so they agree on one signal.
+ * Two ground-truth menu shapes exist (both captured via node-pty):
+ *   A. claude 2.1.158 interactive / tool-call:
+ *      "…Would you like to proceed?  1.Yes,bypass  2.Yes,manual  3.No,refine…  4.Tell Claude"
+ *   B. simpler tool-call confirmation:
+ *      "Exit plan mode?  Claude wants to exit plan mode  1.Yes  2.No"
+ * Earlier guesses keyed off exact button wording ("No, keep planning",
+ * "bypass permissions") and broke whenever claude rebranded the buttons. So we
+ * detect STRUCTURALLY instead — a numbered selection menu (≥2 consecutive
+ * options) — and confirm it's the PLAN menu via a wording-free context signal:
+ * the on-screen `~/.claude/plans/<slug>.md` path claude always shows for a
+ * plan-approval menu, with the (still version-dependent, but only secondary)
+ * title phrases as a fallback for builds that omit the path. Exported + reused
+ * by both the driver and the pty-query screen watcher so they agree on one
+ * signal.
  */
 export function isExitPlanMenu(tail: string): boolean {
+  if (!parseSelectionMenu(tail)) return false; // no numbered menu on screen
+  // Primary signal: the plan file path claude renders on a plan-approval menu.
+  if (/\.claude\/plans\//.test(tail)) return true;
+  // Fallback: title phrasing (version-dependent, but we no longer rely on the
+  // exact OPTION wording — the menu structure above is the load-bearing check).
   const s = squish(tail);
-  // Title varies by version: claude 2.1.x renders "Ready to code? … Would you
-  // like to proceed?"; older builds just "Would you like to proceed?".
-  const hasTitle =
+  return (
     s.includes('wouldyouliketoproceed') ||
     s.includes('readytocode') ||
+    s.includes('exitplanmode') ||
+    s.includes('claudewantstoexitplanmode') ||
     s.includes("hereisclaude'splan") ||
-    s.includes('hereisclaudesplan');
-  // Pair with an approval OPTION so plan body text alone can't false-fire.
-  // Real 2.1.158 options: "Yes, and bypass permissions / Yes, manually approve
-  // edits / Tell Claude what to change". Older: "No, keep planning".
-  const hasOption =
-    s.includes('yes,andbypasspermissions') ||
-    s.includes('yes,auto-acceptedits') ||
-    s.includes('yes,manuallyapproveedits') ||
-    s.includes('tellclaudewhattochange') ||
-    s.includes('keepplanning');
-  return hasTitle && hasOption;
+    s.includes('hereisclaudesplan') ||
+    s.includes("claude'splan") ||
+    s.includes('keepplanning')
+  );
 }
