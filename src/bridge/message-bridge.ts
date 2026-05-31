@@ -45,6 +45,11 @@ export function resolvePersistentExecutorEnvDefault(envVal: string | undefined):
 }
 const MAX_QUEUE_SIZE = 5; // max queued messages per chat
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
+// If a turn produces NO stream output for this long, warn the user once (the
+// upstream API / TeamClaude proxy occasionally stalls a streaming response with
+// no error). We don't abort — a legit long turn can be silent — just surface a
+// "/stop and retry" hint so the chat doesn't look silently frozen for an hour.
+const STALL_WARN_MS = 90 * 1000;
 /**
  * Stage 3 — coalesce window for spontaneous Feishu cards. When teammates
  * (or /goal evaluators, or background tasks) emit messages while no user
@@ -2215,8 +2220,13 @@ export class MessageBridge {
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
-    // Idle detection: reset timer on every stream message
+    // Idle detection: reset timer on every stream message. Also arms a shorter
+    // stall-warning timer that notifies the user once (no abort) if the stream
+    // goes silent — catches upstream API / TeamClaude proxy stalls so the card
+    // doesn't spin silently until the 1h idle abort.
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
+    let stallTimerId: ReturnType<typeof setTimeout> | undefined;
+    let stalledNotified = false;
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
@@ -2225,6 +2235,19 @@ export class MessageBridge {
         executionHandle.finish();
         abortController.abort();
       }, IDLE_TIMEOUT_MS);
+      if (stallTimerId) clearTimeout(stallTimerId);
+      if (!stalledNotified) {
+        stallTimerId = setTimeout(() => {
+          stalledNotified = true;
+          this.logger.warn({ chatId, userId, ms: STALL_WARN_MS }, 'Task stalled — no stream output; notifying user');
+          void this.sender.sendTextNotice(
+            chatId,
+            '⚠️ 响应似乎卡住了',
+            `已 ${Math.round(STALL_WARN_MS / 1000)} 秒没有收到模型输出，可能是上游 API / TeamClaude 代理延迟或卡顿。\n请用 \`/stop\` 中止后重试。`,
+            'orange',
+          ).catch(() => { /* best-effort notice */ });
+        }, STALL_WARN_MS);
+      }
     };
     resetIdleTimer();
 
@@ -2572,6 +2595,7 @@ export class MessageBridge {
     } finally {
       clearTimeout(timeoutId);
       if (idleTimerId) clearTimeout(idleTimerId);
+      if (stallTimerId) clearTimeout(stallTimerId);
       if (runningTask.questionTimeoutId) {
         clearTimeout(runningTask.questionTimeoutId);
       }
