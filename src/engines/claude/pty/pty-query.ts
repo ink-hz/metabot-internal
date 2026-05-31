@@ -210,7 +210,11 @@ export const ptyQuery = (args: {
     });
     if (!sessionId) sessionId = session.sessionId;
 
-    scanner = createJsonlScanner({ jsonlPath: session.jsonlPath, logger });
+    scanner = createJsonlScanner({
+      jsonlPath: session.jsonlPath,
+      logger,
+      startAtEnd: Boolean(options.resume),
+    });
 
     // Stop-hook → synthesize a terminal `result` after a short drain delay.
     hookBridge.onTurnComplete(() => {

@@ -267,6 +267,12 @@ export type CreateJsonlScanner = (args: {
   logger: Logger;
   /** Poll interval ms (default ~120). */
   pollMs?: number;
+  /**
+   * Start tailing from the file's current EOF instead of replaying existing
+   * lines. Used for `claude --resume`: the old transcript is context, not new
+   * output for this bridge turn.
+   */
+  startAtEnd?: boolean;
 }) => JsonlScanner;
 
 // ── messageAdapter (W2) ──────────────────────────────────────────────────────

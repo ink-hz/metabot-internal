@@ -11,7 +11,6 @@
  */
 
 import { openSync, readSync, statSync, closeSync } from 'node:fs';
-import type { Logger } from '../../../utils/logger.js';
 import type { CreateJsonlScanner, JsonlScanner, RawJsonlRecord } from './contract.js';
 
 const DEFAULT_POLL_MS = 120;
@@ -20,6 +19,7 @@ export const createJsonlScanner: CreateJsonlScanner = ({
   jsonlPath,
   logger,
   pollMs = DEFAULT_POLL_MS,
+  startAtEnd = false,
 }) => {
   let stopped = false;
   let offset = 0;
@@ -52,6 +52,10 @@ export const createJsonlScanner: CreateJsonlScanner = ({
    */
   function readNewRecords(): RawJsonlRecord[] {
     const size = fileSize();
+    if (size < offset) {
+      offset = startAtEnd ? size : 0;
+      partialLine = '';
+    }
     if (size <= offset) return [];
 
     const bytesToRead = size - offset;
@@ -93,6 +97,11 @@ export const createJsonlScanner: CreateJsonlScanner = ({
     // Wait for the file to appear.
     while (!stopped && !fileExists()) {
       await sleep(pollMs);
+    }
+    if (stopped) return;
+    if (startAtEnd) {
+      offset = fileSize();
+      partialLine = '';
     }
 
     // Main poll loop.
