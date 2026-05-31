@@ -60,6 +60,14 @@ export async function driveInteractiveTool(args: {
   const { session, tool, response, logger } = args;
   try {
     if (tool.name === 'ExitPlanMode') {
+      if (response.kind === 'cancel') {
+        // User chose "Keep planning" (or timed out into it). Esc cancels the
+        // approval menu, leaving claude in plan mode awaiting the user's next
+        // message — the mirror of approveExitPlanMode's proceed path.
+        logger.info({ toolUseId: tool.toolUseId }, 'pty-driver: keeping plan mode (Esc)');
+        session.sendKeys('\x1b');
+        return;
+      }
       await approveExitPlanMode(session, logger);
       return;
     }
