@@ -46,6 +46,8 @@ function buildHandler() {
     () => {},        // stopTask
     () => 0,         // clearQueue — /help doesn't touch the queue
     async () => {},  // releaseExecutor
+    () => [],        // listSessions
+    async () => {},  // applyResume
   );
   return { handler, notices };
 }
@@ -75,7 +77,7 @@ describe('CommandHandler /help', () => {
     const { handler, notices } = buildHandler();
     await handler.handle(helpMessage());
     const body = notices[0].content;
-    for (const cmd of ['/reset', '/stop', '/status', '/model', '/memory', '/sync', '/help']) {
+    for (const cmd of ['/reset', '/stop', '/status', '/model', '/resume', '/memory', '/sync', '/help']) {
       expect(body, `help body missing ${cmd}`).toContain(cmd);
     }
   });

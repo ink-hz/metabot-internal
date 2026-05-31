@@ -15,6 +15,7 @@ import type {
   ApiContext,
 } from '../engines/index.js';
 import { createEngine, resolveEngineName, StreamProcessor, SessionManager } from '../engines/index.js';
+import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
@@ -338,6 +339,8 @@ export class MessageBridge {
       (chatId) => this.stopTask(chatId),
       (chatId) => this.clearChatQueue(chatId),
       (chatId, reason) => this.releaseChatExecutor(chatId, reason),
+      (chatId) => this.listSessionsForChat(chatId),
+      (chatId, sessionId) => this.applyResume(chatId, sessionId),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
@@ -822,6 +825,9 @@ export class MessageBridge {
     // pass straight through to the agent.
     if (parts.length !== 1) return false;
     const cmd = parts[0].toLowerCase();
+    // `/resume` builds its options dynamically from the on-disk sessions, so
+    // it can't live in the static SLASH_PICKERS table. Handle it first.
+    if (cmd === '/resume') return this.openResumePicker(msg);
     const spec = MessageBridge.SLASH_PICKERS[cmd];
     if (!spec) return false;
 
@@ -863,6 +869,102 @@ export class MessageBridge {
     return true;
   }
 
+  /** Human-relative "3m ago" / "2h ago" / "5d ago" for a past timestamp (ms). */
+  private formatRelativeTime(ms: number, now: number = Date.now()): string {
+    const diff = Math.max(0, now - ms);
+    const sec = Math.floor(diff / 1000);
+    if (sec < 60) return 'just now';
+    const min = Math.floor(sec / 60);
+    if (min < 60) return `${min}m ago`;
+    const hr = Math.floor(min / 60);
+    if (hr < 24) return `${hr}h ago`;
+    const day = Math.floor(hr / 24);
+    return `${day}d ago`;
+  }
+
+  /**
+   * Bare `/resume` → present the recent Claude sessions for this chat's
+   * working directory as a numbered picker card. On reply (see
+   * {@link tryHandleSlashPickerReply}) the chosen session is swapped in via
+   * {@link applyResume}. Returns true if consumed.
+   *
+   * Claude engine only — the session transcripts are claude-specific. On a
+   * kimi/codex chat we surface a notice instead of an (always-empty) picker.
+   */
+  private async openResumePicker(msg: IncomingMessage): Promise<boolean> {
+    const { chatId } = msg;
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    if (activeEngine !== 'claude') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ /resume is Claude-only',
+        `This chat is on the \`${activeEngine}\` engine. Session resume is only available for the Claude engine.`,
+        'blue',
+      );
+      return true;
+    }
+
+    const sessions = this.listSessionsForChat(chatId);
+    if (sessions.length === 0) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ No Previous Sessions',
+        'No earlier Claude sessions were found for this chat\'s working directory.',
+        'blue',
+      );
+      return true;
+    }
+
+    const options = sessions.map((s) => {
+      const rel = this.formatRelativeTime(s.lastActive);
+      const marker = s.isCurrent ? ' · current' : '';
+      return {
+        label: s.sessionId.slice(0, 8),
+        description: `${s.preview} · ${rel}${marker}`,
+      };
+    });
+
+    const pendingQuestion: PendingQuestion = {
+      toolUseId: 'slash-picker:/resume',
+      questions: [
+        { question: 'Pick a session to resume', header: 'Resume', options, multiSelect: false },
+      ],
+    };
+    const card: CardState = {
+      status: 'waiting_for_input',
+      userPrompt: '/resume',
+      responseText: '',
+      toolCalls: [],
+      pendingQuestion,
+    };
+
+    const send = this.sender.sendQuestionCard
+      ? this.sender.sendQuestionCard.bind(this.sender)
+      : this.sender.sendCard.bind(this.sender);
+    let cardMessageId: string | undefined;
+    try {
+      cardMessageId = await send(chatId, card);
+    } catch (err) {
+      this.logger.error({ err, chatId }, 'MessageBridge: failed to send /resume picker card');
+      return false;
+    }
+    if (!cardMessageId) {
+      this.logger.warn({ chatId }, 'MessageBridge: /resume picker card returned no messageId');
+      return false;
+    }
+
+    // Store FULL session ids (not the 8-char display labels) so the reply
+    // handler can swap the exact session in.
+    this.pendingSlashPickers.set(chatId, {
+      command: '/resume',
+      options: sessions.map((s) => s.sessionId),
+      cardMessageId,
+    });
+    this.logger.info({ chatId, count: sessions.length, cardMessageId }, 'MessageBridge: /resume picker card opened');
+    return true;
+  }
+
   /**
    * Treat the user's typed reply as a choice for a pending slash picker.
    * Maps a numbered reply (or an exact option name) to the option value, then
@@ -893,6 +995,21 @@ export class MessageBridge {
     }
 
     this.pendingSlashPickers.delete(chatId);
+
+    // `/resume` is not a passthrough command — instead of re-injecting it to
+    // the agent, swap the chat's session directly. `choice` here is the FULL
+    // sessionId (we stored full ids in `options`, displaying only prefixes).
+    if (pending.command === '/resume') {
+      await this.applyResume(chatId, choice);
+      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+        status: 'complete',
+        userPrompt: '/resume',
+        responseText: `✅ Resumed session \`${choice.slice(0, 8)}\`. Your next message continues that conversation.`,
+        toolCalls: [],
+      });
+      return true;
+    }
+
     const injected = `${pending.command} ${choice}`;
 
     // A client-side slash command (e.g. `/effort high`) changes a setting with
@@ -1255,6 +1372,39 @@ export class MessageBridge {
   async releaseChatExecutor(chatId: string, reason: string = 'reset'): Promise<void> {
     if (!this.persistentRegistry) return;
     await this.persistentRegistry.release(chatId, reason);
+  }
+
+  /**
+   * List the recent Claude sessions for a chat's working directory, newest
+   * first. Read-only — does not touch session state. Used by the `/resume`
+   * picker and the direct `/resume <id>` form.
+   */
+  listSessionsForChat(chatId: string): SessionSummary[] {
+    const session = this.sessionManager.getSession(chatId);
+    return listClaudeSessions({
+      workingDirectory: session.workingDirectory,
+      currentSessionId: session.sessionId,
+    });
+  }
+
+  /**
+   * Switch a chat into a previous Claude session. Single source of truth for
+   * the `/resume` swap (both the picker and the direct form route here):
+   *   1. point the chat's sessionId at the chosen transcript,
+   *   2. zero the cumulative usage counters (they belonged to the old session),
+   *   3. release the persistent executor so the next turn re-acquires with
+   *      `claude --resume <sessionId>` (see runOneTurn:1318).
+   * The actual `--resume` happens lazily on the user's next message.
+   */
+  async applyResume(chatId: string, sessionId: string): Promise<void> {
+    this.sessionManager.setSessionId(chatId, sessionId, 'claude');
+    this.sessionManager.resetUsage(chatId);
+    try {
+      await this.releaseChatExecutor(chatId, 'resume-command');
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'applyResume: failed to release persistent executor');
+    }
+    this.logger.info({ chatId, sessionId: sessionId.slice(0, 8) }, 'MessageBridge: resumed session');
   }
 
   /**
