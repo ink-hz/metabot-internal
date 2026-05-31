@@ -343,12 +343,21 @@ function squish(s: string): string {
  */
 export function isExitPlanMenu(tail: string): boolean {
   const s = squish(tail);
-  if (!s.includes('keepplanning')) return false;
-  return (
-    s.includes('auto-acceptedits') ||
-    s.includes('manuallyapproveedits') ||
-    s.includes('bypasspermissions') ||
+  // Title varies by version: claude 2.1.x renders "Ready to code? … Would you
+  // like to proceed?"; older builds just "Would you like to proceed?".
+  const hasTitle =
+    s.includes('wouldyouliketoproceed') ||
     s.includes('readytocode') ||
-    s.includes('wouldyouliketoproceed')
-  );
+    s.includes("hereisclaude'splan") ||
+    s.includes('hereisclaudesplan');
+  // Pair with an approval OPTION so plan body text alone can't false-fire.
+  // Real 2.1.158 options: "Yes, and bypass permissions / Yes, manually approve
+  // edits / Tell Claude what to change". Older: "No, keep planning".
+  const hasOption =
+    s.includes('yes,andbypasspermissions') ||
+    s.includes('yes,auto-acceptedits') ||
+    s.includes('yes,manuallyapproveedits') ||
+    s.includes('tellclaudewhattochange') ||
+    s.includes('keepplanning');
+  return hasTitle && hasOption;
 }

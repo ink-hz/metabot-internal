@@ -315,10 +315,12 @@ export class MessageBridge {
     cardMessageId: string;
   }>();
   /**
-   * ExitPlanMode tool_use ids whose plan body we've already shown as a "📋 Plan"
-   * card from the between-turn approval flow. Used to suppress the later
-   * drainSdkHandledTools → sendPlanContent for the same tool (the jsonl record
-   * flushes after the menu resolves), so the plan isn't shown twice.
+   * Chats whose ExitPlanMode plan body we've already shown as a "📋 Plan" card
+   * from the approval flow. Keyed by chatId (NOT tool_use id): the screen
+   * watcher surfaces the card with a synthesized id before the real
+   * ExitPlanMode jsonl record exists, so it can't match the real id the later
+   * drainSdkHandledTools → sendPlanContent sees. One ExitPlanMode is in flight
+   * per chat, so per-chat keying is unambiguous and suppresses the dup.
    */
   private exitPlanCardsShown = new Set<string>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
@@ -648,7 +650,7 @@ export class MessageBridge {
     // (no duplicate). This is the screen-triggered fast path — it fires the
     // moment the menu renders, not when the jsonl finally flushes.
     if (payload.planText && payload.planText.trim()) {
-      this.exitPlanCardsShown.add(payload.toolUseId);
+      this.exitPlanCardsShown.add(chatId);
       try {
         await this.sender.sendTextNotice(chatId, '📋 Plan', payload.planText, 'green');
       } catch (err) {
@@ -2344,7 +2346,7 @@ export class MessageBridge {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
             // Skip if the approval flow already showed this plan up-front.
-            if (this.exitPlanCardsShown.delete(tool.toolUseId)) {
+            if (this.exitPlanCardsShown.delete(chatId)) {
               this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
             } else {
               await this.sendPlanContent(chatId, processor, state);
@@ -2761,7 +2763,7 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode' && sendCards) {
-            if (this.exitPlanCardsShown.delete(tool.toolUseId)) {
+            if (this.exitPlanCardsShown.delete(chatId)) {
               this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
             } else {
               await this.sendPlanContent(chatId, processor, state);
