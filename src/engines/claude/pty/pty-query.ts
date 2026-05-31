@@ -27,6 +27,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { openSync, readSync, statSync, closeSync } from 'node:fs';
 import type { SDKMessage } from '../executor.js';
 import { AsyncQueue } from '../../../utils/async-queue.js';
 import type {
@@ -47,6 +48,73 @@ import { driveInteractiveTool } from './interactive-driver.js';
 const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** How often the ExitPlanMode screen watcher polls the snapshot. */
+const EXITPLAN_WATCH_POLL_MS = 250;
+/** Tail of the snapshot we scan for the approval prompt. */
+const EXITPLAN_SNAPSHOT_TAIL = 4000;
+/** Tail bytes of the jsonl we read to recover the latest ExitPlanMode tool_use. */
+const EXITPLAN_JSONL_TAIL = 1024 * 1024;
+
+/** Lowercase + strip whitespace (the TUI snapshot glues words together). */
+function squish(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, '');
+}
+
+/**
+ * Recover the most recent ExitPlanMode tool_use from a session jsonl by reading
+ * its tail and parsing every line — INCLUDING a trailing line with no newline.
+ *
+ * This is the crux of the "card only appears after /stop" fix: when `claude`
+ * calls ExitPlanMode it blocks on the approval menu before flushing the line's
+ * terminating newline, so the newline-only jsonl scanner can't see the record.
+ * Reading raw bytes lets us recover `{ toolUseId, plan }` while the menu is
+ * still on screen, so the bridge can surface the approval card immediately.
+ *
+ * Returns null if no ExitPlanMode tool_use is present in the tail.
+ * Exported for unit tests.
+ */
+export function readLatestExitPlan(
+  jsonlPath: string,
+  tailBytes: number = EXITPLAN_JSONL_TAIL,
+): { toolUseId: string; plan: string } | null {
+  let fd: number | undefined;
+  try {
+    const size = statSync(jsonlPath).size;
+    if (size <= 0) return null;
+    const start = Math.max(0, size - tailBytes);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    fd = openSync(jsonlPath, 'r');
+    readSync(fd, buf, 0, len, start);
+    const lines = buf.toString('utf8').split('\n');
+    // Walk from the end so we return the LATEST ExitPlanMode. The very first
+    // element may be a partial record (tail cut mid-line) — JSON.parse fails on
+    // it and we skip, which is correct.
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let rec: any;
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (rec?.type !== 'assistant') continue;
+      const content = rec.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (block?.type === 'tool_use' && block?.name === 'ExitPlanMode' && block?.id) {
+          const plan = typeof block.input?.plan === 'string' ? block.input.plan : '';
+          return { toolUseId: block.id, plan };
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
+  }
+}
 
 /**
  * Drain delay after a Stop-hook fires before synthesizing the `result`. The
@@ -161,6 +229,10 @@ export const ptyQuery = (args: {
     void runScanner();
     // Prompt loop: type each enqueued user message into the TUI.
     void runPromptLoop();
+    // Screen watcher: catch the ExitPlanMode approval menu the moment it
+    // renders (the jsonl record's newline isn't flushed until the menu
+    // resolves, so the scanner alone surfaces the card too late).
+    void runExitPlanWatcher();
   })();
 
   boot.catch((err) => {
@@ -238,6 +310,39 @@ export const ptyQuery = (args: {
       await driveInteractiveTool({ session, tool, response, logger });
     } catch (err) {
       logger.warn({ err, tool: tool.name }, 'ptyQuery: interactive tool handling failed');
+    }
+  }
+
+  /**
+   * Watch the PTY screen for the ExitPlanMode approval menu and surface the
+   * approval card the moment it renders — independent of the jsonl scanner,
+   * which can't see the ExitPlanMode tool_use until its line's trailing newline
+   * is flushed (only after the menu resolves; see {@link readLatestExitPlan}).
+   *
+   * `armed` gates one hand-off per menu appearance: it flips false once we've
+   * fired (or found the tool already handled by the scanner) and re-arms when
+   * the menu leaves the screen. While the menu is up but the jsonl record isn't
+   * readable yet, we simply retry on the next poll. The {@link handledInteractive}
+   * set dedups against the scanner path (same real toolUseId).
+   */
+  async function runExitPlanWatcher(): Promise<void> {
+    let armed = true;
+    while (!disposed) {
+      await sleep(EXITPLAN_WATCH_POLL_MS);
+      if (disposed) break;
+      if (!session || !options.onInteractiveTool) continue;
+      let tail: string;
+      try { tail = session.snapshot().slice(-EXITPLAN_SNAPSHOT_TAIL); } catch { continue; }
+      const menuVisible = squish(tail).includes('wouldyouliketoproceed');
+      if (!menuVisible) { armed = true; continue; }
+      if (!armed) continue;
+      const found = readLatestExitPlan(session.jsonlPath);
+      if (!found) continue; // line not flushed yet — retry next poll (armed stays true)
+      armed = false;
+      if (handledInteractive.has(found.toolUseId)) continue; // scanner already handled it
+      handledInteractive.add(found.toolUseId);
+      logger.info({ toolUseId: found.toolUseId }, 'ptyQuery: ExitPlanMode detected via screen — surfacing approval');
+      void handleInteractiveTool({ name: 'ExitPlanMode', toolUseId: found.toolUseId, input: { plan: found.plan } });
     }
   }
 

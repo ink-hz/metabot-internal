@@ -314,6 +314,13 @@ export class MessageBridge {
     options: string[];
     cardMessageId: string;
   }>();
+  /**
+   * ExitPlanMode tool_use ids whose plan body we've already shown as a "📋 Plan"
+   * card from the between-turn approval flow. Used to suppress the later
+   * drainSdkHandledTools → sendPlanContent for the same tool (the jsonl record
+   * flushes after the menu resolves), so the plan isn't shown twice.
+   */
+  private exitPlanCardsShown = new Set<string>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
 
@@ -607,6 +614,7 @@ export class MessageBridge {
     exec.on('between-turn-question', (payload: {
       toolUseId: string;
       questions: PendingQuestion['questions'];
+      planText?: string;
     }) => {
       void this.handleBetweenTurnQuestion(chatId, payload);
     });
@@ -627,11 +635,25 @@ export class MessageBridge {
    */
   private async handleBetweenTurnQuestion(
     chatId: string,
-    payload: { toolUseId: string; questions: PendingQuestion['questions'] },
+    payload: { toolUseId: string; questions: PendingQuestion['questions']; planText?: string },
   ): Promise<void> {
     if (!payload.questions || payload.questions.length === 0) {
       this.logger.warn({ chatId, toolUseId: payload.toolUseId }, 'between-turn question with no parsed questions; skipping card');
       return;
+    }
+
+    // ExitPlanMode carries the plan body. Show it as a green "📋 Plan" card
+    // BEFORE the approval question so the user can read what they're approving,
+    // and mark the tool id so the later jsonl-driven sendPlanContent is skipped
+    // (no duplicate). This is the screen-triggered fast path — it fires the
+    // moment the menu renders, not when the jsonl finally flushes.
+    if (payload.planText && payload.planText.trim()) {
+      this.exitPlanCardsShown.add(payload.toolUseId);
+      try {
+        await this.sender.sendTextNotice(chatId, '📋 Plan', payload.planText, 'green');
+      } catch (err) {
+        this.logger.warn({ err, chatId }, 'MessageBridge: failed to send plan card for between-turn ExitPlanMode');
+      }
     }
     const existing = this.pendingBetweenTurnQuestions.get(chatId);
     if (existing) {
@@ -2321,7 +2343,12 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
-            await this.sendPlanContent(chatId, processor, state);
+            // Skip if the approval flow already showed this plan up-front.
+            if (this.exitPlanCardsShown.delete(tool.toolUseId)) {
+              this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
+            } else {
+              await this.sendPlanContent(chatId, processor, state);
+            }
           }
         }
 
@@ -2734,7 +2761,11 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode' && sendCards) {
-            await this.sendPlanContent(chatId, processor, state);
+            if (this.exitPlanCardsShown.delete(tool.toolUseId)) {
+              this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
+            } else {
+              await this.sendPlanContent(chatId, processor, state);
+            }
           }
         }
 

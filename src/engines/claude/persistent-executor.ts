@@ -319,6 +319,14 @@ export function parseAskUserQuestionInput(input: unknown): Array<{
 export interface BetweenTurnQuestionEvent {
   toolUseId: string;
   questions: ReturnType<typeof parseAskUserQuestionInput>;
+  /** ExitPlanMode only: the plan markdown, shown as a card before the prompt. */
+  planText?: string;
+}
+
+/** Pull the plan markdown out of an ExitPlanMode tool input. */
+export function extractPlanText(input: unknown): string {
+  const plan = (input as { plan?: unknown } | undefined)?.plan;
+  return typeof plan === 'string' ? plan : '';
 }
 
 /**
@@ -955,8 +963,13 @@ export class PersistentClaudeExecutor extends EventEmitter {
         log.info({ toolUseId: id }, 'PersistentExecutor: PTY surfacing ExitPlanMode approval');
         // ExitPlanMode always fires mid-turn, but the in-turn stream path treats
         // it as an SDK-handled tool (not a question), so we always emit the
-        // between-turn card regardless of activeTurn.
-        this.emit('between-turn-question', { toolUseId: id, questions: PLAN_APPROVAL_QUESTION });
+        // between-turn card regardless of activeTurn. planText lets the bridge
+        // show the plan body up-front (the jsonl record flushes only later).
+        this.emit('between-turn-question', {
+          toolUseId: id,
+          questions: PLAN_APPROVAL_QUESTION,
+          planText: extractPlanText(tool.input),
+        });
         setTimeout(() => {
           if (this.pendingQuestionResolvers.delete(id)) {
             log.warn({ toolUseId: id }, 'PersistentExecutor: ExitPlanMode approval timed out (6 min) — proceeding');
