@@ -4,6 +4,7 @@ import type { IncomingMessage } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { resolveEngineName, SessionManager } from '../engines/index.js';
 import type { EngineName } from '../engines/index.js';
+import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
@@ -35,6 +36,17 @@ export class CommandHandler {
      * tied to the old session are torn down with the conversation.
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,
+    /**
+     * List the recent Claude sessions for this chat's working directory
+     * (newest first). Backs the direct `/resume <id>` form. Read-only.
+     */
+    private listSessions: (chatId: string) => SessionSummary[],
+    /**
+     * Swap the chat into a previous Claude session: re-point the sessionId,
+     * reset usage counters, release the persistent executor so the next turn
+     * resumes via `claude --resume`. Backs both `/resume` forms.
+     */
+    private applyResume: (chatId: string, sessionId: string) => Promise<void>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
@@ -62,6 +74,8 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/resume` - List & switch to a previous Claude session (Claude only)',
+          '`/resume <id>` - Resume a session directly by id prefix',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
@@ -159,6 +173,12 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(chatId, args);
+        return true;
+      }
+
+      case '/resume': {
+        const arg = text.slice('/resume'.length).trim();
+        await this.handleResumeCommand(msg, arg);
         return true;
       }
 
@@ -407,6 +427,93 @@ export class CommandHandler {
       chatId,
       '✅ Model Set',
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
+      'green',
+    );
+  }
+
+  /**
+   * `/resume <id-or-prefix>` — switch the chat directly into a previous Claude
+   * session by (a prefix of) its session id. Bare `/resume` is intercepted by
+   * the bridge picker before reaching here; we keep a usage notice as a
+   * defensive fallback.
+   *
+   * Gated to the Claude engine (transcripts are claude-specific) and refused
+   * while a turn is running (the swap would race the in-flight executor).
+   */
+  private async handleResumeCommand(msg: IncomingMessage, arg: string): Promise<void> {
+    const { chatId } = msg;
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    if (activeEngine !== 'claude') {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ /resume is Claude-only',
+        `This chat is on the \`${activeEngine}\` engine. Session resume is only available for the Claude engine.`,
+        'red',
+      );
+      return;
+    }
+
+    if (this.getRunningTask(chatId)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is running. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return;
+    }
+
+    if (!arg) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '📝 Resume',
+        'Usage: `/resume <session-id-prefix>`, or send a bare `/resume` to pick from a list.',
+        'blue',
+      );
+      return;
+    }
+
+    const sessions = this.listSessions(chatId);
+    if (sessions.length === 0) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ No Previous Sessions',
+        'No earlier Claude sessions were found for this chat\'s working directory.',
+        'blue',
+      );
+      return;
+    }
+
+    const exact = sessions.find((s) => s.sessionId === arg);
+    const matches = exact ? [exact] : sessions.filter((s) => s.sessionId.startsWith(arg));
+
+    if (matches.length === 0) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ No Match',
+        `No session id starts with \`${arg}\`. Send a bare \`/resume\` to see the list.`,
+        'red',
+      );
+      return;
+    }
+    if (matches.length > 1) {
+      const ids = matches.slice(0, 8).map((s) => `\`${s.sessionId.slice(0, 8)}\``).join(', ');
+      await this.sender.sendTextNotice(
+        chatId,
+        '⚠️ Ambiguous',
+        `\`${arg}\` matches ${matches.length} sessions: ${ids}. Add more characters.`,
+        'orange',
+      );
+      return;
+    }
+
+    const target = matches[0];
+    await this.applyResume(chatId, target.sessionId);
+    await this.sender.sendTextNotice(
+      chatId,
+      '✅ Session Resumed',
+      `Resumed \`${target.sessionId.slice(0, 8)}\`. Your next message continues that conversation.`,
       'green',
     );
   }

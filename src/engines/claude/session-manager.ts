@@ -176,6 +176,22 @@ export class SessionManager {
     this.saveToDisk();
   }
 
+  /**
+   * Zero the cumulative token/cost/duration counters without touching the
+   * session id, model, engine, or active goal. Called when switching into a
+   * resumed session (via `/resume`): the prior session's usage totals would
+   * otherwise carry over and mislead `/status`.
+   */
+  resetUsage(chatId: string): void {
+    const session = this.sessions.get(chatId);
+    if (session) {
+      session.cumulativeTokens = 0;
+      session.cumulativeCostUsd = 0;
+      session.cumulativeDurationMs = 0;
+      this.saveToDisk();
+    }
+  }
+
   resetSession(chatId: string): void {
     const session = this.sessions.get(chatId);
     if (session) {

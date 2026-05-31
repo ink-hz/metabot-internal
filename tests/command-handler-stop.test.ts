@@ -60,6 +60,8 @@ function buildHandler(opts: HandlerOpts = {}) {
       return cleared;
     },
     async () => {},
+    () => [],        // listSessions — not touched by /stop
+    async () => {},  // applyResume — not touched by /stop
   );
   return {
     handler,
