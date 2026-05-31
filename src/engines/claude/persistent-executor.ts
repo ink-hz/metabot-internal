@@ -321,6 +321,43 @@ export interface BetweenTurnQuestionEvent {
   questions: ReturnType<typeof parseAskUserQuestionInput>;
 }
 
+/**
+ * The question we surface when the agent calls ExitPlanMode under the PTY
+ * backend. Instead of silently auto-approving the plan, we render it as a
+ * normal approval card (reusing the AskUserQuestion machinery) so the user
+ * gets a real choice — Proceed, or keep refining the plan.
+ */
+export const PLAN_APPROVAL_QUESTION_TEXT = 'Proceed with this plan?';
+export const PLAN_APPROVAL_QUESTION: BetweenTurnQuestionEvent['questions'] = [
+  {
+    question: PLAN_APPROVAL_QUESTION_TEXT,
+    header: 'Plan',
+    options: [
+      { label: 'Proceed', description: 'Approve the plan and start implementing' },
+      { label: 'Keep planning', description: "Hold off — then send feedback to refine the plan" },
+    ],
+    multiSelect: false,
+  },
+];
+
+/**
+ * Interpret the user's answer to {@link PLAN_APPROVAL_QUESTION}.
+ *
+ * - empty (the 6-min resolver timeout fired) → proceed, preserving the old
+ *   auto-approve behaviour so an unattended plan never wedges the session.
+ * - an explicit proceed/yes/approve → proceed.
+ * - "Keep planning", "no", or ANY other free text → stay in plan mode (the
+ *   user can then send their feedback as the next message).
+ *
+ * Exported for unit tests.
+ */
+export function isKeepPlanning(choice: string): boolean {
+  const c = choice.trim().toLowerCase();
+  if (!c) return false;
+  if (/^(proceed|yes|y|approve|approved|go|ok|okay|sure|do it)$/.test(c)) return false;
+  return true;
+}
+
 export class PersistentClaudeExecutor extends EventEmitter {
   private state: ExecutorState = 'starting';
   private inputQueue: AsyncQueue<SDKUserMessage>;
@@ -905,7 +942,34 @@ export class PersistentClaudeExecutor extends EventEmitter {
   ): Promise<PtyInteractiveResponse> {
     const log = this.options.logger;
     if (tool.name === 'ExitPlanMode') {
-      log.info({ toolUseId: tool.toolUseId }, 'PersistentExecutor: PTY auto-approving ExitPlanMode');
+      // Surface the plan as an approval question instead of auto-proceeding.
+      // Reuses the SAME resolver path as AskUserQuestion: register a resolver
+      // keyed by the tool_use id, emit `between-turn-question` so the bridge
+      // mounts a question card, and await the user's choice. The bridge ships
+      // the plan body itself as a separate "📋 Plan" card (drainSdkHandledTools
+      // → sendPlanContent), so this card only carries the Proceed / Keep
+      // planning options.
+      const id = tool.toolUseId;
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        this.pendingQuestionResolvers.set(id, resolve);
+        log.info({ toolUseId: id }, 'PersistentExecutor: PTY surfacing ExitPlanMode approval');
+        // ExitPlanMode always fires mid-turn, but the in-turn stream path treats
+        // it as an SDK-handled tool (not a question), so we always emit the
+        // between-turn card regardless of activeTurn.
+        this.emit('between-turn-question', { toolUseId: id, questions: PLAN_APPROVAL_QUESTION });
+        setTimeout(() => {
+          if (this.pendingQuestionResolvers.delete(id)) {
+            log.warn({ toolUseId: id }, 'PersistentExecutor: ExitPlanMode approval timed out (6 min) — proceeding');
+            resolve({});
+          }
+        }, 6 * 60 * 1000);
+      });
+      const choice = answers[PLAN_APPROVAL_QUESTION_TEXT] ?? '';
+      if (isKeepPlanning(choice)) {
+        log.info({ toolUseId: id, choice }, 'PersistentExecutor: user chose to keep planning');
+        return { kind: 'cancel' };
+      }
+      log.info({ toolUseId: id, choice: choice || '(timeout/proceed)' }, 'PersistentExecutor: user approved plan');
       return { kind: 'approve' };
     }
     if (tool.name === 'AskUserQuestion') {

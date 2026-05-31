@@ -2984,18 +2984,24 @@ export class MessageBridge {
    * Read and send plan file content to the user when ExitPlanMode is triggered.
    */
   private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState): Promise<void> {
-    const planPath = processor.getPlanFilePath();
-    if (!planPath) return;
-
-    try {
-      const planContent = await fsPromises.readFile(planPath, 'utf-8');
-      if (!planContent.trim()) return;
-
-      this.logger.info({ chatId, planPath }, 'Sending plan content to user');
-      await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
-    } catch (err) {
-      this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
+    // Prefer the plan markdown captured straight from the ExitPlanMode tool
+    // input — it's always present, whereas the .claude/plans/*.md file only
+    // exists when the agent happened to Write one.
+    let planContent = processor.getPlanContent() || '';
+    if (!planContent.trim()) {
+      const planPath = processor.getPlanFilePath();
+      if (!planPath) return;
+      try {
+        planContent = await fsPromises.readFile(planPath, 'utf-8');
+      } catch (err) {
+        this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
+        return;
+      }
     }
+    if (!planContent.trim()) return;
+
+    this.logger.info({ chatId }, 'Sending plan content to user');
+    await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
   }
 
   /**

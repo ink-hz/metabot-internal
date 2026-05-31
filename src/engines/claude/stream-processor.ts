@@ -33,6 +33,8 @@ export class StreamProcessor {
   private _pendingQuestions: PendingQuestion[] = [];
   private _sdkHandledTools: DetectedTool[] = [];
   private _planFilePath: string | null = null;
+  /** Plan markdown captured directly from the ExitPlanMode tool_use input. */
+  private _planContent: string | null = null;
   private _model: string | undefined;
   private _totalTokens: number | undefined;
   private _contextWindow: number | undefined;
@@ -186,6 +188,12 @@ export class StreamProcessor {
             this.extractPendingQuestion(block.id, block.input);
           } else if (SDK_HANDLED_TOOLS.has(block.name) && block.id) {
             this._sdkHandledTools.push({ toolUseId: block.id, name: block.name });
+            // Capture the plan markdown straight from the tool input so the
+            // bridge can show it even when the agent didn't Write a plan file.
+            if (block.name === 'ExitPlanMode') {
+              const plan = (block.input as { plan?: unknown } | undefined)?.plan;
+              if (typeof plan === 'string' && plan.trim()) this._planContent = plan;
+            }
           }
         }
       } else if (block.type === 'tool_result') {
@@ -407,6 +415,11 @@ export class StreamProcessor {
 
   getPlanFilePath(): string | null {
     return this._planFilePath;
+  }
+
+  /** Plan markdown from the ExitPlanMode tool input, if present. */
+  getPlanContent(): string | null {
+    return this._planContent;
   }
 }
 
