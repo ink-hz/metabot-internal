@@ -203,7 +203,16 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   }
 
   async typePrompt(text: string): Promise<void> {
-    await this.ready();
+    await this.ready(); // boot: wait for the TUI to first come up
+    // Per-call readiness: ready() is memoized after boot, so on its own it would
+    // let us type the INSTANT a turn is requested — even while claude is still
+    // mid-interrupt. That's the "no response" bug: after a keep-planning Esc
+    // (ExitPlanMode cancel) claude is briefly settling the interrupt and is NOT
+    // at a clean input box; keystrokes typed then are dropped and the prompt is
+    // never submitted. Wait for the TUI to actually return to an idle input box
+    // before typing (best-effort: proceeds after a timeout so a session never
+    // wedges on a missed heuristic).
+    await this.waitForIdleInput();
     if (!this.term || this.disposed) {
       throw new Error('pty-session: cannot type — session disposed');
     }
@@ -220,6 +229,48 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     await sleep(1500);
     // Double-Enter safeguard: the TUI sometimes needs a second Enter to submit.
     this.term.write('\r');
+  }
+
+  /**
+   * Wait until the TUI is at an IDLE input box, ready to accept a new prompt.
+   *
+   * The snapshot is an append-log of PTY output (not a screen buffer), so we
+   * read only the most-recent slice — the latest redraw — and key off what
+   * claude actively rewrites there:
+   *   - "esc to interrupt" in the live footer ⟶ the model is generating.
+   *   - a menu footer ("enter to select", "ctrl-g to edit", "shift+tab to
+   *     approve") or a `❯` pointing at a numbered option ⟶ a blocking menu is up
+   *     (driven separately; never type a prompt into it).
+   *   - otherwise, with the `❯` input box present ⟶ idle and ready.
+   * We require the idle state to hold across a couple polls so a single
+   * mid-redraw frame doesn't trip us, and cap the wait so a missed heuristic
+   * degrades to today's behaviour (type anyway) rather than wedging the turn.
+   */
+  private async waitForIdleInput(): Promise<void> {
+    const TIMEOUT = 15_000;
+    const POLL = 200;
+    const STABLE_MS = 700;
+    const start = Date.now();
+    let idleSince = 0;
+    while (Date.now() - start < TIMEOUT) {
+      const tail = this.snapshot().slice(-700);
+      const sq = tail.toLowerCase().replace(/\s+/g, '');
+      const running = sq.includes('esctointerrupt');
+      const menuUp =
+        sq.includes('entertoselect') ||
+        sq.includes('ctrl-gtoedit') ||
+        sq.includes('shift+tabtoapprove') ||
+        /❯\d\./.test(sq); // pointer on a numbered menu option
+      const hasInputBox = tail.includes('❯');
+      if (hasInputBox && !running && !menuUp) {
+        if (!idleSince) idleSince = Date.now();
+        if (Date.now() - idleSince >= STABLE_MS) return;
+      } else {
+        idleSince = 0;
+      }
+      await sleep(POLL);
+    }
+    this.log.warn('pty-session: idle-input wait timed out — typing anyway');
   }
 
   async interrupt(): Promise<void> {

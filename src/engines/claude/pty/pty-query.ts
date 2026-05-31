@@ -44,10 +44,7 @@ import { createPtyClaudeSession } from './pty-session.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
-import { driveInteractiveTool, isExitPlanMenu } from './interactive-driver.js';
-
-/** Tool names the TUI renders as a blocking menu we must drive via keystrokes. */
-const INTERACTIVE_TOOLS = new Set(['AskUserQuestion', 'ExitPlanMode']);
+import { driveInteractiveTool, isExitPlanMenu, isAskMenu } from './interactive-driver.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -86,6 +83,56 @@ export function readPlanFromScreen(tail: string, homeDir: string = os.homedir())
     return readFileSync(path.join(homeDir, '.claude', 'plans', m[1]), 'utf8');
   } catch {
     return '';
+  }
+}
+
+/**
+ * Recover the most recent interactive tool_use (ExitPlanMode OR AskUserQuestion)
+ * from a session jsonl tail, parsing every line INCLUDING a trailing line with
+ * no newline (the blocking tool's record may not be newline-flushed while its
+ * menu is up). Returns `{ name, toolUseId, input }` or null. The screen watcher
+ * uses this to get the AskUserQuestion structure (questions/options/multiSelect)
+ * once the menu is detected on screen. Exported for unit tests.
+ */
+export function readLatestInteractive(
+  jsonlPath: string,
+  tailBytes: number = EXITPLAN_JSONL_TAIL,
+): { name: string; toolUseId: string; input: unknown } | null {
+  let fd: number | undefined;
+  try {
+    const size = statSync(jsonlPath).size;
+    if (size <= 0) return null;
+    const start = Math.max(0, size - tailBytes);
+    const len = size - start;
+    const buf = Buffer.alloc(len);
+    fd = openSync(jsonlPath, 'r');
+    readSync(fd, buf, 0, len, start);
+    const lines = buf.toString('utf8').split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let rec: any;
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (rec?.type !== 'assistant') continue;
+      const content = rec.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const block of content) {
+        if (
+          block?.type === 'tool_use' &&
+          (block?.name === 'ExitPlanMode' || block?.name === 'AskUserQuestion') &&
+          block?.id
+        ) {
+          return { name: block.name, toolUseId: block.id, input: block.input };
+        }
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* ignore */ }
+    }
   }
 }
 
@@ -244,10 +291,11 @@ export const ptyQuery = (args: {
     void runScanner();
     // Prompt loop: type each enqueued user message into the TUI.
     void runPromptLoop();
-    // Screen watcher: catch the ExitPlanMode approval menu the moment it
-    // renders (the jsonl record's newline isn't flushed until the menu
-    // resolves, so the scanner alone surfaces the card too late).
-    void runExitPlanWatcher();
+    // Screen watcher: the SINGLE detector for both interactive menus
+    // (AskUserQuestion + ExitPlanMode). The jsonl record's newline isn't
+    // flushed until the menu resolves, so a scanner alone surfaces the card too
+    // late (only after /stop).
+    void runInteractiveMenuWatcher();
   })();
 
   boot.catch((err) => {
@@ -266,7 +314,11 @@ export const ptyQuery = (args: {
           const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
           if (sid) sessionId = sid;
         }
-        detectInteractiveTools(rec);
+        // Interactive tools (AskUserQuestion / ExitPlanMode) are detected
+        // exclusively by the screen watcher (runInteractiveMenuWatcher) — the
+        // blocking tool's jsonl line isn't newline-flushed while its menu is up,
+        // so a scanner-based detector would only ever fire AFTER the user gives
+        // up (/stop). The watcher catches the menu the instant it renders.
         const adapted = adaptJsonlRecord(rec);
         if (!adapted) continue;
         if (Array.isArray(adapted)) {
@@ -277,34 +329,6 @@ export const ptyQuery = (args: {
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: scanner loop ended with error');
-    }
-  }
-
-  /**
-   * Inspect an assistant record for AskUserQuestion / ExitPlanMode tool_use
-   * blocks. The interactive `claude` renders these as a blocking TUI menu; we
-   * ask the executor how to respond, then drive the menu via keystrokes. Fired
-   * as a detached task so a long-blocking AskUserQuestion (awaiting the user's
-   * Feishu reply) never stalls the scanner loop.
-   */
-  function detectInteractiveTools(rec: RawJsonlRecord): void {
-    if (rec.type !== 'assistant') return;
-    if (!options.onInteractiveTool) return; // SDK-parity callback not wired
-    const msg = rec.message as { content?: unknown } | undefined;
-    const content = msg?.content;
-    if (!Array.isArray(content)) return;
-    for (const block of content) {
-      const b = block as { type?: string; name?: string; id?: string; input?: unknown };
-      if (b.type !== 'tool_use' || !b.name || !INTERACTIVE_TOOLS.has(b.name)) continue;
-      // ExitPlanMode is driven exclusively by the screen watcher: its tool_use
-      // line isn't newline-flushed to the jsonl until the approval menu
-      // resolves, so detecting it here only ever fires AFTER the user gives up
-      // (/stop). The watcher catches the menu the instant it renders.
-      if (b.name === 'ExitPlanMode') continue;
-      const toolUseId = b.id ?? '';
-      if (!toolUseId || handledInteractive.has(toolUseId)) continue;
-      handledInteractive.add(toolUseId);
-      void handleInteractiveTool({ name: b.name, toolUseId, input: b.input });
     }
   }
 
@@ -359,18 +383,25 @@ export const ptyQuery = (args: {
   }
 
   /**
-   * Watch the PTY screen for the ExitPlanMode approval menu and surface the
-   * approval card the moment it renders — independent of the jsonl scanner,
-   * which can't see the ExitPlanMode tool_use until its line's trailing newline
-   * is flushed (only after the menu resolves; see {@link readLatestExitPlan}).
+   * Watch the PTY screen for ANY blocking interactive menu — the ExitPlanMode
+   * approval menu OR the AskUserQuestion menu — and surface its Feishu card the
+   * moment it renders. This is the SINGLE detection path for both tools
+   * (the jsonl scanner no longer detects them): a blocking tool's jsonl line
+   * isn't newline-flushed while its menu is up, so a scanner-based detector
+   * would only ever fire AFTER the user gives up (/stop).
    *
    * `armed` gates one hand-off per menu appearance: it flips false once we've
-   * fired (or found the tool already handled by the scanner) and re-arms when
-   * the menu leaves the screen. While the menu is up but the jsonl record isn't
-   * readable yet, we simply retry on the next poll. The {@link handledInteractive}
-   * set dedups against the scanner path (same real toolUseId).
+   * fired and re-arms when the menu leaves the screen for 2 consecutive polls
+   * (so a single mid-redraw frame doesn't re-fire). The {@link handledInteractive}
+   * set dedups by the real toolUseId.
+   *
+   * ExitPlanMode: the plan body is read from the on-screen plan file (written
+   * before the menu), so we never wait on the unflushed tool_use line.
+   * AskUserQuestion: the full question structure is read from the jsonl tool_use
+   * record (recoverable from the tail even unterminated); if it isn't readable
+   * yet we retry on the next poll rather than firing with no structure.
    */
-  async function runExitPlanWatcher(): Promise<void> {
+  async function runInteractiveMenuWatcher(): Promise<void> {
     let armed = true;
     let absent = 0;
     while (!disposed) {
@@ -380,27 +411,41 @@ export const ptyQuery = (args: {
       let tail: string;
       try { tail = session.snapshot().slice(-EXITPLAN_SNAPSHOT_TAIL); } catch { continue; }
 
-      if (!isExitPlanMenu(tail)) {
-        // Re-arm only after the menu has been gone for 2 consecutive polls, so a
-        // single mid-redraw frame doesn't re-arm and double-fire the same menu.
+      const planMenu = isExitPlanMenu(tail);
+      const askMenu = !planMenu && isAskMenu(tail);
+      if (!planMenu && !askMenu) {
+        // Re-arm only after the menu has been gone for 2 consecutive polls.
         if (++absent >= 2) armed = true;
         continue;
       }
       absent = 0;
       if (!armed) continue;
-      armed = false;
 
-      // The ExitPlanMode tool_use line isn't flushed to the jsonl while the menu
-      // blocks, so do NOT gate on it. Read the plan body from the on-screen plan
-      // file (written before the menu); fall back to the jsonl record if present.
-      const fromFile = readPlanFromScreen(tail);
-      const fromJsonl = fromFile ? null : readLatestExitPlan(session.jsonlPath);
-      const plan = fromFile || fromJsonl?.plan || '';
-      // The real tool_use id isn't available yet → synthesize a correlation id.
-      // detectInteractiveTools skips ExitPlanMode, so there's no scanner race.
-      const toolUseId = fromJsonl?.toolUseId || `exitplan-screen-${randomUUID()}`;
-      logger.info({ toolUseId, planChars: plan.length }, 'ptyQuery: ExitPlanMode menu detected on screen — surfacing approval');
-      void handleInteractiveTool({ name: 'ExitPlanMode', toolUseId, input: { plan } });
+      if (planMenu) {
+        armed = false;
+        // The ExitPlanMode tool_use line isn't flushed to the jsonl while the
+        // menu blocks, so do NOT gate on it. Read the plan body from the on-
+        // screen plan file (written before the menu); fall back to the jsonl.
+        const fromFile = readPlanFromScreen(tail);
+        const fromJsonl = fromFile ? null : readLatestExitPlan(session.jsonlPath);
+        const plan = fromFile || fromJsonl?.plan || '';
+        const toolUseId = fromJsonl?.toolUseId || `exitplan-screen-${randomUUID()}`;
+        logger.info({ toolUseId, planChars: plan.length }, 'ptyQuery: ExitPlanMode menu detected on screen — surfacing approval');
+        void handleInteractiveTool({ name: 'ExitPlanMode', toolUseId, input: { plan } });
+        continue;
+      }
+
+      // AskUserQuestion: we need the structured question record. Its tool_use
+      // line DOES eventually flush (the turn continues awaiting the answer), and
+      // readLatestInteractive recovers it even unterminated — but if it isn't
+      // there yet, leave `armed` set and retry on the next poll.
+      const rec = readLatestInteractive(session.jsonlPath);
+      if (!rec || rec.name !== 'AskUserQuestion') continue;
+      if (handledInteractive.has(rec.toolUseId)) { armed = false; continue; }
+      armed = false;
+      handledInteractive.add(rec.toolUseId);
+      logger.info({ toolUseId: rec.toolUseId }, 'ptyQuery: AskUserQuestion menu detected on screen — surfacing question');
+      void handleInteractiveTool({ name: rec.name, toolUseId: rec.toolUseId, input: rec.input });
     }
   }
 
