@@ -27,7 +27,9 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { openSync, readSync, statSync, closeSync } from 'node:fs';
+import { openSync, readSync, statSync, closeSync, readFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { SDKMessage } from '../executor.js';
 import { AsyncQueue } from '../../../utils/async-queue.js';
 import type {
@@ -69,6 +71,24 @@ const EXITPLAN_JSONL_TAIL = 1024 * 1024;
  * Returns null if no ExitPlanMode tool_use is present in the tail.
  * Exported for unit tests.
  */
+/**
+ * The ExitPlanMode menu screen shows the plan file path
+ * (`~/.claude/plans/<slug>.md`). claude writes that file BEFORE blocking on the
+ * menu, so — unlike the ExitPlanMode tool_use record, whose newline isn't
+ * flushed while the menu blocks — the plan body IS readable from disk. Parse the
+ * path off the screen tail and read it. Returns '' if not found/readable.
+ * Exported for unit tests.
+ */
+export function readPlanFromScreen(tail: string, homeDir: string = os.homedir()): string {
+  const m = /\.claude\/plans\/([A-Za-z0-9._-]+\.md)/.exec(tail);
+  if (!m) return '';
+  try {
+    return readFileSync(path.join(homeDir, '.claude', 'plans', m[1]), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
 export function readLatestExitPlan(
   jsonlPath: string,
   tailBytes: number = EXITPLAN_JSONL_TAIL,
@@ -276,6 +296,11 @@ export const ptyQuery = (args: {
     for (const block of content) {
       const b = block as { type?: string; name?: string; id?: string; input?: unknown };
       if (b.type !== 'tool_use' || !b.name || !INTERACTIVE_TOOLS.has(b.name)) continue;
+      // ExitPlanMode is driven exclusively by the screen watcher: its tool_use
+      // line isn't newline-flushed to the jsonl until the approval menu
+      // resolves, so detecting it here only ever fires AFTER the user gives up
+      // (/stop). The watcher catches the menu the instant it renders.
+      if (b.name === 'ExitPlanMode') continue;
       const toolUseId = b.id ?? '';
       if (!toolUseId || handledInteractive.has(toolUseId)) continue;
       handledInteractive.add(toolUseId);
@@ -322,30 +347,35 @@ export const ptyQuery = (args: {
    */
   async function runExitPlanWatcher(): Promise<void> {
     let armed = true;
-    let loggedMissing = false;
+    let absent = 0;
     while (!disposed) {
       await sleep(EXITPLAN_WATCH_POLL_MS);
       if (disposed) break;
       if (!session || !options.onInteractiveTool) continue;
       let tail: string;
       try { tail = session.snapshot().slice(-EXITPLAN_SNAPSHOT_TAIL); } catch { continue; }
-      if (!isExitPlanMenu(tail)) { armed = true; loggedMissing = false; continue; }
-      if (!armed) continue;
-      const found = readLatestExitPlan(session.jsonlPath);
-      if (!found) {
-        // Menu is on screen but the tool_use line isn't readable from the jsonl
-        // yet (newline not flushed). Retry next poll; armed stays true.
-        if (!loggedMissing) {
-          logger.info('ptyQuery: ExitPlanMode menu visible but tool_use not yet in jsonl — retrying');
-          loggedMissing = true;
-        }
+
+      if (!isExitPlanMenu(tail)) {
+        // Re-arm only after the menu has been gone for 2 consecutive polls, so a
+        // single mid-redraw frame doesn't re-arm and double-fire the same menu.
+        if (++absent >= 2) armed = true;
         continue;
       }
+      absent = 0;
+      if (!armed) continue;
       armed = false;
-      if (handledInteractive.has(found.toolUseId)) continue; // scanner already handled it
-      handledInteractive.add(found.toolUseId);
-      logger.info({ toolUseId: found.toolUseId }, 'ptyQuery: ExitPlanMode detected via screen — surfacing approval');
-      void handleInteractiveTool({ name: 'ExitPlanMode', toolUseId: found.toolUseId, input: { plan: found.plan } });
+
+      // The ExitPlanMode tool_use line isn't flushed to the jsonl while the menu
+      // blocks, so do NOT gate on it. Read the plan body from the on-screen plan
+      // file (written before the menu); fall back to the jsonl record if present.
+      const fromFile = readPlanFromScreen(tail);
+      const fromJsonl = fromFile ? null : readLatestExitPlan(session.jsonlPath);
+      const plan = fromFile || fromJsonl?.plan || '';
+      // The real tool_use id isn't available yet → synthesize a correlation id.
+      // detectInteractiveTools skips ExitPlanMode, so there's no scanner race.
+      const toolUseId = fromJsonl?.toolUseId || `exitplan-screen-${randomUUID()}`;
+      logger.info({ toolUseId, planChars: plan.length }, 'ptyQuery: ExitPlanMode menu detected on screen — surfacing approval');
+      void handleInteractiveTool({ name: 'ExitPlanMode', toolUseId, input: { plan } });
     }
   }
 

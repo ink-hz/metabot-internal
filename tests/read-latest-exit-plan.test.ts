@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { readLatestExitPlan } from '../src/engines/claude/pty/pty-query.js';
+import { readLatestExitPlan, readPlanFromScreen } from '../src/engines/claude/pty/pty-query.js';
 
 /**
  * readLatestExitPlan is the crux of the "ExitPlanMode card appears only after
@@ -69,5 +69,21 @@ describe('readLatestExitPlan', () => {
     const partial = '","name":"X"}]}}'; // junk fragment, no leading {
     fs.writeFileSync(file, partial + '\n' + exitPlan('toolu_3', 'recovered'));
     expect(readLatestExitPlan(file)?.toolUseId).toBe('toolu_3');
+  });
+});
+
+describe('readPlanFromScreen', () => {
+  it('reads the plan file referenced on the ExitPlanMode screen', () => {
+    // Lay out a fake ~/.claude/plans under a temp HOME.
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-home-'));
+    fs.mkdirSync(path.join(home, '.claude', 'plans'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'plans', 'goofy-percolating-dahl.md'), '# Real Plan\n- do the thing');
+    // Squished/wrapped screen tail as the TUI renders it.
+    const screen = 'ctrl-g to edit in Vim · ~/.claude/plans/goofy-percolating-dahl.md';
+    expect(readPlanFromScreen(screen, home)).toBe('# Real Plan\n- do the thing');
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  it('returns empty string when no plan path is on screen', () => {
+    expect(readPlanFromScreen('Would you like to proceed? 1. Yes')).toBe('');
   });
 });
