@@ -380,6 +380,115 @@ function squish(s: string): string {
   return s.toLowerCase().replace(/\s+/g, '');
 }
 
+// ── AskUserQuestion screen parsing ───────────────────────────────────────────
+
+/** One parsed AskUserQuestion question, in the AskUserQuestion tool_input shape. */
+export interface ParsedAskQuestion {
+  question: string;
+  header: string;
+  options: Array<{ label: string; description: string }>;
+  multiSelect: boolean;
+}
+
+/** Options the TUI always appends that are NOT real answers — excluded. */
+function isMetaOption(label: string): boolean {
+  const s = squish(label);
+  return s.startsWith('typesomething') || s.startsWith('chataboutthis') || s === 'submit';
+}
+
+/** A screen line that is a numbered menu option → `{ digit, rest, pointer }`. */
+function matchOptionLine(line: string): { digit: number; rest: string; pointer: boolean } | null {
+  const m = /^\s*([❯>›▸▶])?\s*(\d+)\.\s+(\S.*)$/.exec(line);
+  if (!m) return null;
+  return { digit: Number(m[2]), rest: m[3].trim(), pointer: Boolean(m[1]) };
+}
+
+/**
+ * Parse the AskUserQuestion menu from a CLEAN terminal screen (PtyClaudeSession
+ * `screen()`, NOT the append-log snapshot) into the AskUserQuestion tool_input
+ * shape `{ questions: [ParsedAskQuestion] }`, or null if the screen isn't an
+ * AskUserQuestion menu.
+ *
+ * Why screen, not jsonl: ground-truth capture shows claude does NOT write the
+ * AskUserQuestion tool_use to the session jsonl until the menu RESOLVES — so the
+ * scanner can't see it in time (the card would only appear after /stop). The
+ * full menu, however, is on screen the instant it blocks. The clean grid
+ * (@xterm/headless) renders it as tidy rows (captured from claude 2.1.158):
+ *
+ *      ☐ Color                          ←  ☐ Fruit  ☐ Toppings  ✔ Submit  →
+ *     What is your favorite color?      What is your favorite fruit?
+ *     ❯ 1. Red                          ❯ 1. [ ] Cheese      ← `[ ]` ⟹ multiSelect
+ *          The color red.                    Add cheese.
+ *       2. Green                          2. [ ] Onion
+ *       4. Type something.   ← meta        5. [ ] Type something  ← meta
+ *       5. Chat about this   ← meta        6. Chat about this     ← meta
+ *     Enter to select · ↑/↓ to navigate · Esc to cancel
+ *
+ * Multi-QUESTION menus render a tab bar and show only the focused question's
+ * body, so we surface just that first question (matches the bridge's existing
+ * single-sub-question limitation) — but immediately, not after /stop.
+ */
+export function parseAskMenuFromScreen(screen: string): { questions: ParsedAskQuestion[] } | null {
+  const sq = squish(screen);
+  // Footer is the reliable, wording-stable AskUserQuestion signal.
+  if (!(sq.includes('entertoselect') && sq.includes('esctocancel'))) return null;
+  const lines = screen.split('\n');
+
+  // Header: the focused tab/question label. Single-question shows "☐ Color";
+  // multi-question shows a tab bar "←  ☐ Fruit  ☐ Toppings  ✔ Submit  →" — take
+  // the first non-"Submit" tab label either way.
+  let header = '';
+  for (const line of lines) {
+    if (!/[☐✔☑▢◻]/.test(line)) continue;
+    for (const m of line.matchAll(/[☐✔☑▢◻]\s*([^☐✔☑▢◻→←]+)/g)) {
+      const lbl = m[1].trim();
+      if (lbl && !/^submit\b/i.test(lbl)) { header = lbl; break; }
+    }
+    if (header) break;
+  }
+
+  // Options: numbered lines, in order. Strip a `[ ]`/`[x]` checkbox (⟹ multi-
+  // select). Stop at the meta options ("Type something" / "Chat about this").
+  const options: Array<{ label: string; description: string }> = [];
+  let multiSelect = false;
+  let firstOptionIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const opt = matchOptionLine(lines[i]);
+    if (!opt) continue;
+    if (firstOptionIdx < 0) firstOptionIdx = i;
+    let label = opt.rest;
+    const cb = /^\[([ xX])\]\s*(.*)$/.exec(label);
+    if (cb) { multiSelect = true; label = cb[2].trim(); }
+    if (isMetaOption(label)) continue; // skip meta — the card re-adds free-text
+    // Description: the next non-blank line that isn't another option/separator.
+    let description = '';
+    for (let j = i + 1; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (!t) continue;
+      if (matchOptionLine(lines[j])) break;
+      if (/^[─—-]{3,}/.test(t) || squish(t).includes('entertoselect')) break;
+      description = t; break;
+    }
+    options.push({ label, description });
+  }
+  if (options.length === 0) return null;
+
+  // Question text: nearest non-blank line above the first option that isn't the
+  // tab bar or a separator.
+  let question = '';
+  for (let i = firstOptionIdx - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (!t) continue;
+    if (/[☐✔☑▢◻]/.test(t)) break; // reached the tab bar
+    if (/^[─—-]{3,}/.test(t)) continue;
+    question = t; break;
+  }
+
+  return {
+    questions: [{ question, header: header || question.slice(0, 40), options, multiSelect }],
+  };
+}
+
 /**
  * Detect the ExitPlanMode approval menu on a (raw) screen tail.
  *

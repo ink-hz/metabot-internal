@@ -1299,7 +1299,13 @@ export class MessageBridge {
         // which unblocks the hook and the continuation stream continues.
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
           const q = state.pendingQuestion;
-          if (!surfacedQuestionIds.has(q.toolUseId)) {
+          // PTY backend: AskUserQuestion blocks before flushing its jsonl
+          // record, so it's surfaced from the SCREEN by the executor's
+          // interactive-tool watcher the moment the menu renders. The record
+          // only reaches THIS stream AFTER the user already answered (the
+          // flush), so surfacing here would be a post-answer duplicate card.
+          // Skip it (the synthetic-id watcher path owns AUQ on PTY).
+          if (this.config.claude.backend !== 'pty' && !surfacedQuestionIds.has(q.toolUseId)) {
             surfacedQuestionIds.add(q.toolUseId);
             await rateLimiter.flush();
             // Main card pointer note, mirroring runOneTurn's runtime hint.

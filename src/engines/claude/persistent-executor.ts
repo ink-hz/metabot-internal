@@ -990,10 +990,14 @@ export class PersistentClaudeExecutor extends EventEmitter {
       const id = tool.toolUseId;
       const answers = await new Promise<Record<string, string>>((resolve) => {
         this.pendingQuestionResolvers.set(id, resolve);
-        if (!this.activeTurn) {
-          log.info({ toolUseId: id, questionCount: questions.length }, 'PersistentExecutor: PTY between-turn AskUserQuestion');
-          this.emit('between-turn-question', { toolUseId: id, questions });
-        }
+        // Emit UNCONDITIONALLY (like ExitPlanMode). On the PTY backend this is
+        // driven by the screen watcher the moment the AskUserQuestion menu
+        // renders — always mid-turn (activeTurn set) — and the in-stream
+        // surfacing is suppressed for PTY, so this is the ONLY card. The old
+        // `!activeTurn` gate meant the card never appeared mid-turn (it only
+        // showed after /stop cleared the turn).
+        log.info({ toolUseId: id, questionCount: questions.length }, 'PersistentExecutor: PTY AskUserQuestion — surfacing question card');
+        this.emit('between-turn-question', { toolUseId: id, questions });
         setTimeout(() => {
           if (this.pendingQuestionResolvers.delete(id)) {
             log.warn({ toolUseId: id }, 'PersistentExecutor: PTY AskUserQuestion timed out (6 min)');

@@ -210,6 +210,12 @@ export interface PtyClaudeSession {
   sendKeys(data: string): void;
   /** ANSI-stripped snapshot of the recent PTY output ring (for menu parsing). */
   snapshot(): string;
+  /**
+   * The current terminal SCREEN as clean text rows (cursor-resolved grid from a
+   * headless emulator). Reliable for parsing structured menus (AskUserQuestion
+   * question/options/checkboxes/tabs), unlike the append-log `snapshot()`.
+   */
+  screen(): string;
   /** Send an interrupt (ESC / Ctrl-C) to cancel the in-flight turn. */
   interrupt(): Promise<void>;
   /** Kill the PTY process and clean up. */
