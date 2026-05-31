@@ -80,8 +80,18 @@ describe('driveInteractiveTool — ExitPlanMode', () => {
       'Claude has written up a plan and is ready to execute. Would you like to proceed?',
       '1. Yes, and bypass permissions',
       '2. Yes, manually approve edits',
-      '3. Tell Claude what to change',
+      '3. No, refine with Ultraplan on Claude Code on the web',
+      '4. Tell Claude what to change',
     ].join('\n');
+    const { session, keys } = fakeSession(menu);
+    const response: PtyInteractiveResponse = { kind: 'approve' };
+    await driveInteractiveTool({ session, tool: exitPlanTool, response, logger });
+    expect(keys).toEqual(['1']);
+  });
+
+  it('proceeds on the simpler "Exit plan mode? 1.Yes 2.No" menu (digit 1)', async () => {
+    // Variant B — the tool-call confirmation shape (no "bypass" option at all).
+    const menu = ['Exit plan mode?', 'Claude wants to exit plan mode', '❯ 1. Yes', '  2. No'].join('\n');
     const { session, keys } = fakeSession(menu);
     const response: PtyInteractiveResponse = { kind: 'approve' };
     await driveInteractiveTool({ session, tool: exitPlanTool, response, logger });
@@ -102,6 +112,19 @@ describe('isExitPlanMenu', () => {
   });
   it('detects the legacy "No, keep planning" menu', () => {
     expect(isExitPlanMenu('Would you like to proceed?\n 2. Yes, and bypass permissions\n 3. No, keep planning')).toBe(true);
+  });
+  it('detects the simpler "Exit plan mode? 1.Yes 2.No" menu (Variant B)', () => {
+    const menu = ['Exit plan mode?', 'Claude wants to exit plan mode', '❯ 1. Yes', '  2. No'].join('\n');
+    expect(isExitPlanMenu(menu)).toBe(true);
+  });
+  it('detects a plan menu purely from the on-screen plan path (wording-free)', () => {
+    // No title phrase the detector knows — only the structure + plans path.
+    const menu = ['Some brand new wording here', '❯ 1. Go', '  2. Wait', '~/.claude/plans/witty-ocean.md'].join('\n');
+    expect(isExitPlanMenu(menu)).toBe(true);
+  });
+  it('does NOT fire on a numbered menu with no plan context (e.g. AskUserQuestion)', () => {
+    const menu = ['Which color?', '❯ 1. Red', '  2. Blue', 'Enter to select'].join('\n');
+    expect(isExitPlanMenu(menu)).toBe(false);
   });
   it('does NOT fire on plan body text that merely mentions planning', () => {
     expect(isExitPlanMenu('The plan: keep planning the migration in phases. Proceed carefully.')).toBe(false);
