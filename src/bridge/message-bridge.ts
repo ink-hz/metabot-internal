@@ -19,6 +19,7 @@ import { listClaudeSessions, type SessionSummary } from '../engines/claude/sessi
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
+import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import { CommandHandler } from './command-handler.js';
@@ -2262,6 +2263,23 @@ export class MessageBridge {
         });
       }
     };
+
+    // One-shot restart reminder: if the bridge was just restarted (breadcrumb
+    // from `metabot restart/update`), prepend a system-reminder to this chat's
+    // first turn so the resumed agent knows the restart already completed and
+    // doesn't loop on restarting. Fires at most once per chat per restart.
+    if (shouldRemindRestart(chatId)) {
+      const secs = restartSecondsAgo();
+      prompt =
+        `<system-reminder>\n` +
+        `MetaBot bridge 已于约 ${secs} 秒前被重启过（很可能是上一轮你自己执行了 metabot restart/update —— 进程已重生、会话已恢复）。` +
+        `重启已经完成，请勿再次执行 metabot restart 或 metabot update。` +
+        `若用户说「继续」，请接着完成之前未完成的任务，而不是重启。\n` +
+        `</system-reminder>\n\n` +
+        prompt;
+      markReminded(chatId);
+      this.logger.info({ chatId, secondsAgo: secs }, 'injected post-restart reminder into first turn');
+    }
 
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries

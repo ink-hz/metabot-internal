@@ -20,22 +20,29 @@ import {
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
 
-function resolveCodexPath(): string {
-  if (process.env.CODEX_EXECUTABLE_PATH) return process.env.CODEX_EXECUTABLE_PATH;
+export function resolveCodexPath(explicitPath?: string): string {
+  const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
+  if (override && existsSync(override)) return override;
+
   try {
     const cmd = isWindows ? 'where codex' : 'which codex';
     return execSync(cmd, { encoding: 'utf-8' }).trim().split(/\r?\n/)[0];
   } catch {
     if (!isWindows) {
-      for (const candidate of ['/usr/local/bin/codex', '/usr/bin/codex', '/opt/homebrew/bin/codex']) {
+      const home = os.homedir();
+      for (const candidate of [
+        path.join(home, '.local', 'bin', 'codex'),
+        '/usr/local/bin/codex',
+        '/usr/bin/codex',
+        '/opt/homebrew/bin/codex',
+        path.join(home, '.npm-global', 'bin', 'codex'),
+      ]) {
         if (existsSync(candidate)) return candidate;
       }
     }
     return 'codex';
   }
 }
-
-const CODEX_EXECUTABLE = resolveCodexPath();
 
 interface CodexModelMetadata {
   model?: string;
@@ -185,7 +192,8 @@ export class CodexExecutor {
     let stderr = '';
     let stdoutBuffer = '';
 
-    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, engine: 'codex' }, 'Starting Codex execution');
+    const executable = resolveCodexPath(codexConfig.executable);
+    this.logger.info({ cwd, hasSession: !!sessionId, outputsDir, executable, engine: 'codex' }, 'Starting Codex execution');
 
     const finishWithError = (message: string): void => {
       if (sawResult) return;
@@ -224,7 +232,7 @@ export class CodexExecutor {
     };
 
     try {
-      child = spawn(codexConfig.executable || CODEX_EXECUTABLE, args, {
+      child = spawn(executable, args, {
         cwd,
         env: { ...process.env, ...(codexConfig.env ?? {}) },
         stdio: ['ignore', 'pipe', 'pipe'],

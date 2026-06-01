@@ -52,6 +52,13 @@ interface PeerState {
   bots: PeerBotInfo[];
   skills: PeerSkillInfo[];
   error?: string;
+  /**
+   * Static peers come from bots.json/env (loaded in the constructor) or are
+   * added at runtime via addPeer(). Unlike dynamic peers discovered from the
+   * agent bus, they are NEVER dropped by rebuildPeersFromAgentBus() — the 30s
+   * poll re-injects them so a manually-added peer survives the next tick.
+   */
+  static?: boolean;
 }
 
 const DEFAULT_POLL_INTERVAL_MS = 30_000;
@@ -219,6 +226,7 @@ export class PeerManager {
         lastHealthy: 0,
         bots: [],
         skills: [],
+        static: true,
       });
     }
 
@@ -259,9 +267,9 @@ export class PeerManager {
       }
 
       if (configs.length > 0) {
-        this.logger.warn(
+        this.logger.info(
           { staticPeers: configs.map((c) => c.name) },
-          'registry mode enabled (METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL set) — static peer configs will be shadowed by registry entries',
+          'registry mode enabled (METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL set) — static peer configs are kept alongside registry-discovered peers (preserved across poll ticks)',
         );
       }
       if (!this.agentBusToken) {
@@ -471,7 +479,47 @@ export class PeerManager {
             },
       );
     }
+
+    // Re-inject static peers (bots.json/env or runtime-added via addPeer). The
+    // agent bus rebuild must never drop them — a static entry wins over a
+    // same-named dynamic one so a manually-added peer URL is authoritative.
+    for (const [name, state] of this.peers) {
+      if (state.static) next.set(name, state);
+    }
+
     this.peers = next;
+  }
+
+  /**
+   * Add (or update) a static peer at runtime — takes effect immediately, no
+   * restart. The peer is marked `static` so the next agent-bus poll tick won't
+   * clobber it, and is refreshed right away so it becomes usable within ~1s.
+   * Persisting it across restarts is the caller's job (bots.json peers[]).
+   */
+  addPeer(config: PeerConfig): void {
+    const normalizedUrl = config.url.replace(/\/+$/, '');
+    const existing = this.peers.get(config.name);
+    const state: PeerState = {
+      config: { ...config, url: normalizedUrl },
+      healthy: existing?.healthy ?? false,
+      lastChecked: existing?.lastChecked ?? 0,
+      lastHealthy: existing?.lastHealthy ?? 0,
+      bots: existing?.bots ?? [],
+      skills: existing?.skills ?? [],
+      static: true,
+    };
+    this.peers.set(config.name, state);
+    this.logger.info({ peerName: config.name, peerUrl: normalizedUrl }, 'static peer added at runtime');
+    // Best-effort immediate refresh so the peer is healthy without waiting for
+    // the next poll tick; errors are captured into state by refreshPeer itself.
+    void this.refreshPeer(state);
+  }
+
+  /** Remove a peer by name. Returns true if a peer was removed. */
+  removePeer(name: string): boolean {
+    const removed = this.peers.delete(name);
+    if (removed) this.logger.info({ peerName: name }, 'peer removed at runtime');
+    return removed;
   }
 
   /**

@@ -6,6 +6,7 @@ import { createEventDispatcher } from './feishu/event-handler.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
 import { MessageBridge } from './bridge/message-bridge.js';
+import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -150,6 +151,11 @@ async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
+
+  // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
+  // so the first turn in each chat after a restart can be reminded not to
+  // restart again. Must run before any message can be handled.
+  loadRestartBreadcrumb();
 
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;

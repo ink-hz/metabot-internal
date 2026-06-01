@@ -323,6 +323,7 @@ cmd_update() {
   fi
 
   info "Restarting MetaBot..."
+  _write_restart_breadcrumb
   pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
   pm2 save --force 2>/dev/null || true
 
@@ -360,9 +361,21 @@ _update_core_workspace() {
   ) && success "metabot-core workspace updated" || warn "metabot-core workspace update incomplete (feature CLI may be stale)"
 }
 
+# Drop a breadcrumb so the bridge knows it was just restarted. After
+# `pm2 restart` the node process (and every Claude session) is killed and
+# respawned, so the agent that issued the restart loses all memory of having
+# done so — without this it sees "please restart" in resumed history and
+# restarts again in a loop. The bridge reads + deletes this file at boot and
+# injects a one-shot "you just restarted, don't restart again" system-reminder.
+_write_restart_breadcrumb() {
+  local dir="${SESSION_STORE_DIR:-$HOME/.metabot}"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '{"restartedAt": %s}\n' "$(date +%s)" > "$dir/last-restart.json" 2>/dev/null || true
+}
+
 cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
 cmd_stop()    { pm2 stop metabot; }
-cmd_restart() { pm2 restart metabot; }
+cmd_restart() { _write_restart_breadcrumb; pm2 restart metabot; }
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
@@ -506,7 +519,44 @@ print(json.dumps({'botName': sys.argv[1], 'chatId': sys.argv[2], 'cronExpr': sys
       esac
       ;;
     peers|p)
-      curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+      local subcmd="${1:-list}"; shift 2>/dev/null || true
+      case "$subcmd" in
+        list|ls)
+          curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/peers" | _json
+          ;;
+        add|a)
+          local pname="$1" purl="$2" psecret="${3:-}"
+          if [[ -z "${pname:-}" || -z "${purl:-}" ]]; then
+            echo "Usage: metabot peers add <name> <url> [secret]"
+            echo "  Example: metabot peers add alice http://10.0.0.5:9100"
+            exit 1
+          fi
+          python3 -c "
+import json, sys
+body = {'name': sys.argv[1], 'url': sys.argv[2]}
+if len(sys.argv) > 3 and sys.argv[3]:
+    body['secret'] = sys.argv[3]
+print(json.dumps(body))
+" "$pname" "$purl" "$psecret" | \
+          curl -s -X POST "$METABOT_URL/api/peers" \
+            -H "$METABOT_AUTH" -H "Content-Type: application/json" \
+            -d @- | _json
+          ;;
+        remove|rm|del)
+          local pname="$1"
+          if [[ -z "${pname:-}" ]]; then
+            echo "Usage: metabot peers remove <name>"
+            exit 1
+          fi
+          curl -s -X DELETE -H "$METABOT_AUTH" "$METABOT_URL/api/peers/$pname" | _json
+          ;;
+        *)
+          echo "Usage: metabot peers [list|add|remove]"
+          echo "  metabot peers                       - List peers and their status"
+          echo "  metabot peers add <name> <url> [secret] - Add a peer at runtime (no restart)"
+          echo "  metabot peers remove <name>         - Remove a peer"
+          ;;
+      esac
       ;;
     stats)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/stats" | _json

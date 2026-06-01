@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import type * as http from 'node:http';
-import { addBot, removeBot, updateBot, getBotEntry } from '../bots-config-writer.js';
+import { addBot, removeBot, updateBot, getBotEntry, addPeer, removePeer } from '../bots-config-writer.js';
 import { installSkillsToWorkDir } from '../skills-installer.js';
 import { webBotFromJson } from '../../config.js';
 import { resolveEngineName } from '../../engines/index.js';
@@ -51,6 +51,78 @@ export async function handleBotRoutes(
   // GET /api/peers
   if (method === 'GET' && url === '/api/peers') {
     jsonResponse(res, 200, { peers: peerManager?.getPeerStatuses() ?? [] });
+    return true;
+  }
+
+  // POST /api/peers — add a static peer at runtime (no restart)
+  if (method === 'POST' && url === '/api/peers') {
+    if (!peerManager) {
+      jsonResponse(res, 400, { error: 'Peering is disabled (no PeerManager configured)' });
+      return true;
+    }
+    const body = await parseJsonBody(req);
+    const name = (body.name as string)?.trim();
+    const peerUrl = (body.url as string)?.trim();
+    const secret = (body.secret as string) || undefined;
+    if (!name || !peerUrl) {
+      jsonResponse(res, 400, { error: 'Missing required fields: name, url' });
+      return true;
+    }
+    if (!/^https?:\/\//i.test(peerUrl)) {
+      jsonResponse(res, 400, { error: 'url must start with http:// or https://' });
+      return true;
+    }
+
+    peerManager.addPeer({ name, url: peerUrl, ...(secret ? { secret } : {}) });
+
+    // Persist to bots.json so the peer survives a restart (best-effort).
+    let persisted = false;
+    if (botsConfigPath) {
+      try {
+        addPeer(botsConfigPath, { name, url: peerUrl, ...(secret ? { secret } : {}) });
+        persisted = true;
+      } catch (err: any) {
+        logger.warn({ name, err: err?.message }, 'peer added in-memory but persisting to bots.json failed');
+      }
+    }
+    logger.info({ name, url: peerUrl, persisted }, 'peer added at runtime');
+    jsonResponse(res, 201, {
+      name,
+      url: peerUrl,
+      persisted,
+      message: persisted
+        ? 'Peer added and persisted. Active immediately, no restart needed.'
+        : 'Peer added (in-memory only — set BOTS_CONFIG to persist across restarts).',
+    });
+    return true;
+  }
+
+  // DELETE /api/peers/:name — remove a peer at runtime
+  if (method === 'DELETE' && url.startsWith('/api/peers/')) {
+    if (!peerManager) {
+      jsonResponse(res, 400, { error: 'Peering is disabled (no PeerManager configured)' });
+      return true;
+    }
+    const name = decodeURIComponent(url.slice('/api/peers/'.length));
+    if (!name) {
+      jsonResponse(res, 400, { error: 'Missing peer name' });
+      return true;
+    }
+    const removed = peerManager.removePeer(name);
+    let persistedRemoval = false;
+    if (botsConfigPath) {
+      try {
+        persistedRemoval = removePeer(botsConfigPath, name);
+      } catch (err: any) {
+        logger.warn({ name, err: err?.message }, 'peer removed in-memory but updating bots.json failed');
+      }
+    }
+    if (!removed && !persistedRemoval) {
+      jsonResponse(res, 404, { error: `Peer not found: ${name}` });
+      return true;
+    }
+    logger.info({ name, persistedRemoval }, 'peer removed at runtime');
+    jsonResponse(res, 200, { name, removed: true });
     return true;
   }
 

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildCodexArgs, resolveCodexModelMetadata } from '../src/engines/codex/executor.js';
+import { buildCodexArgs, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
 import type { CodexBotConfig } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
@@ -94,6 +94,26 @@ describe('buildCodexArgs', () => {
     } finally {
       if (priorCodexHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = priorCodexHome;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('falls back to PATH when an explicit Codex path no longer exists', () => {
+    const priorPath = process.env.PATH;
+    const priorExecutable = process.env.CODEX_EXECUTABLE_PATH;
+    const dir = mkdtempSync(join(tmpdir(), 'metabot-codex-path-'));
+    const fakeCodex = join(dir, 'codex');
+    try {
+      writeFileSync(fakeCodex, '#!/bin/sh\nexit 0\n');
+      chmodSync(fakeCodex, 0o755);
+      process.env.PATH = [dir, '/usr/bin', '/bin'].join(':');
+      delete process.env.CODEX_EXECUTABLE_PATH;
+
+      expect(resolveCodexPath(join(dir, 'missing-codex'))).toBe(fakeCodex);
+    } finally {
+      process.env.PATH = priorPath;
+      if (priorExecutable === undefined) delete process.env.CODEX_EXECUTABLE_PATH;
+      else process.env.CODEX_EXECUTABLE_PATH = priorExecutable;
       rmSync(dir, { recursive: true, force: true });
     }
   });
