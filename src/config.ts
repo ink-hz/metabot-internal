@@ -106,6 +106,10 @@ export interface CodexBotConfig {
   model?: string;
   displayModel?: string;
   profile?: string;
+  /** Explicit OpenAI-compatible API key for Codex CLI API-key mode. */
+  apiKey?: string;
+  /** OpenAI-compatible API base URL for Codex CLI API-key mode. */
+  baseUrl?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   dangerouslyBypassApprovalsAndSandbox?: boolean;
@@ -208,6 +212,10 @@ export interface CodexJsonConfig {
   model?: string;
   displayModel?: string;
   profile?: string;
+  /** Explicit OpenAI-compatible API key for Codex CLI API-key mode. */
+  apiKey?: string;
+  /** OpenAI-compatible API base URL for Codex CLI API-key mode. */
+  baseUrl?: string;
   approvalPolicy?: 'untrusted' | 'on-failure' | 'on-request' | 'never';
   sandbox?: 'read-only' | 'workspace-write' | 'danger-full-access';
   dangerouslyBypassApprovalsAndSandbox?: boolean;
@@ -431,6 +439,8 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     ...(process.env.CODEX_MODEL ? { model: process.env.CODEX_MODEL } : {}),
     ...(process.env.CODEX_DISPLAY_MODEL ? { displayModel: process.env.CODEX_DISPLAY_MODEL } : {}),
     ...(process.env.CODEX_PROFILE ? { profile: process.env.CODEX_PROFILE } : {}),
+    ...(process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY ? { apiKey: process.env.CODEX_API_KEY || process.env.OPENAI_API_KEY } : {}),
+    ...(process.env.CODEX_BASE_URL || process.env.OPENAI_BASE_URL ? { baseUrl: process.env.CODEX_BASE_URL || process.env.OPENAI_BASE_URL } : {}),
     ...(process.env.CODEX_APPROVAL_POLICY ? { approvalPolicy: process.env.CODEX_APPROVAL_POLICY as CodexJsonConfig['approvalPolicy'] } : {}),
     ...(process.env.CODEX_SANDBOX ? { sandbox: process.env.CODEX_SANDBOX as CodexJsonConfig['sandbox'] } : {}),
     ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),

@@ -23,6 +23,18 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `CLAUDE_MODEL` | SDK default | Claude model to use |
 | `CLAUDE_EXECUTABLE_PATH` | auto-detect | Path to `claude` binary |
 
+## Codex CLI
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEX_MODEL` | Codex default | Codex model to use |
+| `CODEX_API_KEY` | — | OpenAI-compatible API key for Codex. Normalized to `OPENAI_API_KEY` in the Codex child process |
+| `CODEX_BASE_URL` | Codex default | OpenAI-compatible API base URL. Passed to Codex as `-c openai_base_url="..."` |
+| `CODEX_PROFILE` | — | Codex config profile |
+| `CODEX_APPROVAL_POLICY` | `never` | Approval policy (`untrusted`, `on-failure`, `on-request`, `never`) |
+| `CODEX_SANDBOX` | `danger-full-access` | Sandbox mode (`read-only`, `workspace-write`, `danger-full-access`) |
+| `CODEX_EXECUTABLE_PATH` | auto-detect | Path to `codex` binary |
+
 ## MetaMemory
 
 | Variable | Default | Description |

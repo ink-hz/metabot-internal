@@ -19,6 +19,7 @@ import {
 
 const isWindows = process.platform === 'win32';
 const FALLBACK_CODEX_CONTEXT_WINDOW = 272000;
+const CODEX_AUTH_ENV_VARS = ['OPENAI_API_KEY', 'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN'];
 
 export function resolveCodexPath(explicitPath?: string): string {
   const override = explicitPath || process.env.CODEX_EXECUTABLE_PATH;
@@ -131,6 +132,39 @@ function parseTomlStringAssignment(line: string, key: string): string | undefine
   return quoted ? quoted[1] : raw;
 }
 
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+/**
+ * Build the environment for the Codex CLI child process.
+ *
+ * When `codex.apiKey` is configured, normalize it to OPENAI_API_KEY and remove
+ * other Codex/OpenAI auth env vars first. Codex reports an auth conflict when
+ * multiple supported auth env vars are present, so explicit per-bot config
+ * must win cleanly over inherited .env / host values.
+ */
+export function buildCodexEnv(
+  codexConfig: CodexBotConfig,
+  baseEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(baseEnv)) {
+    if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(codexConfig.env ?? {})) {
+    if (value !== undefined) env[key] = value;
+  }
+
+  const explicitApiKey = codexConfig.apiKey?.trim();
+  if (explicitApiKey) {
+    for (const key of CODEX_AUTH_ENV_VARS) delete env[key];
+    env.OPENAI_API_KEY = explicitApiKey;
+  }
+
+  return env;
+}
+
 /**
  * Build the argv array for `codex exec`. Exported for unit testing.
  * Values are passed as discrete argv entries (never through a shell), so
@@ -157,6 +191,7 @@ export function buildCodexArgs(
   args.push('-C', cwd);
   if (model) args.push('-m', model);
   if (codexConfig.profile) args.push('-p', codexConfig.profile);
+  if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -234,7 +269,7 @@ export class CodexExecutor {
     try {
       child = spawn(executable, args, {
         cwd,
-        env: { ...process.env, ...(codexConfig.env ?? {}) },
+        env: buildCodexEnv(codexConfig),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (err: any) {

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildCodexArgs, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
+import { buildCodexArgs, buildCodexEnv, resolveCodexModelMetadata, resolveCodexPath } from '../src/engines/codex/executor.js';
 import type { CodexBotConfig } from '../src/config.js';
 
 describe('buildCodexArgs', () => {
@@ -44,6 +44,14 @@ describe('buildCodexArgs', () => {
     expect(args[args.indexOf('-m') + 1]).toBe('gpt-5.5');
     expect(args).toContain('-p');
     expect(args[args.indexOf('-p') + 1]).toBe('staging');
+  });
+
+  it('passes Codex OpenAI-compatible base URL as a config override', () => {
+    const cfg: CodexBotConfig = { baseUrl: 'https://gateway.example.com/openai/v1' };
+    const args = buildCodexArgs(cfg, cwd, prompt, undefined, 'gpt-5.5');
+    expect(args).toContain('-c');
+    expect(args[args.indexOf('-c') + 1]).toBe('openai_base_url="https://gateway.example.com/openai/v1"');
+    expect(args.indexOf('-c')).toBeLessThan(args.indexOf('exec'));
   });
 
   it('appends extraArgs verbatim between global flags and the exec subcommand', () => {
@@ -116,5 +124,46 @@ describe('buildCodexArgs', () => {
       else process.env.CODEX_EXECUTABLE_PATH = priorExecutable;
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe('buildCodexEnv', () => {
+  it('normalizes explicit codex.apiKey to OPENAI_API_KEY and removes conflicting auth env vars', () => {
+    const env = buildCodexEnv(
+      { apiKey: 'sk-explicit' },
+      {
+        OPENAI_API_KEY: 'sk-openai',
+        CODEX_API_KEY: 'sk-codex',
+        CODEX_ACCESS_TOKEN: 'tok',
+        PATH: '/bin',
+      },
+    );
+    expect(env.OPENAI_API_KEY).toBe('sk-explicit');
+    expect(env.CODEX_API_KEY).toBeUndefined();
+    expect(env.CODEX_ACCESS_TOKEN).toBeUndefined();
+    expect(env.PATH).toBe('/bin');
+  });
+
+  it('preserves env-based Codex auth when no explicit apiKey is configured', () => {
+    const env = buildCodexEnv(
+      {},
+      {
+        CODEX_API_KEY: 'sk-from-env',
+        PATH: '/bin',
+      },
+    );
+    expect(env.CODEX_API_KEY).toBe('sk-from-env');
+    expect(env.OPENAI_API_KEY).toBeUndefined();
+  });
+
+  it('lets codex.env provide API-key auth for a single bot', () => {
+    const env = buildCodexEnv(
+      { env: { OPENAI_API_KEY: 'sk-bot-env' } },
+      {
+        PATH: '/bin',
+      },
+    );
+    expect(env.OPENAI_API_KEY).toBe('sk-bot-env');
+    expect(env.PATH).toBe('/bin');
   });
 });

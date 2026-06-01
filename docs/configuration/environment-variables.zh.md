@@ -23,6 +23,18 @@
 | `CLAUDE_MODEL` | SDK 默认 | Claude 模型 |
 | `CLAUDE_EXECUTABLE_PATH` | 自动检测 | `claude` 二进制路径 |
 
+## Codex CLI
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CODEX_MODEL` | Codex 默认 | Codex 模型 |
+| `CODEX_API_KEY` | — | Codex 的 OpenAI 兼容 API Key。子进程里会标准化成 `OPENAI_API_KEY` |
+| `CODEX_BASE_URL` | Codex 默认 | OpenAI 兼容 API Base URL。会传给 Codex：`-c openai_base_url="..."` |
+| `CODEX_PROFILE` | — | Codex 配置 profile |
+| `CODEX_APPROVAL_POLICY` | `never` | 审批策略（`untrusted`、`on-failure`、`on-request`、`never`） |
+| `CODEX_SANDBOX` | `danger-full-access` | 沙箱模式（`read-only`、`workspace-write`、`danger-full-access`） |
+| `CODEX_EXECUTABLE_PATH` | 自动检测 | `codex` 二进制路径 |
+
 ## MetaMemory
 
 | 变量 | 默认 | 说明 |
