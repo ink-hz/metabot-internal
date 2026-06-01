@@ -1,5 +1,5 @@
 import { execSync, spawn, type ChildProcess } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { BotConfigBase, CodexBotConfig } from '../../config.js';
@@ -94,6 +94,95 @@ function readModelsCache(): { models?: Array<{ slug?: string; context_window?: n
   } catch {
     return undefined;
   }
+}
+
+interface CodexTokenCountSnapshot {
+  usage: {
+    input_tokens?: number;
+    output_tokens?: number;
+    total_tokens?: number;
+  };
+  contextWindow?: number;
+}
+
+function readLastTokenCountFromSession(sessionId: string | undefined): CodexTokenCountSnapshot | undefined {
+  if (!sessionId) return undefined;
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const sessionsDir = path.join(codexHome, 'sessions');
+  const sessionPath = findCodexSessionFile(sessionsDir, sessionId);
+  if (!sessionPath) return undefined;
+
+  try {
+    const lines = readFileSync(sessionPath, 'utf-8').trimEnd().split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (!lines[i].includes('"token_count"')) continue;
+      const rec = JSON.parse(lines[i]) as {
+        type?: string;
+        payload?: {
+          type?: string;
+          info?: {
+            last_token_usage?: CodexTokenCountSnapshot['usage'];
+            model_context_window?: number;
+          };
+        };
+      };
+      if (rec.type !== 'event_msg' || rec.payload?.type !== 'token_count') continue;
+      const usage = rec.payload.info?.last_token_usage;
+      if (!usage) return undefined;
+      return {
+        usage,
+        contextWindow: rec.payload.info?.model_context_window,
+      };
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function findCodexSessionFile(root: string, sessionId: string): string | undefined {
+  try {
+    if (!existsSync(root)) return undefined;
+    const stack = [root];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      for (const entry of readdirSync(dir)) {
+        const fullPath = path.join(dir, entry);
+        let stat;
+        try { stat = statSync(fullPath); } catch { continue; }
+        if (stat.isDirectory()) {
+          stack.push(fullPath);
+        } else if (entry.endsWith('.jsonl') && entry.includes(sessionId)) {
+          return fullPath;
+        }
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function applyTokenCountSnapshot(message: SDKMessage, snapshot: CodexTokenCountSnapshot | undefined): SDKMessage {
+  if (!snapshot?.usage || !message.modelUsage) return message;
+  const model = Object.keys(message.modelUsage)[0];
+  if (!model) return message;
+  const outputTokens = snapshot.usage.output_tokens ?? 0;
+  const inputTokens = typeof snapshot.usage.total_tokens === 'number'
+    ? Math.max(0, snapshot.usage.total_tokens - outputTokens)
+    : snapshot.usage.input_tokens ?? 0;
+  return {
+    ...message,
+    modelUsage: {
+      ...message.modelUsage,
+      [model]: {
+        ...message.modelUsage[model],
+        inputTokens,
+        outputTokens,
+        contextWindow: snapshot.contextWindow ?? message.modelUsage[model].contextWindow,
+      },
+    },
+  };
 }
 
 function readTomlTopLevelValue(text: string, key: string): string | undefined {
@@ -224,6 +313,7 @@ export class CodexExecutor {
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;
+    let pendingResult: SDKMessage | undefined;
     let stderr = '';
     let stdoutBuffer = '';
 
@@ -247,8 +337,12 @@ export class CodexExecutor {
     const emitEvent = (event: CodexJsonEvent): void => {
       const messages = translateCodexJsonEvent(event, state);
       for (const message of messages) {
-        if (message.type === 'result') sawResult = true;
-        queue.enqueue(message);
+        if (message.type === 'result') {
+          sawResult = true;
+          pendingResult = message;
+        } else {
+          queue.enqueue(message);
+        }
       }
     };
 
@@ -303,6 +397,11 @@ export class CodexExecutor {
         if (code !== 0 && !sawResult) {
           const suffix = stderr.trim() ? `: ${stderr.trim()}` : '';
           finishWithError(`Codex exited with ${signal ? `signal ${signal}` : `code ${code}`}${suffix}`);
+        } else if (pendingResult) {
+          const snapshot = state.lastUsage
+            ? { usage: state.lastUsage, contextWindow: state.contextWindow }
+            : readLastTokenCountFromSession(state.sessionId ?? sessionId);
+          queue.enqueue(applyTokenCountSnapshot(pendingResult, snapshot));
         }
         if (stderr.trim()) {
           this.logger.debug({ stderr: stderr.trim() }, 'Codex stderr');
