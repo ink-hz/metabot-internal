@@ -99,6 +99,29 @@ export class CommandHandler {
         return true;
 
       case '/reset':
+        {
+          const task = this.getRunningTask(chatId);
+          const cleared = this.clearQueue(chatId);
+          if (task) {
+            this.audit.log({
+              event: 'task_stopped',
+              botName: this.config.name,
+              chatId,
+              userId,
+              durationMs: Date.now() - task.startTime,
+              meta: { reason: 'reset', clearedQueue: cleared },
+            });
+            this.stopTask(chatId);
+          } else if (cleared > 0) {
+            this.audit.log({
+              event: 'queue_cleared',
+              botName: this.config.name,
+              chatId,
+              userId,
+              meta: { reason: 'reset', clearedQueue: cleared },
+            });
+          }
+        }
         this.sessionManager.resetSession(chatId);
         // Tear down the persistent Claude process for this chat (Stage 3b).
         // Otherwise the old long-lived executor would keep running with its

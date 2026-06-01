@@ -500,9 +500,14 @@ export class MessageBridge {
     }
     task.executionHandle.finish();
     task.abortController.abort();
-    // Don't delete from runningTasks here — the finally block in executeQuery will
-    // handle cleanup. Deleting early creates a race: if the user sends a new message
-    // before the old loop exits, the old finally block would delete the NEW task entry.
+    // Clear the busy flag immediately so a follow-up after /stop or /reset can
+    // start a fresh turn while the old stream winds down. executeQuery's
+    // finally block only deletes when the map still points at the same task,
+    // so an old task cannot remove a newer one.
+    if (this.runningTasks.get(chatId) === task) {
+      this.runningTasks.delete(chatId);
+      metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+    }
   }
 
   /**
@@ -1752,6 +1757,14 @@ export class MessageBridge {
 
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
+
+    // Feishu users often type command names without the leading slash. Treat
+    // an exact bare "reset" as /reset so it can abort a running PTY turn and
+    // clear the session instead of being queued behind the old task.
+    if (text.trim().toLowerCase() === 'reset') {
+      await this.commandHandler.handle({ ...msg, text: '/reset' });
+      return;
+    }
 
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {

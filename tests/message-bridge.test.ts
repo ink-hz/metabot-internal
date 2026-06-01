@@ -122,6 +122,28 @@ describe('normalizePromptForEngine', () => {
 });
 
 describe('MessageBridge between-turn questions', () => {
+  it('treats a bare reset message as /reset instead of queueing it', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const handledTexts: string[] = [];
+    bridge.commandHandler = {
+      handle: async (msg: { text: string }) => {
+        handledTexts.push(msg.text);
+        return true;
+      },
+    };
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'reset',
+    });
+
+    expect(handledTexts).toEqual(['/reset']);
+  });
+
   it('advances multi-question cards and resolves only after the last answer', async () => {
     vi.useFakeTimers();
     const sender = makeSender();
