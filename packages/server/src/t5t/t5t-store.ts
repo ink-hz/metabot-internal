@@ -185,6 +185,21 @@ export interface AppendTopFiveInput {
   status?: TopFiveStatus;
 }
 
+export interface PurgeSmokeProjectResult {
+  slug: string;
+  removed: {
+    projects: number;
+    entries: number;
+    feedback: number;
+    goals: number;
+    evaluators: number;
+    bottlenecks: number;
+    wip: number;
+    topfive: number;
+    total: number;
+  };
+}
+
 /**
  * Append-only T5T domain store over the in-process MemoryStore.
  *
@@ -305,6 +320,42 @@ export class T5tStore {
       },
       cred,
     );
+  }
+
+  /**
+   * Hard-delete test projects only. T5T is append-only for real projects, but
+   * smoke-test data creates noisy permanent board entries. Keep this escape
+   * hatch tightly scoped to slugs that start with "smoke".
+   */
+  purgeSmokeProject(slug: string): PurgeSmokeProjectResult {
+    const normalized = slug.trim();
+    if (!normalized) throw httpErr(400, 'project_required');
+    if (!normalized.toLowerCase().startsWith('smoke')) {
+      throw httpErr(400, 'only_smoke_projects_can_be_deleted');
+    }
+    if (!this.getProject(normalized)) throw httpErr(404, 'project_not_found');
+
+    const entryDocIds = new Set(
+      this.loadDocs<EntryDoc>(this.folderIds.entries, 't5t')
+        .filter((doc) => doc.payload.project === normalized)
+        .map((doc) => doc.docId),
+    );
+
+    const removed = {
+      projects: this.purgeDocs(this.folderIds.projects, 'project', (doc: ProjectDoc) => doc.slug === normalized),
+      entries: this.purgeDocs(this.folderIds.entries, 't5t', (doc: EntryDoc) => doc.project === normalized),
+      feedback: this.purgeDocs(this.folderIds.feedback, 'feedback', (doc: FeedbackDoc) => entryDocIds.has(doc.onEntry)),
+      goals: this.purgeDocs(this.folderIds.goals, 'goal', (doc: GoalDoc) => doc.project === normalized),
+      evaluators: this.purgeDocs(this.folderIds.evaluators, 'evaluator', (doc: EvaluatorDoc) => doc.project === normalized),
+      bottlenecks: this.purgeDocs(this.folderIds.bottlenecks, 'bottleneck', (doc: BottleneckDoc) => doc.project === normalized),
+      wip: this.purgeDocs(this.folderIds.wip, 'wip', (doc: WipDoc) => doc.project === normalized),
+      topfive: this.purgeDocs(this.folderIds.topfive, 'topfive', (doc: TopFiveDoc) => doc.project === normalized),
+      total: 0,
+    };
+    removed.total = Object.entries(removed)
+      .filter(([key]) => key !== 'total')
+      .reduce((sum, [, count]) => sum + count, 0);
+    return { slug: normalized, removed };
   }
 
   // ---- read: goals ----
@@ -915,6 +966,21 @@ export class T5tStore {
       created_by: cred.botName,
     }, writeCred);
     return doc.id;
+  }
+
+  private purgeDocs<T extends { kind: string }>(
+    folderId: string,
+    kind: T['kind'],
+    predicate: (payload: T) => boolean,
+  ): number {
+    let removed = 0;
+    for (const doc of this.loadDocs<T>(folderId, kind)) {
+      if (!predicate(doc.payload)) continue;
+      if (this.memory.deleteDocument(doc.docId, ADMIN_READ_CRED)) {
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   private nextSeq(folderId: string, titlePrefix: string): number {

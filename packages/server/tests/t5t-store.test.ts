@@ -389,7 +389,7 @@ describe('T5tStore — top-five items', () => {
 });
 
 describe('T5tStore — append-only invariant', () => {
-  it('exposes no update/delete/replace methods', () => {
+  it('exposes no update/delete/replace methods beyond the smoke-test purge escape hatch', () => {
     const surface = Object.getOwnPropertyNames(T5tStore.prototype);
     const forbidden = surface.filter((n) =>
       /^update/.test(n) || /^delete/.test(n) || /^replace/.test(n) || /^remove/.test(n),
@@ -428,6 +428,38 @@ describe('T5tStore — append-only invariant', () => {
   it('killProject throws 404 when slug is unknown', () => {
     const cred = mkCred('ameng');
     expect(() => store.killProject('no-such-thing', cred)).toThrow(/project_not_found/);
+  });
+
+  it('purgeSmokeProject hard-deletes smoke project docs and related records', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'smoke-test-proj', leaderEmail: 'ameng' }, cred);
+    store.appendGoal({ project: 'smoke-test-proj', text: 'temporary goal' }, cred);
+    store.appendTopFive({ project: 'smoke-test-proj', text: 'temporary top five' }, cred);
+    const entry = store.appendEntry({
+      project: 'smoke-test-proj',
+      date: '2026-06-01',
+      items: ['temporary entry'],
+    }, cred);
+    store.appendFeedback({ onEntry: entry.docId, comment: 'temporary feedback' }, cred);
+
+    const result = store.purgeSmokeProject('smoke-test-proj');
+
+    expect(result.removed.projects).toBe(1);
+    expect(result.removed.entries).toBe(1);
+    expect(result.removed.feedback).toBe(1);
+    expect(result.removed.goals).toBe(1);
+    expect(result.removed.topfive).toBe(1);
+    expect(result.removed.total).toBe(5);
+    expect(store.getProject('smoke-test-proj')).toBeNull();
+    expect(store.listEntriesByProject('smoke-test-proj')).toEqual([]);
+    expect(store.listFeedbackForEntry(entry.docId)).toEqual([]);
+  });
+
+  it('purgeSmokeProject rejects non-smoke projects', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({ slug: 'real-proj', leaderEmail: 'ameng' }, cred);
+    expect(() => store.purgeSmokeProject('real-proj')).toThrow(/only_smoke_projects_can_be_deleted/);
+    expect(store.getProject('real-proj')).not.toBeNull();
   });
 
   it('recentEntries respects limit and orders newest-first', async () => {

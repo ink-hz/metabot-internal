@@ -328,6 +328,7 @@ function deriveOp(method: string, pathname: string): AuditOp | string {
   if (pathname === '/api/t5t/topfive' && method === 'POST') return 'topfive';
   if (pathname === '/api/t5t/cli/topfive' && method === 'POST') return 'topfive';
   if (pathname === '/api/t5t/cli/kill' && method === 'POST') return 'kill';
+  if (pathname === '/api/t5t/cli/delete' && method === 'POST') return 'delete';
   if (
     method === 'POST'
     && pathname.startsWith('/api/t5t/projects/')
@@ -800,6 +801,10 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/t5t/cli/kill' && method === 'POST') {
         const body = await parseJsonBody(req);
         return jsonResult(res, t5tRoutes.postCliKill(t5tStore, body, cred));
+      }
+      if (pathname === '/api/t5t/cli/delete' && method === 'POST') {
+        const body = await parseJsonBody(req);
+        return jsonResult(res, t5tRoutes.postCliDelete(t5tStore, body, cred));
       }
       if (pathname === '/api/t5t/cli/feedback' && method === 'POST') {
         const body = await parseJsonBody(req);

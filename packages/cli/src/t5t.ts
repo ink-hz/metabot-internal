@@ -25,6 +25,7 @@ import { parseArgs, print } from '@xvirobotics/cli-core';
 import {
   loadT5tClient,
   type BoardResponse,
+  type DeleteSmokeProjectResponse,
   type ProjectDetailResponse,
   type StatusResponse,
   type T5tClient,
@@ -49,6 +50,7 @@ Subcommands:
   bottleneck <project> "<text>"                  Set the current bottleneck            (owner-auth)
   wip <project> <evaluatorId> "<title>"          Add a WIP item under an evaluator col (owner-auth)
   kill <project>                                 Mark a project as killed              (owner-auth)
+  delete <smoke-project>                         Hard-delete your own smoke test project
   top5 <project> add "<text>"                    Add a Top-5 todo item                 (owner-auth)
   top5 <project> done|reopen|remove <itemId>     Flip status of an existing Top-5 item (owner-auth)
   top5 <project> list                            List the current Top-5 items
@@ -179,6 +181,16 @@ async function cmdKill(client: T5tClient, args: string[]): Promise<void> {
   print(resp);
 }
 
+async function cmdDelete(client: T5tClient, args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const project = need('<smoke-project>', positional[0]);
+  if (!project.toLowerCase().startsWith('smoke')) {
+    throw new Error('metabot t5t delete: only smoke* test projects can be hard-deleted');
+  }
+  const resp = await client.post<DeleteSmokeProjectResponse>('/api/t5t/cli/delete', { project });
+  print(resp);
+}
+
 async function cmdTopFive(client: T5tClient, args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const project = need('<project>', positional[0]);
@@ -262,6 +274,8 @@ export async function run(argv: string[]): Promise<void> {
       return cmdWip(client, rest);
     case 'kill':
       return cmdKill(client, rest);
+    case 'delete':
+      return cmdDelete(client, rest);
     case 'top5':
       return cmdTopFive(client, rest);
     default:

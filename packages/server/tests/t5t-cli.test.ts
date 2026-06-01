@@ -229,6 +229,55 @@ describe('t5t CLI routes — MR3', () => {
     expect(res.body.error).toBe('project_required');
   });
 
+  it('POST /cli/delete only hard-deletes owner smoke projects', async () => {
+    kit = await startTestServer('t5t-cli-delete-smoke');
+    const owner = 'smoke-owner@xvirobotics.com';
+    const ownerToken = await issueMember(kit, owner);
+    const intruderToken = await issueMember(kit, 'intruder@xvirobotics.com');
+    await call(kit.baseUrl, 'POST', '/api/t5t/cli/push', ownerToken, {
+      project: 'smoke-test-proj',
+      date: '2026-06-01',
+      items: ['temporary smoke entry'],
+    });
+
+    const denied = await call(kit.baseUrl, 'POST', '/api/t5t/cli/delete', intruderToken, {
+      project: 'smoke-test-proj',
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('owner_required');
+
+    const ok = await call(kit.baseUrl, 'POST', '/api/t5t/cli/delete', ownerToken, {
+      project: 'smoke-test-proj',
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.slug).toBe('smoke-test-proj');
+    expect(ok.body.removed.projects).toBe(1);
+    expect(ok.body.removed.entries).toBe(1);
+
+    const detail = await call(kit.baseUrl, 'GET', '/api/t5t/cli/project/smoke-test-proj', ownerToken);
+    expect(detail.status).toBe(404);
+    expect(detail.body.error).toBe('project_not_found');
+  });
+
+  it('POST /cli/delete rejects non-smoke projects before deleting anything', async () => {
+    kit = await startTestServer('t5t-cli-delete-real');
+    const owner = 'real-owner@xvirobotics.com';
+    const token = await issueMember(kit, owner);
+    await call(kit.baseUrl, 'POST', '/api/t5t/cli/push', token, {
+      project: 'real-proj',
+      items: ['real entry'],
+    });
+
+    const res = await call(kit.baseUrl, 'POST', '/api/t5t/cli/delete', token, {
+      project: 'real-proj',
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('only_smoke_projects_can_be_deleted');
+
+    const detail = await call(kit.baseUrl, 'GET', '/api/t5t/cli/project/real-proj', token);
+    expect(detail.status).toBe(200);
+  });
+
   it('POST /cli/topfive as leader Bearer → 200; flip status=done by itemId → done', async () => {
     kit = await startTestServer('t5t-cli-topfive');
     const me = 'tf-owner@xvirobotics.com';

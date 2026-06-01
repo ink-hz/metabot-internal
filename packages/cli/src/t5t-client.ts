@@ -103,3 +103,18 @@ export interface ProjectDetailResponse {
   wipBoard: unknown[];
   topFive: T5tTopFiveItem[];
 }
+
+export interface DeleteSmokeProjectResponse {
+  slug: string;
+  removed: {
+    projects: number;
+    entries: number;
+    feedback: number;
+    goals: number;
+    evaluators: number;
+    bottlenecks: number;
+    wip: number;
+    topfive: number;
+    total: number;
+  };
+}

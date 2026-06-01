@@ -204,6 +204,32 @@ describe('metabot t5t — argv parsing + dispatch', () => {
     await expect(mod.run(['kill'])).rejects.toThrow(/<project> required/);
   });
 
+  it('delete <smoke-project> posts {project} to /api/t5t/cli/delete', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    process.env.METABOT_CORE_URL = 'https://example.test/core';
+    const fetchMock = mockOk({ slug: 'smoke-test-proj', removed: { total: 2 } });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+
+    const mod = await importFresh();
+    await mod.run(['delete', 'smoke-test-proj']);
+
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [string, RequestInit][] } }).mock.calls[0]!;
+    expect(url).toBe('https://example.test/core/api/t5t/cli/delete');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ project: 'smoke-test-proj' });
+  });
+
+  it('delete rejects non-smoke projects client-side', async () => {
+    process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
+    const fetchMock = mockOk({});
+    vi.stubGlobal('fetch', fetchMock);
+    const mod = await importFresh();
+
+    await expect(mod.run(['delete', 'real-proj'])).rejects.toThrow(/only smoke\*/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('projects show <slug> hits /api/t5t/cli/project/:slug', async () => {
     process.env.METABOT_CORE_TOKEN = 'mt_test_tok';
     process.env.METABOT_CORE_URL = 'https://example.test/core';

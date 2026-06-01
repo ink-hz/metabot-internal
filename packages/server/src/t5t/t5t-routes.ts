@@ -140,6 +140,26 @@ export function postCliKill(
 }
 
 /**
+ * POST /api/t5t/cli/delete — hard-delete smoke-test projects only. This is
+ * intentionally narrower than kill: real project history remains append-only,
+ * but users can clean up their own `smoke*` test projects from the board.
+ */
+export function postCliDelete(
+  store: T5tStore,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  const project = typeof body.project === 'string' ? body.project.trim() : '';
+  if (!project) return err(400, 'project_required');
+  if (!project.toLowerCase().startsWith('smoke')) {
+    return err(400, 'only_smoke_projects_can_be_deleted');
+  }
+  const gate = ownerGate(store, project, cred);
+  if (gate) return gate;
+  return guarded(() => store.purgeSmokeProject(project));
+}
+
+/**
  * POST /api/t5t/feedback — append a feedback comment under an entry. The
  * `author`/`from` field is ALWAYS stamped server-side from `cred.botName`;
  * any client-supplied `author` / `from` in the body is ignored. This mirrors
