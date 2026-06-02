@@ -1,7 +1,37 @@
-import 'dotenv/config';
+import * as dotenv from 'dotenv';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+
+function loadEnvFiles(): void {
+  const originalEnv = new Set(Object.keys(process.env));
+  const defaultEnvFiles = [
+    process.env.METABOT_DEFAULT_ENV_FILE,
+    '/etc/metabot/default.env',
+    path.join(os.homedir(), '.metabot', 'default.env'),
+    path.resolve('.env.defaults'),
+  ].filter((p): p is string => !!p);
+
+  const applyEnvFile = (envPath: string, canOverrideDefaults: boolean) => {
+    if (!fs.existsSync(envPath)) return;
+    const parsed = dotenv.parse(fs.readFileSync(envPath));
+    for (const [key, value] of Object.entries(parsed)) {
+      if (originalEnv.has(key)) {
+        continue;
+      }
+      if (canOverrideDefaults || process.env[key] === undefined) {
+        process.env[key] = value;
+      }
+    }
+  };
+
+  for (const envPath of defaultEnvFiles) {
+    applyEnvFile(envPath, false);
+  }
+  applyEnvFile(path.resolve('.env'), true);
+}
+
+loadEnvFiles();
 
 /** Agent engine backing a bot. */
 export type EngineName = 'claude' | 'kimi' | 'codex';
@@ -15,6 +45,7 @@ export interface BotConfigBase {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  voiceReply?: VoiceReplyConfig;
   /**
    * Visibility in the metabot-core agent bus. When true (default), the bridge
    * registers this bot in the central agent registry so other bridges/CLIs
@@ -98,6 +129,15 @@ export interface BotConfigBase {
     /** Max concurrent executors per bot (LRU-evicted past this). Default 20. */
     maxConcurrent?: number;
   };
+}
+
+export interface VoiceReplyConfig {
+  enabled?: boolean;
+  provider?: string;
+  voice?: string;
+  maxChars?: number;
+  summaryProvider?: 'none' | 'openai';
+  summaryModel?: string;
 }
 
 /** Codex-specific overrides. Populated only when engine === 'codex'. */
@@ -242,6 +282,7 @@ export interface FeishuBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  voiceReply?: VoiceReplyConfig;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
   /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
@@ -269,6 +310,7 @@ function feishuBotFromJson(entry: FeishuBotJsonEntry): BotConfig {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.groupNoMention ? { groupNoMention: true } : {}),
@@ -293,6 +335,7 @@ export interface TelegramBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  voiceReply?: VoiceReplyConfig;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
   /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
@@ -317,6 +360,7 @@ function telegramBotFromJson(entry: TelegramBotJsonEntry): TelegramBotConfig {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),
@@ -339,6 +383,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
   maxConcurrentTasks?: number;
   budgetLimitDaily?: number;
   ttsVoice?: string;
+  voiceReply?: VoiceReplyConfig;
   /** See BotConfigBase.visible — defaults to true if omitted. */
   visible?: boolean;
   /** See BotConfigBase.memoryPublic — defaults to true if omitted. */
@@ -361,6 +406,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.maxConcurrentTasks != null ? { maxConcurrentTasks: entry.maxConcurrentTasks } : {}),
     ...(entry.budgetLimitDaily != null ? { budgetLimitDaily: entry.budgetLimitDaily } : {}),
     ...(entry.ttsVoice ? { ttsVoice: entry.ttsVoice } : {}),
+    ...(entry.voiceReply ? { voiceReply: entry.voiceReply } : {}),
     ...(entry.visible !== undefined ? { visible: entry.visible } : {}),
     ...(entry.memoryPublic !== undefined ? { memoryPublic: entry.memoryPublic } : {}),
     ...(entry.engine ? { engine: entry.engine } : {}),

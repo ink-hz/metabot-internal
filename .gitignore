@@ -6,6 +6,7 @@ packages/web-ui/dist/
 .env
 .env.*
 !.env.example
+secrets/
 bots.json
 logs/
 nohup.out

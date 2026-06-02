@@ -30,6 +30,10 @@ export interface UserSession {
   activeGoal?: string;
   /** Wall-clock when the current goal was set (ms since epoch). */
   goalSetAt?: number;
+  /** Codex bridge-level goal loop iteration counter. Claude owns its own /goal loop. */
+  goalIterations?: number;
+  /** Codex bridge-level goal loop safety cap. */
+  goalMaxIterations?: number;
 }
 
 interface PersistedSession {
@@ -45,6 +49,8 @@ interface PersistedSession {
   engine?: EngineName;
   activeGoal?: string;
   goalSetAt?: number;
+  goalIterations?: number;
+  goalMaxIterations?: number;
 }
 
 // Sessions never expire — user can /reset manually.
@@ -96,6 +102,16 @@ export class SessionManager {
       this.sessions.set(chatId, session);
     }
     session.lastUsed = Date.now();
+    if (!fs.existsSync(session.workingDirectory) && fs.existsSync(this.defaultWorkingDirectory)) {
+      this.logger.warn(
+        { chatId, workingDirectory: session.workingDirectory, fallback: this.defaultWorkingDirectory },
+        'Session working directory no longer exists; falling back to bot default',
+      );
+      session.workingDirectory = this.defaultWorkingDirectory;
+      session.sessionId = undefined;
+      session.sessionIdEngine = undefined;
+      this.saveToDisk();
+    }
     return session;
   }
 
@@ -159,12 +175,24 @@ export class SessionManager {
     if (condition) {
       session.activeGoal = condition;
       session.goalSetAt = Date.now();
+      session.goalIterations = 0;
+      const maxIterations = Number(process.env.METABOT_CODEX_GOAL_MAX_ITERATIONS);
+      session.goalMaxIterations = Number.isFinite(maxIterations) && maxIterations > 0 ? maxIterations : 5;
     } else {
       session.activeGoal = undefined;
       session.goalSetAt = undefined;
+      session.goalIterations = undefined;
+      session.goalMaxIterations = undefined;
     }
     this.logger.info({ chatId, hasGoal: !!condition }, 'Session goal updated');
     this.saveToDisk();
+  }
+
+  incrementGoalIteration(chatId: string): number {
+    const session = this.getSession(chatId);
+    session.goalIterations = (session.goalIterations ?? 0) + 1;
+    this.saveToDisk();
+    return session.goalIterations;
   }
 
   /** Accumulate token/cost/duration from a completed query into the session totals. */
@@ -202,6 +230,8 @@ export class SessionManager {
       session.cumulativeDurationMs = 0;
       session.activeGoal = undefined;
       session.goalSetAt = undefined;
+      session.goalIterations = undefined;
+      session.goalMaxIterations = undefined;
       // Keep working directory
       this.logger.info({ chatId }, 'Session reset');
       this.saveToDisk();
@@ -242,6 +272,8 @@ export class SessionManager {
             engine: session.engine,
             activeGoal: session.activeGoal,
             goalSetAt: session.goalSetAt,
+            goalIterations: session.goalIterations,
+            goalMaxIterations: session.goalMaxIterations,
           };
         }
       }
@@ -274,6 +306,8 @@ export class SessionManager {
           engine: persisted.engine,
           activeGoal: persisted.activeGoal,
           goalSetAt: persisted.goalSetAt,
+          goalIterations: persisted.goalIterations,
+          goalMaxIterations: persisted.goalMaxIterations,
         });
         loaded++;
       }

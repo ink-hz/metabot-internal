@@ -435,8 +435,7 @@ export function startServer(options: ServerOptions): ServerHandle {
     // `packages/server/static/cli/` and rsynced to /opt/metabot-core/static/
     // by deploy/install.sh. Reachable on every host (UI + bare API) and
     // intentionally bypass auth — the host already sits behind 飞连 VPN, and
-    // the tarball carries no secrets (tokens are user-supplied at install
-    // time, not embedded).
+    // tokens are user-supplied at install time, not embedded.
     if (
       method === 'GET'
       && (pathname === '/cli/install.sh' || pathname === '/cli/latest.tgz')
@@ -459,8 +458,10 @@ export function startServer(options: ServerOptions): ServerHandle {
     // Built by `packages/server/scripts/pack-metabot.sh` into
     // `packages/server/static/install/{install.sh,latest.tgz}` and rsynced
     // to /opt/metabot-core/static/ by deploy/install.sh. Same auth model as
-    // /cli/* — anonymous behind 飞连 VPN, no embedded secrets (Feishu/Telegram
-    // credentials are prompted by install.sh at install time).
+    // /cli/* — anonymous behind 飞连 VPN. Feishu/Telegram credentials are
+    // prompted by install.sh at install time. Internal builds may optionally
+    // embed a default env file for shared TTS configuration; pack-metabot.sh
+    // only does this when METABOT_PACKAGE_DEFAULT_ENV_FILE is explicitly set.
     if (
       method === 'GET'
       && (pathname === '/install/install.sh' || pathname === '/install/latest.tgz')
