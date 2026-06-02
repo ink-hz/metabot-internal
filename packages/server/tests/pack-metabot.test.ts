@@ -149,12 +149,11 @@ describe('pack-metabot.sh', () => {
     const secretPath = path.join(tmpDir, 'default.env');
     fs.writeFileSync(secretPath, 'METABOT_VOICE_REPLY_DEFAULT_ON=true\nVOLCENGINE_TTS_APPID=test-app\n');
 
-    let listing = '';
     try {
       execSync(`METABOT_PACKAGE_DEFAULT_ENV_FILE=${JSON.stringify(secretPath)} bash ${JSON.stringify(SCRIPT)}`, {
         stdio: 'pipe',
       });
-      listing = execSync(`tar tzf ${JSON.stringify(TARBALL_PATH)}`, { encoding: 'utf-8' });
+      const listing = execSync(`tar tzf ${JSON.stringify(TARBALL_PATH)}`, { encoding: 'utf-8' });
       expect(listing).toContain('.metabot-package/default.env');
       const content = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} .metabot-package/default.env`, { encoding: 'utf-8' });
       expect(content).toContain('METABOT_VOICE_REPLY_DEFAULT_ON=true');

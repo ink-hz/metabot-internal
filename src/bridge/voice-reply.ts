@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { BotConfigBase, VoiceReplyConfig } from '../config.js';
+import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import {
   doubaoTTS,
