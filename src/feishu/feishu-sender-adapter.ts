@@ -66,6 +66,10 @@ export class FeishuSenderAdapter implements IMessageSender {
     return this.sender.sendLocalFile(chatId, filePath, fileName, feishuType);
   }
 
+  async sendAudioFile(chatId: string, filePath: string, fileName?: string): Promise<boolean> {
+    return this.sender.sendAudioFile(chatId, filePath, fileName ?? path.basename(filePath));
+  }
+
   async downloadImage(messageId: string, imageKey: string, savePath: string): Promise<boolean> {
     return this.sender.downloadImage(messageId, imageKey, savePath);
   }

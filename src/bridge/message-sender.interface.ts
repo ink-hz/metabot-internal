@@ -46,6 +46,9 @@ export interface IMessageSender {
   /** Send a local file to the chat. */
   sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean>;
 
+  /** Send a local audio file as a native voice/audio message, when supported. */
+  sendAudioFile?(chatId: string, filePath: string, fileName?: string): Promise<boolean>;
+
   /** Download a user-sent image to a local path. */
   downloadImage(messageId: string, imageKey: string, savePath: string): Promise<boolean>;
 

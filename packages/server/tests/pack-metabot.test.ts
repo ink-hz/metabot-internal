@@ -139,4 +139,27 @@ describe('pack-metabot.sh', () => {
     expect(tarListing).not.toMatch(/(^|\n)\.?\/?\.git\//);
     expect(tarListing).not.toMatch(/\.tsbuildinfo\b/);
   });
+
+  it('does not embed an internal default env unless explicitly requested', () => {
+    expect(tarListing).not.toContain('.metabot-package/default.env');
+  });
+
+  it('can embed an internal default env when the pack env var is set', () => {
+    const tmpDir = fs.mkdtempSync(path.join('/tmp', 'metabot-pack-secret-'));
+    const secretPath = path.join(tmpDir, 'default.env');
+    fs.writeFileSync(secretPath, 'METABOT_VOICE_REPLY_DEFAULT_ON=true\nVOLCENGINE_TTS_APPID=test-app\n');
+
+    try {
+      execSync(`METABOT_PACKAGE_DEFAULT_ENV_FILE=${JSON.stringify(secretPath)} bash ${JSON.stringify(SCRIPT)}`, {
+        stdio: 'pipe',
+      });
+      const listing = execSync(`tar tzf ${JSON.stringify(TARBALL_PATH)}`, { encoding: 'utf-8' });
+      expect(listing).toContain('.metabot-package/default.env');
+      const content = execSync(`tar xOf ${JSON.stringify(TARBALL_PATH)} .metabot-package/default.env`, { encoding: 'utf-8' });
+      expect(content).toContain('METABOT_VOICE_REPLY_DEFAULT_ON=true');
+      expect(content).toContain('VOLCENGINE_TTS_APPID=test-app');
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });

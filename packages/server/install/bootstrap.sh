@@ -16,7 +16,9 @@
 #      Any pre-existing `.git/` is also preserved (tarball excludes it), so
 #      developers who hand-clone can still `git pull` later if they want,
 #      but the bootstrap itself never touches a remote.
-#   4. exec install.sh with METABOT_SKIP_GIT=1 so its Phase 2 skips the
+#   4. If the internal tarball includes `.metabot-package/default.env`, copy it
+#      to `~/.metabot/default.env` with chmod 600 and remove the extracted copy.
+#   5. exec install.sh with METABOT_SKIP_GIT=1 so its Phase 2 skips the
 #      clone/pull branch entirely and proceeds straight to npm install +
 #      configuration prompts + PM2 start.
 #
@@ -142,6 +144,15 @@ info "Extracting into $METABOT_HOME"
 #   - .git/  (excluded so manual `git pull` still possible if desired)
 #   - node_modules/  (excluded; Phase 3 npm install reconciles)
 tar xzf "$TARBALL_PATH" -C "$METABOT_HOME"
+
+PACKAGE_DEFAULT_ENV="$METABOT_HOME/.metabot-package/default.env"
+if [[ -f "$PACKAGE_DEFAULT_ENV" ]]; then
+  mkdir -p "$HOME/.metabot"
+  cp "$PACKAGE_DEFAULT_ENV" "$HOME/.metabot/default.env"
+  chmod 600 "$HOME/.metabot/default.env"
+  rm -rf "$METABOT_HOME/.metabot-package"
+  success "Installed internal default env at $HOME/.metabot/default.env"
+fi
 
 if [[ ! -f "$METABOT_HOME/install.sh" ]]; then
   error "Extraction completed but install.sh is missing at $METABOT_HOME/install.sh"

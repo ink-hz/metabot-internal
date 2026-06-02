@@ -27,6 +27,7 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import { createVoiceReplyOpus, isVoiceReplyEnabled } from './voice-reply.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
@@ -198,6 +199,20 @@ interface RunningTask {
   teamState?: TeamState;
 }
 
+interface CodexBackgroundTask {
+  id: string;
+  chatId: string;
+  internalChatId: string;
+  prompt: string;
+  status: 'running' | 'completed' | 'failed' | 'stopped';
+  startedAt: number;
+  updatedAt: number;
+  responseText?: string;
+  errorMessage?: string;
+  abortController: AbortController;
+  executionHandle?: ExecutionHandle;
+}
+
 export interface ApiTaskOptions {
   prompt: string;
   chatId: string;
@@ -258,6 +273,8 @@ export class MessageBridge {
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
+  private codexBackgroundTasks = new Map<string, CodexBackgroundTask>();
+  private codexBackgroundSeq = 0;
   /**
    * Stage 2 — persistent executor pool. Lazy-created on first acquire when
    * the PERSISTENT_EXECUTOR env feature flag is on. One pool per bot.
@@ -1694,6 +1711,303 @@ export class MessageBridge {
     this.sessionManager.setGoal(chatId, rest);
   }
 
+  private async tryHandleCodexBridgeCommand(msg: IncomingMessage): Promise<boolean> {
+    const trimmed = msg.text.trim();
+    const cmd = trimmed.split(/\s+/, 1)[0]?.toLowerCase();
+    if (cmd === '/goal') {
+      await this.handleCodexGoalCommand(msg, trimmed.slice('/goal'.length).trim());
+      return true;
+    }
+    if (cmd === '/background' || cmd === '/bg') {
+      const prefix = cmd === '/bg' ? '/bg' : '/background';
+      await this.handleCodexBackgroundCommand(msg, trimmed.slice(prefix.length).trim());
+      return true;
+    }
+    return false;
+  }
+
+  private async handleCodexGoalCommand(msg: IncomingMessage, args: string): Promise<void> {
+    const { chatId } = msg;
+    const session = this.sessionManager.getSession(chatId);
+    if (!args || args.toLowerCase() === 'status') {
+      const body = session.activeGoal
+        ? [
+            `**Goal:** ${session.activeGoal}`,
+            `**Iterations:** ${session.goalIterations ?? 0}/${session.goalMaxIterations ?? 5}`,
+            '',
+            'Use `/goal clear` to stop it.',
+          ].join('\n')
+        : 'No active Codex goal. Use `/goal <description>` to start one.';
+      await this.sender.sendTextNotice(chatId, '🎯 Codex Goal', body, 'blue');
+      return;
+    }
+
+    const lowered = args.toLowerCase();
+    if (['clear', 'stop', 'off', 'reset', 'none', 'cancel'].includes(lowered)) {
+      this.sessionManager.setGoal(chatId, undefined);
+      await this.sender.sendTextNotice(chatId, '✅ Goal Cleared', 'Codex auto-drive is stopped for this chat.', 'green');
+      return;
+    }
+
+    this.sessionManager.setGoal(chatId, args);
+    await this.sender.sendTextNotice(
+      chatId,
+      '🎯 Goal Set',
+      [
+        args,
+        '',
+        `Codex will keep working across turns until it reports complete, blocked, or reaches ${this.sessionManager.getSession(chatId).goalMaxIterations ?? 5} iterations.`,
+      ].join('\n'),
+      'green',
+    );
+  }
+
+  private async handleCodexBackgroundCommand(msg: IncomingMessage, args: string): Promise<void> {
+    const { chatId } = msg;
+    const [subCmdRaw, ...rest] = args.split(/\s+/).filter(Boolean);
+    const subCmd = subCmdRaw?.toLowerCase();
+    const managementCommands = new Set(['list', 'ls', 'stop', 'cancel', 'logs', 'show']);
+
+    if (!subCmd || subCmd === 'list' || subCmd === 'ls') {
+      const tasks = [...this.codexBackgroundTasks.values()]
+        .filter((t) => t.chatId === chatId)
+        .sort((a, b) => b.startedAt - a.startedAt)
+        .slice(0, 10);
+      const body = tasks.length === 0
+        ? 'No Codex background tasks for this chat.'
+        : tasks.map((t) => {
+            const age = Math.max(0, Math.round((Date.now() - t.startedAt) / 1000));
+            return `- \`${t.id}\` ${t.status} (${age}s) — ${this.truncateLine(t.prompt, 90)}`;
+          }).join('\n');
+      await this.sender.sendTextNotice(chatId, '🧵 Codex Background', body, 'blue');
+      return;
+    }
+
+    if (!managementCommands.has(subCmd)) {
+      await this.startCodexBackgroundTask(msg, args);
+      return;
+    }
+
+    if (subCmd === 'stop' || subCmd === 'cancel') {
+      const id = rest[0];
+      const task = id ? this.codexBackgroundTasks.get(id) : undefined;
+      if (!task || task.chatId !== chatId) {
+        await this.sender.sendTextNotice(chatId, '❌ Background Task Not Found', 'Usage: `/background stop <id>`', 'red');
+        return;
+      }
+      task.status = 'stopped';
+      task.updatedAt = Date.now();
+      task.errorMessage = 'Stopped by user';
+      task.executionHandle?.finish();
+      task.abortController.abort();
+      await this.sender.sendTextNotice(chatId, '🛑 Background Task Stopped', `Stopped \`${task.id}\`.`, 'orange');
+      return;
+    }
+
+    if (subCmd === 'logs' || subCmd === 'show') {
+      const id = rest[0];
+      const task = id ? this.codexBackgroundTasks.get(id) : undefined;
+      if (!task || task.chatId !== chatId) {
+        await this.sender.sendTextNotice(chatId, '❌ Background Task Not Found', 'Usage: `/background logs <id>`', 'red');
+        return;
+      }
+      await this.sender.sendTextNotice(
+        chatId,
+        `🧵 Background ${task.id}`,
+        [
+          `**Status:** ${task.status}`,
+          `**Prompt:** ${task.prompt}`,
+          task.errorMessage ? `**Error:** ${task.errorMessage}` : '',
+          task.responseText ? `\n${this.truncateBlock(task.responseText, 3000)}` : '',
+        ].filter(Boolean).join('\n'),
+        task.status === 'failed' ? 'red' : task.status === 'running' ? 'blue' : 'green',
+      );
+      return;
+    }
+  }
+
+  private truncateLine(text: string, max: number): string {
+    const oneLine = text.replace(/\s+/g, ' ').trim();
+    return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
+  }
+
+  private truncateBlock(text: string, max: number): string {
+    return text.length <= max ? text : text.slice(0, max - 20) + '\n\n...(truncated)';
+  }
+
+  private buildCodexGoalPrompt(prompt: string, goal: string, iteration: number, maxIterations: number): string {
+    return [
+      '<metabot-codex-goal>',
+      `Active goal: ${goal}`,
+      `Iteration: ${iteration}/${maxIterations}`,
+      'Work autonomously toward the goal. At the end of your final response, include exactly one status line:',
+      'GOAL_STATUS: complete | continue | blocked',
+      'Use complete only when the goal is genuinely satisfied, continue when the next autonomous turn should proceed, and blocked when user input or external state is required.',
+      '</metabot-codex-goal>',
+      '',
+      prompt,
+    ].join('\n');
+  }
+
+  private parseCodexGoalStatus(text: string | undefined): 'complete' | 'continue' | 'blocked' | undefined {
+    const match = (text ?? '').match(/GOAL_STATUS:\s*(complete|continue|blocked)/i);
+    return match?.[1]?.toLowerCase() as 'complete' | 'continue' | 'blocked' | undefined;
+  }
+
+  private maybeScheduleCodexGoalContinuation(
+    original: IncomingMessage,
+    lastState: CardState,
+    engineName: EngineName,
+    iteration: number,
+    maxIterations: number,
+  ): void {
+    if (engineName !== 'codex') return;
+    const session = this.sessionManager.getSession(original.chatId);
+    const goal = session.activeGoal;
+    if (!goal || lastState.status !== 'complete') return;
+
+    const status = this.parseCodexGoalStatus(lastState.responseText) ?? 'continue';
+    if (status === 'complete') {
+      this.sessionManager.setGoal(original.chatId, undefined);
+      void this.sender.sendTextNotice(original.chatId, '✅ Goal Complete', goal, 'green');
+      return;
+    }
+    if (status === 'blocked') {
+      void this.sender.sendTextNotice(
+        original.chatId,
+        '⏸️ Goal Blocked',
+        `Codex reported the goal is blocked and needs input.\n\n**Goal:** ${goal}`,
+        'orange',
+      );
+      return;
+    }
+    if (iteration >= maxIterations) {
+      void this.sender.sendTextNotice(
+        original.chatId,
+        '⏸️ Goal Paused',
+        `Reached the Codex goal safety cap (${maxIterations} iterations). Use \`/goal status\` or send a normal message to continue manually.`,
+        'orange',
+      );
+      return;
+    }
+    if (this.runningTasks.has(original.chatId) || this.messageQueues.has(original.chatId)) return;
+
+    const next: IncomingMessage = {
+      ...original,
+      messageId: `${original.messageId || 'goal'}-goal-${iteration + 1}`,
+      text: `Continue working toward the active goal: ${goal}`,
+      timestamp: Date.now(),
+    };
+    setTimeout(() => {
+      this.executeQuery(next).catch((err) => {
+        this.logger.error({ err, chatId: original.chatId }, 'Codex goal continuation failed');
+      });
+    }, 1000);
+  }
+
+  private async startCodexBackgroundTask(msg: IncomingMessage, prompt: string): Promise<void> {
+    const { chatId, userId } = msg;
+    const id = `bg-${Date.now().toString(36)}-${++this.codexBackgroundSeq}`;
+    const internalChatId = `${chatId}::codex-bg::${id}`;
+    const abortController = new AbortController();
+    const task: CodexBackgroundTask = {
+      id,
+      chatId,
+      internalChatId,
+      prompt,
+      status: 'running',
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      abortController,
+    };
+    this.codexBackgroundTasks.set(id, task);
+    await this.sender.sendTextNotice(
+      chatId,
+      '🧵 Background Started',
+      `Started \`${id}\`.\nUse \`/background list\`, \`/background logs ${id}\`, or \`/background stop ${id}\`.`,
+      'blue',
+    );
+
+    void this.runCodexBackgroundTask(task, userId).catch((err) => {
+      this.logger.error({ err, chatId, taskId: id }, 'Codex background task crashed');
+    });
+  }
+
+  private async runCodexBackgroundTask(task: CodexBackgroundTask, userId: string): Promise<void> {
+    const baseSession = this.sessionManager.getSession(task.chatId);
+    const bgSession = this.sessionManager.getSession(task.internalChatId);
+    bgSession.engine = 'codex';
+    bgSession.workingDirectory = baseSession.workingDirectory;
+    bgSession.model = baseSession.model;
+    bgSession.modelEngine = baseSession.modelEngine;
+
+    const cwd = bgSession.workingDirectory;
+    const outputsDir = this.outputsManager.prepareDir(task.internalChatId);
+    const processor = new StreamProcessor(task.prompt);
+    const apiContext = { botName: this.config.name, chatId: task.chatId };
+    const activeGoal = baseSession.activeGoal;
+    const prompt = activeGoal
+      ? this.buildCodexGoalPrompt(task.prompt, activeGoal, baseSession.goalIterations ?? 0, baseSession.goalMaxIterations ?? 5)
+      : task.prompt;
+    let lastState: CardState = {
+      status: 'thinking',
+      userPrompt: task.prompt,
+      responseText: '',
+      toolCalls: [],
+      goalCondition: activeGoal,
+    };
+
+    const handle = await this.runOneTurn(task.internalChatId, 'codex', {
+      prompt,
+      cwd,
+      abortController: task.abortController,
+      outputsDir,
+      apiContext,
+      model: bgSession.model,
+    });
+    task.executionHandle = handle;
+
+    try {
+      for await (const message of handle.stream) {
+        if (task.abortController.signal.aborted) break;
+        lastState = processor.processMessage(message);
+        if (activeGoal) lastState.goalCondition = activeGoal;
+        const sid = processor.getSessionId();
+        if (sid) this.sessionManager.setSessionId(task.internalChatId, sid, 'codex');
+        if (lastState.status === 'complete' || lastState.status === 'error') break;
+      }
+      if (task.status === 'stopped') return;
+      if (lastState.status !== 'complete' && lastState.status !== 'error') {
+        lastState = {
+          ...lastState,
+          status: lastState.responseText ? 'complete' : 'error',
+          errorMessage: lastState.responseText ? undefined : 'Codex background task ended unexpectedly',
+        };
+      }
+      task.status = lastState.status === 'complete' ? 'completed' : 'failed';
+      task.responseText = lastState.responseText;
+      task.errorMessage = lastState.errorMessage;
+      task.updatedAt = Date.now();
+      await this.sender.sendCard(task.chatId, {
+        ...lastState,
+        userPrompt: `[Background ${task.id}] ${task.prompt}`,
+      });
+      await this.outputHandler.sendOutputFiles(task.chatId, outputsDir, processor, lastState);
+      this.audit.log({
+        event: task.status === 'completed' ? 'task_complete' : 'task_error',
+        botName: this.config.name,
+        chatId: task.chatId,
+        userId,
+        prompt: task.prompt,
+        error: task.errorMessage,
+        meta: { backgroundTaskId: task.id, engine: 'codex' },
+      });
+    } finally {
+      try { handle.finish(); } catch { /* ignore */ }
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
+  }
+
   private processQueue(chatId: string): void {
     const queue = this.messageQueues.get(chatId);
     if (!queue || queue.length === 0) {
@@ -1772,6 +2086,9 @@ export class MessageBridge {
       // selectable Feishu picker card instead of passing the argless command
       // through to the TUI (which would just open an autocomplete menu).
       if (await this.tryHandleSlashPicker(msg)) return;
+
+      const activeEngine = this.sessionManager.getSession(chatId).engine ?? resolveEngineName(this.config);
+      if (activeEngine === 'codex' && await this.tryHandleCodexBridgeCommand(msg)) return;
 
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
@@ -2294,6 +2611,14 @@ export class MessageBridge {
       this.logger.info({ chatId, secondsAgo: secs }, 'injected post-restart reminder into first turn');
     }
 
+    let codexGoalIteration = 0;
+    let codexGoalMaxIterations = 0;
+    if (engineName === 'codex' && activeGoal) {
+      codexGoalIteration = this.sessionManager.incrementGoalIteration(chatId);
+      codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? 5;
+      prompt = this.buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
+    }
+
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries
     // properly release the bound executor before reacquiring.
@@ -2627,6 +2952,13 @@ export class MessageBridge {
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+      this.maybeScheduleCodexGoalContinuation(
+        msg,
+        lastState,
+        engineName,
+        codexGoalIteration,
+        codexGoalMaxIterations,
+      );
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'Claude execution error');
 
@@ -3137,7 +3469,10 @@ export class MessageBridge {
     }
     for (let attempt = 0; attempt < FINAL_CARD_RETRIES; attempt++) {
       const ok = await this.sender.updateCard(messageId, state);
-      if (ok) return;
+      if (ok) {
+        void this.sendVoiceReplyIfEnabled(chatId, state);
+        return;
+      }
       const delay = FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt);
       this.logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
       await new Promise((r) => setTimeout(r, delay));
@@ -3151,6 +3486,23 @@ export class MessageBridge {
       try {
         await this.sender.sendText(chatId, `${statusEmoji} ${summary}`);
       } catch { /* last resort failed */ }
+    }
+  }
+
+  private async sendVoiceReplyIfEnabled(chatId: string | undefined, state: CardState): Promise<void> {
+    if (!chatId || state.status !== 'complete' || !state.responseText.trim() || !this.sender.sendAudioFile) return;
+
+    const audio = await createVoiceReplyOpus(this.config, state.responseText, this.logger);
+    if (!audio) return;
+    try {
+      const sent = await this.sender.sendAudioFile(chatId, audio.filePath, audio.fileName);
+      if (!sent) {
+        this.logger.warn({ chatId }, 'Voice reply audio send failed');
+      }
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'Unhandled error while sending voice reply');
+    } finally {
+      await audio.cleanup().catch(() => {});
     }
   }
 
@@ -3224,6 +3576,7 @@ export class MessageBridge {
    */
   private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
     if (this.sender.skipCompletionNotice) return;
+    if (state.status === 'complete' && isVoiceReplyEnabled(this.config)) return;
     if (durationMs < 10_000) return;
 
     const statusEmoji = state.status === 'complete' ? '✅' : '❌';
@@ -3277,10 +3630,13 @@ export function normalizePromptForEngine(text: string, engine: EngineName): stri
   if (engine !== 'codex') return text;
   const match = text.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)([\s\S]*)$/);
   if (!match) return text;
+  if (CODEX_BRIDGE_COMMANDS.has(match[1].toLowerCase())) return text;
   const suffix = match[2] ?? '';
   if (suffix && !/^\s/.test(suffix)) return text;
   return `$${match[1]}${suffix}`;
 }
+
+const CODEX_BRIDGE_COMMANDS = new Set(['goal', 'background', 'bg']);
 
 export function isContextOverflowError(errorMessage?: string): boolean {
   if (!errorMessage) return false;

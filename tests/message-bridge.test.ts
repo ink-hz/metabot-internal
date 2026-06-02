@@ -38,6 +38,16 @@ function makeConfig(): BotConfigBase {
   };
 }
 
+function makeCodexConfig(): BotConfigBase {
+  return {
+    ...makeConfig(),
+    engine: 'codex',
+    codex: {
+      model: 'gpt-5.5-codex',
+    },
+  } as BotConfigBase;
+}
+
 function makeSender() {
   const sent: Array<{ chatId: string; state: CardState }> = [];
   const updated: Array<{ messageId: string; state: CardState }> = [];
@@ -113,6 +123,12 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/skill-name', 'codex')).toBe('$skill-name');
   });
 
+  it('leaves Codex bridge-managed slash commands untouched', () => {
+    expect(normalizePromptForEngine('/goal ship it', 'codex')).toBe('/goal ship it');
+    expect(normalizePromptForEngine('/background run tests', 'codex')).toBe('/background run tests');
+    expect(normalizePromptForEngine('/bg run tests', 'codex')).toBe('/bg run tests');
+  });
+
   it('leaves non-Codex and non-skill prompts unchanged', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'claude')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
@@ -122,6 +138,48 @@ describe('normalizePromptForEngine', () => {
 });
 
 describe('MessageBridge between-turn questions', () => {
+  it('handles Codex /goal in the bridge instead of sending it to Codex', async () => {
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const bridge = new MessageBridge(makeCodexConfig(), mockLogger, sender as any);
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/goal ship Codex support',
+    });
+
+    expect(notices.at(-1)?.title).toContain('Goal Set');
+    expect(notices.at(-1)?.content).toContain('ship Codex support');
+    expect(bridge.getSessionManager().getSession('chat-1').activeGoal).toBe('ship Codex support');
+  });
+
+  it('handles Codex /background list without starting a model turn', async () => {
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const bridge = new MessageBridge(makeCodexConfig(), mockLogger, sender as any);
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/background list',
+    });
+
+    expect(notices.at(-1)?.title).toContain('Background');
+    expect(notices.at(-1)?.content).toContain('No Codex background tasks');
+    expect(sender.sent).toHaveLength(0);
+  });
+
   it('treats a bare reset message as /reset instead of queueing it', async () => {
     const sender = makeSender();
     const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;

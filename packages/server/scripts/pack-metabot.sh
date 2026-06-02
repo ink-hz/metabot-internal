@@ -18,6 +18,13 @@
 #   - .git, .github, .codex
 #   - .env, bots.json, logs/, data/   (never committed — naturally absent)
 #
+# Optional internal defaults:
+#   - If METABOT_PACKAGE_DEFAULT_ENV_FILE (or METABOT_INTERNAL_DEFAULT_ENV_FILE)
+#     points to a local env file at pack time, it is embedded as
+#     .metabot-package/default.env. The bootstrap installer copies it to
+#     ~/.metabot/default.env with chmod 600, then removes the extracted copy.
+#     Do not store that source file in git.
+#
 # Implementation note: we drive tar directly (no rsync staging) so CI runners
 # without rsync still work. `tar --exclude` patterns recurse into every named
 # include path, giving the same effect as rsync staging.
@@ -32,6 +39,7 @@ SERVER_PKG_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$SERVER_PKG_DIR/../.." && pwd)"
 SERVER_STATIC_DIR="$SERVER_PKG_DIR/static/install"
 BOOTSTRAP_SRC="$SERVER_PKG_DIR/install/bootstrap.sh"
+PACKAGE_DEFAULT_ENV_FILE="${METABOT_PACKAGE_DEFAULT_ENV_FILE:-${METABOT_INTERNAL_DEFAULT_ENV_FILE:-}}"
 
 TARBALL_NAME="latest.tgz"
 BOOTSTRAP_NAME="install.sh"
@@ -99,6 +107,28 @@ done
 
 mkdir -p "$SERVER_STATIC_DIR"
 
+EXTRA_TAR_ARGS=()
+TMP_EXTRA_DIR=""
+cleanup() {
+  if [[ -n "$TMP_EXTRA_DIR" ]]; then
+    rm -rf "$TMP_EXTRA_DIR"
+  fi
+}
+trap cleanup EXIT
+
+if [[ -n "$PACKAGE_DEFAULT_ENV_FILE" ]]; then
+  if [[ ! -f "$PACKAGE_DEFAULT_ENV_FILE" ]]; then
+    echo "error: METABOT_PACKAGE_DEFAULT_ENV_FILE does not exist: $PACKAGE_DEFAULT_ENV_FILE" >&2
+    exit 1
+  fi
+  TMP_EXTRA_DIR="$(mktemp -d -t metabot-pack-extra.XXXXXX)"
+  mkdir -p "$TMP_EXTRA_DIR/.metabot-package"
+  cp "$PACKAGE_DEFAULT_ENV_FILE" "$TMP_EXTRA_DIR/.metabot-package/default.env"
+  chmod 600 "$TMP_EXTRA_DIR/.metabot-package/default.env"
+  EXTRA_TAR_ARGS=(-C "$TMP_EXTRA_DIR" '.metabot-package/default.env')
+  echo "==> Embedding internal default env from $PACKAGE_DEFAULT_ENV_FILE"
+fi
+
 echo "==> Writing $SERVER_STATIC_DIR/$TARBALL_NAME (atomic)"
 # Sort+mtime flags produce a deterministic tarball — easier diffs across
 # builds and avoids spurious rsync churn on the deploy host. -C anchors all
@@ -109,7 +139,8 @@ tar --sort=name \
     "${TAR_EXCLUDES[@]}" \
     -czf "$SERVER_STATIC_DIR/$TARBALL_NAME.new" \
     -C "$REPO_ROOT" \
-    "${PRESENT_INCLUDES[@]}"
+    "${PRESENT_INCLUDES[@]}" \
+    "${EXTRA_TAR_ARGS[@]}"
 
 # Post-pack sanity: confirm SKILL_SENTINEL actually landed in the tarball.
 # Catches cases where an --exclude pattern accidentally swallowed it.

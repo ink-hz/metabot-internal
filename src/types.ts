@@ -98,6 +98,7 @@ export interface IncomingMessage {
   chatType: string;
   userId: string;
   text: string;
+  timestamp?: number;
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
