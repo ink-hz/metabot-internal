@@ -18,7 +18,8 @@ Installed automatically by the MetaBot installer to `~/.local/bin/metabot`.
 ## 1. Bridge process control
 
 ```bash
-metabot update                      # pull latest code, rebuild, update skills, restart
+metabot update                      # refresh from internal package, rebuild, update skills, restart
+metabot update --git                # developer-only: git pull + rebuild + restart
 metabot start                       # start with PM2
 metabot stop                        # stop
 metabot restart                     # restart
@@ -28,14 +29,15 @@ metabot status                      # PM2 process status
 
 `metabot update` is the recommended way to update MetaBot. It performs:
 
-1. `git pull` — fetch latest code
-2. `npm install && npm run build` — rebuild
-3. Copy bundled MetaBot skills into Claude/Codex skill directories
-4. If `lark-cli` or lark skills are already installed, update `@larksuite/cli` and refresh the lark AI Agent skills
-5. Sync skills into the configured bot workspace
-6. `pm2 restart` — restart the service
+1. Download the current internal package from `METABOT_CORE_URL/install/latest.tgz`
+2. Overlay code files into `METABOT_HOME`, preserving `.env`, `bots.json`, `logs/`, `data/`, and `.git/`
+3. `npm install && npm run build` — rebuild
+4. Copy bundled MetaBot skills into Claude/Codex skill directories
+5. If `lark-cli` or lark skills are already installed, update `@larksuite/cli` and refresh the lark AI Agent skills
+6. Sync skills into the configured bot workspace
+7. `pm2 restart` — restart the service
 
-All in one command.
+All in one command. Source checkouts can still use `metabot update --git`, but that is a developer-only path and requires a clean Git remote.
 
 ## 2. Bridge daemon API
 
