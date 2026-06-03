@@ -4,7 +4,7 @@
 
 ```bash
 metabot start                       # start with PM2
-metabot update                      # pull + rebuild + update skills + restart
+metabot update                      # package refresh + rebuild + update skills + restart
 ```
 
 ## PM2 Auto-Start

@@ -18,13 +18,15 @@
 
 ## 更新
 
-已安装？一条命令拉取、构建、更新 skills、重启：
+已安装？一条命令下载最新内网安装包、构建、更新 skills、重启：
 
 ```bash
 metabot update
 ```
 
 如果本机已经安装过 `lark-cli` 或飞书/Lark skills，`metabot update` 也会自动更新它们并同步到 bot 工作目录。
+
+开发者源码 checkout 可以显式使用 `metabot update --git` 走 Git 更新。普通 bot 主机建议使用默认 package refresh，不再依赖 GitLab/GitHub 权限。
 
 ## 手动安装
 

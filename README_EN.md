@@ -505,7 +505,8 @@ The installer places `metabot` in `~/.local/bin/` — available immediately. `me
 
 ```bash
 # 1. MetaBot process management (handled in-script by bin/metabot)
-metabot update                      # pull latest, rebuild, restart
+metabot update                      # internal package refresh, rebuild, restart
+metabot update --git                # developer-only: git pull + rebuild + restart
 metabot start / stop / restart      # PM2 management
 metabot logs                        # view live logs
 metabot status                      # PM2 process status

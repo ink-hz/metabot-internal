@@ -52,18 +52,46 @@ _load_bridge_api_config() {
 _json() { python3 -m json.tool 2>/dev/null || cat; }
 
 cmd_update() {
-  if [[ ! -d "$METABOT_HOME/.git" ]]; then
-    # Tarball-mode install (no remote to git-pull from): re-run the
-    # metabot-core bootstrap, which re-downloads latest.tgz and delegates
-    # back to install.sh. The bootstrap preserves .env / bots.json / logs.
-    if [[ -f "$METABOT_HOME/install.sh" ]]; then
+  local update_source="${METABOT_UPDATE_SOURCE:-package}"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --git)
+        update_source="git"
+        shift
+        ;;
+      --package|--tarball)
+        update_source="package"
+        shift
+        ;;
+      *)
+        error "Unknown update option: $1"
+        echo "  Usage: metabot update [--package|--git]"
+        exit 1
+        ;;
+    esac
+  done
+
+  if [[ "$update_source" != "git" ]]; then
+    # Company-default refresh path: re-run the metabot-core bootstrap, which
+    # downloads /install/latest.tgz and overlays the bot-host runtime. This is
+    # intentionally used even when .git exists, so GitHub/GitLab credentials are
+    # not part of the normal user update story. Developers can opt into the old
+    # source checkout workflow with `metabot update --git`.
+    if [[ -f "$METABOT_HOME/install.sh" || -d "$METABOT_HOME" ]]; then
       local core_url="${METABOT_CORE_URL:-https://metabot-core.xvirobotics.com}"
-      info "Tarball install detected at $METABOT_HOME — re-running bootstrap from $core_url"
-      exec bash -c "curl -fsSL '$core_url/install/install.sh' | METABOT_HOME='$METABOT_HOME' bash"
+      info "Refreshing MetaBot from internal package at $core_url/install/latest.tgz"
+      exec bash -c 'curl -fsSL "$1/install/install.sh" | METABOT_HOME="$2" bash' bash "$core_url" "$METABOT_HOME"
     fi
     error "MetaBot not found at $METABOT_HOME"
     echo "  Run the installer first:"
     echo "    curl -fsSL https://metabot-core.xvirobotics.com/install/install.sh | bash"
+    exit 1
+  fi
+
+  if [[ ! -d "$METABOT_HOME/.git" ]]; then
+    error "Git update requested, but $METABOT_HOME is not a git checkout."
+    echo "  Use the default package refresh instead:"
+    echo "    metabot update"
     exit 1
   fi
 
@@ -72,7 +100,7 @@ cmd_update() {
   # overwritten mid-execution when we copy CLI tools later.
   if [[ -z "${METABOT_REEXEC:-}" ]] && [[ -f "$METABOT_HOME/bin/metabot" ]]; then
     export METABOT_REEXEC=1
-    exec "$METABOT_HOME/bin/metabot" update
+    exec "$METABOT_HOME/bin/metabot" update --git
   fi
 
   info "Pulling latest code..."
@@ -84,7 +112,7 @@ cmd_update() {
   # Re-exec if git pull updated this script (the repo copy we're running from)
   if ! git diff --quiet "$old_head" HEAD -- bin/metabot 2>/dev/null; then
     info "metabot CLI updated, re-launching with new version..."
-    exec "$METABOT_HOME/bin/metabot" update
+    exec "$METABOT_HOME/bin/metabot" update --git
   fi
 
   info "Installing dependencies..."
@@ -696,7 +724,8 @@ print_help() {
   echo -e "${BOLD}metabot${NC} - MetaBot CLI"
   echo ""
   echo "  Process control:"
-  echo "    metabot update     Pull latest, rebuild, and restart"
+  echo "    metabot update        Refresh from internal package, rebuild, and restart"
+  echo "    metabot update --git  Developer-only: git pull, rebuild, and restart"
   echo "    metabot start      Start MetaBot with PM2"
   echo "    metabot stop       Stop MetaBot"
   echo "    metabot restart    Restart MetaBot"
@@ -719,7 +748,7 @@ print_help() {
 }
 
 case "${1:-}" in
-  update|up)    cmd_update ;;
+  update|up)    shift; cmd_update "$@" ;;
   start)        cmd_start ;;
   stop)         cmd_stop ;;
   restart|rs)   cmd_restart ;;

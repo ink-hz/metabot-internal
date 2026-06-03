@@ -29,8 +29,8 @@
 # nobody silently runs stale code, nobody needs SSH keys.
 #
 # Refresh model: same as /cli/latest.tgz — always-latest, pinned by atomic
-# publish. Re-run the one-liner to refresh; `metabot update` on tarball
-# installs reroutes back here.
+# publish. Re-run the one-liner to refresh; regular `metabot update` reroutes
+# back here even if the target directory still has a preserved `.git/`.
 #
 set -euo pipefail
 
