@@ -60,3 +60,14 @@ describe('metabot update source selection', () => {
     expect(source).toContain('exec "$METABOT_HOME/bin/metabot" update --git');
   });
 });
+
+describe('metabot doctor command', () => {
+  it('is exposed as an agent-native diagnostic command', () => {
+    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
+    expect(source).toContain('cmd_doctor()');
+    expect(source).toContain('Usage: metabot doctor [--json]');
+    expect(source).toContain('metabot doctor     Agent-readable runtime diagnostics (--json)');
+    expect(source).toContain('doctor)       shift; cmd_doctor "$@" ;;');
+    expect(source).toContain('"schemaVersion": 1');
+  });
+});
