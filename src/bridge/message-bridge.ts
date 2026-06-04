@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
@@ -27,7 +26,27 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
-import { createVoiceReplyOpus, isVoiceReplyEnabled } from './voice-reply.js';
+import {
+  BATCH_DEBOUNCE_MS,
+  IDLE_TIMEOUT_MS,
+  IDLE_TIMEOUT_MESSAGE,
+  MAX_QUEUE_SIZE,
+  SPONTANEOUS_COALESCE_MS,
+  TASK_TIMEOUT_MESSAGE,
+} from './bridge-constants.js';
+import { CodexCommandController } from './codex-command-controller.js';
+import { buildCodexGoalPrompt } from './codex-goal-policy.js';
+import { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
+import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
+import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
+import { sendCompletionNotice } from './notification-policy.js';
+import { normalizePromptForEngine } from './prompt-normalizer.js';
+import { SlashPickerController } from './slash-picker-controller.js';
+import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
+
+export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
+export { normalizePromptForEngine } from './prompt-normalizer.js';
+export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
@@ -44,133 +63,6 @@ const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
 export function resolvePersistentExecutorEnvDefault(envVal: string | undefined): boolean {
   if (envVal === 'false' || envVal === '0') return false;
   return true;
-}
-const MAX_QUEUE_SIZE = 5; // max queued messages per chat
-const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
-// If a turn produces NO stream output for this long, warn the user once (the
-// upstream API / TeamClaude proxy occasionally stalls a streaming response with
-// no error). We don't abort — a legit long turn can be silent — just surface a
-// "/stop and retry" hint so the chat doesn't look silently frozen for an hour.
-const STALL_WARN_MS = 90 * 1000;
-/**
- * Stage 3 — coalesce window for spontaneous Feishu cards. When teammates
- * (or /goal evaluators, or background tasks) emit messages while no user
- * turn is active, we batch them into a single card every COALESCE_MS to
- * avoid spamming the chat.
- */
-const SPONTANEOUS_COALESCE_MS = 30 * 1000;
-/**
- * Per-snippet character cap. One runaway block (e.g. a giant code dump from
- * an autonomous teammate) shouldn't eat the whole card budget by itself, but
- * 400 was so tight it cut off ordinary multi-paragraph replies mid-sentence —
- * which was the main "agent activity 显示不全" complaint. 4000 covers almost
- * every real-world assistant text block while still bounding worst case.
- */
-const SPONTANEOUS_SNIPPET_MAX_CHARS = 4000;
-/**
- * Total body cap for the coalesced agent-activity card body. Sits well below
- * card-builder-v2's 28000-char hard limit so we leave room for header rows
- * and the team-state panel without triggering the middle-truncation safety
- * net (which produces an ugly `... (content truncated) ...` marker).
- */
-const SPONTANEOUS_BODY_MAX_CHARS = 12000;
-const FINAL_CARD_RETRIES = 3;
-const FINAL_CARD_BASE_DELAY_MS = 2000;
-const TASK_TIMEOUT_MESSAGE = 'Task timed out (24 hour limit)';
-const IDLE_TIMEOUT_MESSAGE = 'Task aborted: no activity for 1 hour';
-const BATCH_DEBOUNCE_MS = 2000; // 2s window to collect multiple images/files
-const DEFAULT_IMAGE_TEXT = '请分析这张图片';
-const DEFAULT_FILE_TEXT = '请分析这个文件';
-
-/**
- * Extract a one-line summary from an SDK stream message for the spontaneous
- * activity card. Returns null if the message has nothing user-readable.
- *
- * Intentionally only handles `assistant` *text* blocks — same UX bet we made
- * for the main card in PR #268: the user only cares about the agent's
- * conclusion, not the per-tool play-by-play. `🔧 <ToolName>` lines used to
- * be included for tool_use blocks but that's the exact intermediate noise
- * we just hid from the live card; surfacing it on the spontaneous card
- * would just re-introduce the same complaint between turns.
- *
- * Result-type messages are also ignored — SDK's `result.result` is a
- * verbatim echo of the last assistant text block, so including them caused
- * the same content to show up twice in the card.
- */
-export function extractSpontaneousSnippet(msg: unknown): string | null {
-  const m = msg as { type?: string; message?: { content?: Array<{ type?: string; text?: string; name?: string }> } };
-  if (m?.type !== 'assistant' || !m.message?.content) return null;
-  for (const blk of m.message.content) {
-    if (blk.type === 'text' && blk.text) {
-      const trimmed = String(blk.text).trim();
-      if (!trimmed) continue;
-      if (trimmed.length <= SPONTANEOUS_SNIPPET_MAX_CHARS) return trimmed;
-      // Soft cap with an ellipsis marker. The total-body cap in
-      // formatSpontaneousCardBody enforces the card-level budget — this
-      // per-snippet cap only guards against one runaway block eating the
-      // whole card.
-      return trimmed.slice(0, SPONTANEOUS_SNIPPET_MAX_CHARS) + '…';
-    }
-    // tool_use blocks intentionally fall through — see docstring above.
-  }
-  return null;
-}
-
-/**
- * Build the markdown body of a spontaneous activity card from collected
- * snippets. Renders ALL snippets in chronological order, separated by a
- * horizontal rule so the reader can tell discrete bursts apart.
- *
- * Earlier versions showed ONLY the latest snippet (the "agent's conclusion"
- * — same UX bet as the main card's single-line tool indicator from PR #268),
- * but that turned out to drop most of the useful content: teammate pings,
- * /loop iterations, and cron tasks each emit their own snippet and the user
- * needs to see all of them, not just the final one. The "经常显示不全" bug.
- *
- * Total length is capped at SPONTANEOUS_BODY_MAX_CHARS; if the burst would
- * exceed that we keep the most recent snippets (latest are most relevant)
- * and prepend a one-line "N earlier events omitted" notice. The card
- * builder's own 28000-char safety net still applies as a last resort.
- *
- * No header line in the body — earlier versions prepended an italic
- * "Agent activity between turns (…)" caption, but users found it long
- * and visually noisy. The card itself is rendered with the
- * `agent_activity` status (blue header, "Agent activity" title), which
- * is enough to tell it apart from a regular "complete" reply card.
- * Don't re-add a body header without verifying the card-header signal
- * is no longer sufficient.
- */
-export function formatSpontaneousCardBody(snippets: string[]): string {
-  if (snippets.length === 0) return '';
-  if (snippets.length === 1) return snippets[0];
-
-  const sep = '\n\n---\n\n';
-  // Walk newest → oldest, keeping snippets until the next one would push us
-  // over the body budget. Anything older is summarized in a single header.
-  const kept: string[] = [];
-  let total = 0;
-  let droppedCount = 0;
-  for (let i = snippets.length - 1; i >= 0; i--) {
-    const next = snippets[i];
-    const cost = next.length + (kept.length > 0 ? sep.length : 0);
-    if (total + cost > SPONTANEOUS_BODY_MAX_CHARS) {
-      droppedCount = i + 1;
-      break;
-    }
-    kept.unshift(next);
-    total += cost;
-  }
-  const body = kept.join(sep);
-  if (droppedCount > 0) {
-    const noun = droppedCount === 1 ? 'event' : 'events';
-    return `_(${droppedCount} earlier ${noun} omitted; ${kept.length} shown)_\n\n` + body;
-  }
-  return body;
-}
-
-interface PendingBatch {
-  messages: IncomingMessage[];
-  timerId: ReturnType<typeof setTimeout>;
 }
 
 interface RunningTask {
@@ -197,20 +89,6 @@ interface RunningTask {
   chatId: string;
   /** Live snapshot of the active Agent Team, accumulated from team hooks. */
   teamState?: TeamState;
-}
-
-interface CodexBackgroundTask {
-  id: string;
-  chatId: string;
-  internalChatId: string;
-  prompt: string;
-  status: 'running' | 'completed' | 'failed' | 'stopped';
-  startedAt: number;
-  updatedAt: number;
-  responseText?: string;
-  errorMessage?: string;
-  abortController: AbortController;
-  executionHandle?: ExecutionHandle;
 }
 
 export interface ApiTaskOptions {
@@ -267,14 +145,14 @@ export class MessageBridge {
   private outputsManager: OutputsManager;
   private audit: AuditLogger;
   private commandHandler: CommandHandler;
+  private codexCommands: CodexCommandController;
+  private slashPickers: SlashPickerController;
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
   private runningTasks = new Map<string, RunningTask>(); // keyed by chatId
   private messageQueues = new Map<string, IncomingMessage[]>(); // per-chatId message queue
   private pendingBatches = new Map<string, PendingBatch>(); // media debounce batches
-  private codexBackgroundTasks = new Map<string, CodexBackgroundTask>();
-  private codexBackgroundSeq = 0;
   /**
    * Stage 2 — persistent executor pool. Lazy-created on first acquire when
    * the PERSISTENT_EXECUTOR env feature flag is on. One pool per bot.
@@ -330,17 +208,6 @@ export class MessageBridge {
     timeoutId?: ReturnType<typeof setTimeout>;
   }>();
   /**
-   * Pending client-side slash-command picker (e.g. bare `/effort`). Unlike a
-   * between-turn AskUserQuestion, this does NOT resolve a hook — on reply we
-   * re-inject `<command> <choice>` as a fresh prompt so the interactive
-   * `claude` runs the client-side slash command. Single slot per chatId.
-   */
-  private pendingSlashPickers = new Map<string, {
-    command: string;
-    options: string[];
-    cardMessageId: string;
-  }>();
-  /**
    * Chats whose ExitPlanMode plan body we've already shown as a "📋 Plan" card
    * from the approval flow. Keyed by chatId (NOT tool_use id): the screen
    * watcher surfaces the card with a synthesized id before the real
@@ -379,6 +246,33 @@ export class MessageBridge {
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
+    this.codexCommands = new CodexCommandController({
+      config,
+      logger,
+      sender,
+      sessionManager: this.sessionManager,
+      outputsManager: this.outputsManager,
+      outputHandler: this.outputHandler,
+      audit: this.audit,
+      runOneTurn: this.runOneTurn.bind(this),
+      executeQuery: this.executeQuery.bind(this),
+      hasRunningTask: (chatId) => this.runningTasks.has(chatId),
+      hasQueuedMessages: (chatId) => this.messageQueues.has(chatId),
+    });
+    this.slashPickers = new SlashPickerController({
+      config,
+      logger,
+      sender,
+      sessionManager: this.sessionManager,
+      outputsManager: this.outputsManager,
+      listSessionsForChat: this.listSessionsForChat.bind(this),
+      applyResume: this.applyResume.bind(this),
+      finalizeQuestionCard: this.finalizeBetweenTurnQuestionCard.bind(this),
+      handleMessage: this.handleMessage.bind(this),
+      isBusy: (chatId) => this.runningTasks.has(chatId) || this.continuationTasks.has(chatId),
+      prepareSessionForExecution: this.prepareSessionForExecution.bind(this),
+      runOneTurn: this.runOneTurn.bind(this),
+    });
   }
 
   /** Emit an activity event if a listener is registered. */
@@ -924,303 +818,6 @@ export class MessageBridge {
   }
 
   /**
-   * Registry of bare client-side slash commands we surface as a picker card.
-   * Each maps to the selectable argument values. Only meaningful for the
-   * interactive `claude` backend (client-side slash commands aren't a SDK
-   * concept), but harmless elsewhere — the chosen `<command> <value>` simply
-   * passes through to the agent like any other unrecognized slash command.
-   */
-  private static readonly SLASH_PICKERS: Record<string, { question: string; header: string; options: Array<{ label: string; description: string }> }> = {
-    '/effort': {
-      question: 'Set the reasoning effort level',
-      header: 'Effort',
-      options: [
-        { label: 'max', description: 'Absolute highest capability — no token limit, slowest' },
-        { label: 'xhigh', description: 'Extended exploration for deep agentic/coding work' },
-        { label: 'high', description: 'Complex reasoning — quality over speed/cost' },
-        { label: 'medium', description: 'Balanced speed, cost & performance (default)' },
-        { label: 'low', description: 'Fastest — high-volume / latency-sensitive work' },
-      ],
-    },
-  };
-
-  /**
-   * If `msg` is a bare slash command we know how to present as a picker (e.g.
-   * `/effort` with no argument), send a numbered question card and remember it.
-   * Returns true if consumed. The actual command runs once the user replies
-   * (see {@link tryHandleSlashPickerReply}).
-   */
-  private async tryHandleSlashPicker(msg: IncomingMessage): Promise<boolean> {
-    const { chatId, text } = msg;
-    const parts = text.trim().split(/\s+/);
-    // Only intercept when there's NO argument — `/effort high` should still
-    // pass straight through to the agent.
-    if (parts.length !== 1) return false;
-    const cmd = parts[0].toLowerCase();
-    // `/resume` builds its options dynamically from the on-disk sessions, so
-    // it can't live in the static SLASH_PICKERS table. Handle it first.
-    if (cmd === '/resume') return this.openResumePicker(msg);
-    const spec = MessageBridge.SLASH_PICKERS[cmd];
-    if (!spec) return false;
-
-    const pendingQuestion: PendingQuestion = {
-      toolUseId: `slash-picker:${cmd}`,
-      questions: [
-        { question: spec.question, header: spec.header, options: spec.options, multiSelect: false },
-      ],
-    };
-    const card: CardState = {
-      status: 'waiting_for_input',
-      userPrompt: cmd,
-      responseText: '',
-      toolCalls: [],
-      pendingQuestion,
-    };
-
-    const send = this.sender.sendQuestionCard
-      ? this.sender.sendQuestionCard.bind(this.sender)
-      : this.sender.sendCard.bind(this.sender);
-    let cardMessageId: string | undefined;
-    try {
-      cardMessageId = await send(chatId, card);
-    } catch (err) {
-      this.logger.error({ err, chatId, cmd }, 'MessageBridge: failed to send slash picker card');
-      return false;
-    }
-    if (!cardMessageId) {
-      this.logger.warn({ chatId, cmd }, 'MessageBridge: slash picker card returned no messageId');
-      return false;
-    }
-
-    this.pendingSlashPickers.set(chatId, {
-      command: cmd,
-      options: spec.options.map((o) => o.label),
-      cardMessageId,
-    });
-    this.logger.info({ chatId, cmd, cardMessageId }, 'MessageBridge: slash picker card opened');
-    return true;
-  }
-
-  /** Human-relative "3m ago" / "2h ago" / "5d ago" for a past timestamp (ms). */
-  private formatRelativeTime(ms: number, now: number = Date.now()): string {
-    const diff = Math.max(0, now - ms);
-    const sec = Math.floor(diff / 1000);
-    if (sec < 60) return 'just now';
-    const min = Math.floor(sec / 60);
-    if (min < 60) return `${min}m ago`;
-    const hr = Math.floor(min / 60);
-    if (hr < 24) return `${hr}h ago`;
-    const day = Math.floor(hr / 24);
-    return `${day}d ago`;
-  }
-
-  /**
-   * Bare `/resume` → present the recent Claude sessions for this chat's
-   * working directory as a numbered picker card. On reply (see
-   * {@link tryHandleSlashPickerReply}) the chosen session is swapped in via
-   * {@link applyResume}. Returns true if consumed.
-   *
-   * Claude engine only — the session transcripts are claude-specific. On a
-   * kimi/codex chat we surface a notice instead of an (always-empty) picker.
-   */
-  private async openResumePicker(msg: IncomingMessage): Promise<boolean> {
-    const { chatId } = msg;
-    const session = this.sessionManager.getSession(chatId);
-    const activeEngine = session.engine ?? resolveEngineName(this.config);
-    if (activeEngine !== 'claude') {
-      await this.sender.sendTextNotice(
-        chatId,
-        'ℹ️ /resume is Claude-only',
-        `This chat is on the \`${activeEngine}\` engine. Session resume is only available for the Claude engine.`,
-        'blue',
-      );
-      return true;
-    }
-
-    const sessions = this.listSessionsForChat(chatId);
-    if (sessions.length === 0) {
-      await this.sender.sendTextNotice(
-        chatId,
-        'ℹ️ No Previous Sessions',
-        'No earlier Claude sessions were found for this chat\'s working directory.',
-        'blue',
-      );
-      return true;
-    }
-
-    const options = sessions.map((s) => {
-      const rel = this.formatRelativeTime(s.lastActive);
-      const marker = s.isCurrent ? ' · current' : '';
-      return {
-        label: s.sessionId.slice(0, 8),
-        description: `${s.preview} · ${rel}${marker}`,
-      };
-    });
-
-    const pendingQuestion: PendingQuestion = {
-      toolUseId: 'slash-picker:/resume',
-      questions: [
-        { question: 'Pick a session to resume', header: 'Resume', options, multiSelect: false },
-      ],
-    };
-    const card: CardState = {
-      status: 'waiting_for_input',
-      userPrompt: '/resume',
-      responseText: '',
-      toolCalls: [],
-      pendingQuestion,
-    };
-
-    const send = this.sender.sendQuestionCard
-      ? this.sender.sendQuestionCard.bind(this.sender)
-      : this.sender.sendCard.bind(this.sender);
-    let cardMessageId: string | undefined;
-    try {
-      cardMessageId = await send(chatId, card);
-    } catch (err) {
-      this.logger.error({ err, chatId }, 'MessageBridge: failed to send /resume picker card');
-      return false;
-    }
-    if (!cardMessageId) {
-      this.logger.warn({ chatId }, 'MessageBridge: /resume picker card returned no messageId');
-      return false;
-    }
-
-    // Store FULL session ids (not the 8-char display labels) so the reply
-    // handler can swap the exact session in.
-    this.pendingSlashPickers.set(chatId, {
-      command: '/resume',
-      options: sessions.map((s) => s.sessionId),
-      cardMessageId,
-    });
-    this.logger.info({ chatId, count: sessions.length, cardMessageId }, 'MessageBridge: /resume picker card opened');
-    return true;
-  }
-
-  /**
-   * Treat the user's typed reply as a choice for a pending slash picker.
-   * Maps a numbered reply (or an exact option name) to the option value, then
-   * re-injects `<command> <value>` through the normal message pipeline so the
-   * client-side slash command runs. Returns true if consumed.
-   */
-  private async tryHandleSlashPickerReply(msg: IncomingMessage): Promise<boolean> {
-    const { chatId, text } = msg;
-    const pending = this.pendingSlashPickers.get(chatId);
-    if (!pending) return false;
-
-    const trimmed = text.trim();
-    let choice: string | undefined;
-    const num = parseInt(trimmed, 10);
-    if (Number.isFinite(num) && num >= 1 && num <= pending.options.length) {
-      choice = pending.options[num - 1];
-    } else {
-      const lower = trimmed.toLowerCase();
-      choice = pending.options.find((o) => o.toLowerCase() === lower);
-    }
-
-    if (!choice) {
-      await this.sender.sendText(
-        chatId,
-        `请回复选项编号（1-${pending.options.length}）或选项名（${pending.options.join(' / ')}）。`,
-      );
-      return true;
-    }
-
-    this.pendingSlashPickers.delete(chatId);
-
-    // `/resume` is not a passthrough command — instead of re-injecting it to
-    // the agent, swap the chat's session directly. `choice` here is the FULL
-    // sessionId (we stored full ids in `options`, displaying only prefixes).
-    if (pending.command === '/resume') {
-      await this.applyResume(chatId, choice);
-      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
-        status: 'complete',
-        userPrompt: '/resume',
-        responseText: `✅ Resumed session \`${choice.slice(0, 8)}\`. Your next message continues that conversation.`,
-        toolCalls: [],
-      });
-      return true;
-    }
-
-    const injected = `${pending.command} ${choice}`;
-
-    // A client-side slash command (e.g. `/effort high`) changes a setting with
-    // NO model turn — routing it through executeQuery would spawn a "thinking"
-    // card that just renders an empty result. If the chat is idle we instead
-    // submit it silently (no card) and simply confirm on the picker card. When
-    // a turn is already in flight we can't start another (the persistent
-    // executor serialises turns), so fall back to the normal queueing path.
-    const busy = this.runningTasks.has(chatId) || this.continuationTasks.has(chatId);
-    if (busy) {
-      this.logger.info({ chatId, command: pending.command, choice }, 'MessageBridge: slash picker resolved while busy — re-injecting via queue');
-      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
-        status: 'complete',
-        userPrompt: pending.command,
-        responseText: `> **Selected:** ${choice}`,
-        toolCalls: [],
-      });
-      await this.handleMessage({ ...msg, text: injected });
-      return true;
-    }
-
-    this.logger.info({ chatId, command: pending.command, choice }, 'MessageBridge: slash picker resolved — submitting silently');
-    await this.submitSilentSlashCommand(chatId, injected);
-    await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
-      status: 'complete',
-      userPrompt: pending.command,
-      responseText: `✅ **${pending.command.slice(1)}** set to \`${choice}\``,
-      toolCalls: [],
-    });
-    return true;
-  }
-
-  /**
-   * Submit a client-side slash command to the agent WITHOUT a chat card. Used
-   * for picker selections (`/effort <level>`) that change a setting and produce
-   * no model output. Drives one executor turn and drains its stream to the
-   * terminal result (the PTY slash-watchdog synthesises one within seconds),
-   * capturing the session id like a normal turn. Best-effort — must only be
-   * called when the chat is idle (no turn in flight).
-   */
-  private async submitSilentSlashCommand(chatId: string, command: string): Promise<void> {
-    const { session, engineName } = this.prepareSessionForExecution(chatId);
-    const abortController = new AbortController();
-    const outputsDir = this.outputsManager.prepareDir(chatId);
-    const apiContext = { botName: this.config.name, chatId };
-
-    let handle: ExecutionHandle | undefined;
-    const safety = setTimeout(() => {
-      try { handle?.finish(); } catch { /* ignore */ }
-      abortController.abort();
-    }, 30_000);
-
-    try {
-      handle = await this.runOneTurn(chatId, engineName, {
-        prompt: command,
-        cwd: session.workingDirectory,
-        abortController,
-        outputsDir,
-        apiContext,
-        model: session.model,
-      });
-      for await (const message of handle.stream) {
-        if (abortController.signal.aborted) break;
-        const sid = (message as { session_id?: string }).session_id;
-        if (sid && (sid !== session.sessionId || session.sessionIdEngine !== engineName)) {
-          this.sessionManager.setSessionId(chatId, sid, engineName);
-        }
-        if (message.type === 'result') break;
-      }
-    } catch (err) {
-      this.logger.warn({ err, chatId, command }, 'MessageBridge: silent slash command errored');
-    } finally {
-      clearTimeout(safety);
-      try { handle?.finish(); } catch { /* ignore */ }
-      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
-    }
-  }
-
-  /**
    * Buffer a spontaneous message and (re)arm the coalesce timer. We extract
    * just the human-readable bits — assistant text and tool_use intent —
    * skipping noisy stream events.
@@ -1698,316 +1295,6 @@ export class MessageBridge {
    *   /goal clear|stop|off|reset|none|cancel
    *                                    → clear goal (per Claude docs aliases)
    */
-  private mirrorGoalCommand(chatId: string, text: string): void {
-    const trimmed = text.trim();
-    if (!/^\/goal(\s|$)/i.test(trimmed)) return;
-    const rest = trimmed.replace(/^\/goal\s*/i, '').trim();
-    if (!rest) return; // status query — leave existing goal alone
-    const lowered = rest.toLowerCase();
-    if (['clear', 'stop', 'off', 'reset', 'none', 'cancel'].includes(lowered)) {
-      this.sessionManager.setGoal(chatId, undefined);
-      return;
-    }
-    this.sessionManager.setGoal(chatId, rest);
-  }
-
-  private async tryHandleCodexBridgeCommand(msg: IncomingMessage): Promise<boolean> {
-    const trimmed = msg.text.trim();
-    const cmd = trimmed.split(/\s+/, 1)[0]?.toLowerCase();
-    if (cmd === '/goal') {
-      await this.handleCodexGoalCommand(msg, trimmed.slice('/goal'.length).trim());
-      return true;
-    }
-    if (cmd === '/background' || cmd === '/bg') {
-      const prefix = cmd === '/bg' ? '/bg' : '/background';
-      await this.handleCodexBackgroundCommand(msg, trimmed.slice(prefix.length).trim());
-      return true;
-    }
-    return false;
-  }
-
-  private async handleCodexGoalCommand(msg: IncomingMessage, args: string): Promise<void> {
-    const { chatId } = msg;
-    const session = this.sessionManager.getSession(chatId);
-    if (!args || args.toLowerCase() === 'status') {
-      const body = session.activeGoal
-        ? [
-            `**Goal:** ${session.activeGoal}`,
-            `**Iterations:** ${session.goalIterations ?? 0}/${session.goalMaxIterations ?? 5}`,
-            '',
-            'Use `/goal clear` to stop it.',
-          ].join('\n')
-        : 'No active Codex goal. Use `/goal <description>` to start one.';
-      await this.sender.sendTextNotice(chatId, '🎯 Codex Goal', body, 'blue');
-      return;
-    }
-
-    const lowered = args.toLowerCase();
-    if (['clear', 'stop', 'off', 'reset', 'none', 'cancel'].includes(lowered)) {
-      this.sessionManager.setGoal(chatId, undefined);
-      await this.sender.sendTextNotice(chatId, '✅ Goal Cleared', 'Codex auto-drive is stopped for this chat.', 'green');
-      return;
-    }
-
-    this.sessionManager.setGoal(chatId, args);
-    await this.sender.sendTextNotice(
-      chatId,
-      '🎯 Goal Set',
-      [
-        args,
-        '',
-        `Codex will keep working across turns until it reports complete, blocked, or reaches ${this.sessionManager.getSession(chatId).goalMaxIterations ?? 5} iterations.`,
-      ].join('\n'),
-      'green',
-    );
-  }
-
-  private async handleCodexBackgroundCommand(msg: IncomingMessage, args: string): Promise<void> {
-    const { chatId } = msg;
-    const [subCmdRaw, ...rest] = args.split(/\s+/).filter(Boolean);
-    const subCmd = subCmdRaw?.toLowerCase();
-    const managementCommands = new Set(['list', 'ls', 'stop', 'cancel', 'logs', 'show']);
-
-    if (!subCmd || subCmd === 'list' || subCmd === 'ls') {
-      const tasks = [...this.codexBackgroundTasks.values()]
-        .filter((t) => t.chatId === chatId)
-        .sort((a, b) => b.startedAt - a.startedAt)
-        .slice(0, 10);
-      const body = tasks.length === 0
-        ? 'No Codex background tasks for this chat.'
-        : tasks.map((t) => {
-            const age = Math.max(0, Math.round((Date.now() - t.startedAt) / 1000));
-            return `- \`${t.id}\` ${t.status} (${age}s) — ${this.truncateLine(t.prompt, 90)}`;
-          }).join('\n');
-      await this.sender.sendTextNotice(chatId, '🧵 Codex Background', body, 'blue');
-      return;
-    }
-
-    if (!managementCommands.has(subCmd)) {
-      await this.startCodexBackgroundTask(msg, args);
-      return;
-    }
-
-    if (subCmd === 'stop' || subCmd === 'cancel') {
-      const id = rest[0];
-      const task = id ? this.codexBackgroundTasks.get(id) : undefined;
-      if (!task || task.chatId !== chatId) {
-        await this.sender.sendTextNotice(chatId, '❌ Background Task Not Found', 'Usage: `/background stop <id>`', 'red');
-        return;
-      }
-      task.status = 'stopped';
-      task.updatedAt = Date.now();
-      task.errorMessage = 'Stopped by user';
-      task.executionHandle?.finish();
-      task.abortController.abort();
-      await this.sender.sendTextNotice(chatId, '🛑 Background Task Stopped', `Stopped \`${task.id}\`.`, 'orange');
-      return;
-    }
-
-    if (subCmd === 'logs' || subCmd === 'show') {
-      const id = rest[0];
-      const task = id ? this.codexBackgroundTasks.get(id) : undefined;
-      if (!task || task.chatId !== chatId) {
-        await this.sender.sendTextNotice(chatId, '❌ Background Task Not Found', 'Usage: `/background logs <id>`', 'red');
-        return;
-      }
-      await this.sender.sendTextNotice(
-        chatId,
-        `🧵 Background ${task.id}`,
-        [
-          `**Status:** ${task.status}`,
-          `**Prompt:** ${task.prompt}`,
-          task.errorMessage ? `**Error:** ${task.errorMessage}` : '',
-          task.responseText ? `\n${this.truncateBlock(task.responseText, 3000)}` : '',
-        ].filter(Boolean).join('\n'),
-        task.status === 'failed' ? 'red' : task.status === 'running' ? 'blue' : 'green',
-      );
-      return;
-    }
-  }
-
-  private truncateLine(text: string, max: number): string {
-    const oneLine = text.replace(/\s+/g, ' ').trim();
-    return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + '…';
-  }
-
-  private truncateBlock(text: string, max: number): string {
-    return text.length <= max ? text : text.slice(0, max - 20) + '\n\n...(truncated)';
-  }
-
-  private buildCodexGoalPrompt(prompt: string, goal: string, iteration: number, maxIterations: number): string {
-    return [
-      '<metabot-codex-goal>',
-      `Active goal: ${goal}`,
-      `Iteration: ${iteration}/${maxIterations}`,
-      'Work autonomously toward the goal. At the end of your final response, include exactly one status line:',
-      'GOAL_STATUS: complete | continue | blocked',
-      'Use complete only when the goal is genuinely satisfied, continue when the next autonomous turn should proceed, and blocked when user input or external state is required.',
-      '</metabot-codex-goal>',
-      '',
-      prompt,
-    ].join('\n');
-  }
-
-  private parseCodexGoalStatus(text: string | undefined): 'complete' | 'continue' | 'blocked' | undefined {
-    const match = (text ?? '').match(/GOAL_STATUS:\s*(complete|continue|blocked)/i);
-    return match?.[1]?.toLowerCase() as 'complete' | 'continue' | 'blocked' | undefined;
-  }
-
-  private maybeScheduleCodexGoalContinuation(
-    original: IncomingMessage,
-    lastState: CardState,
-    engineName: EngineName,
-    iteration: number,
-    maxIterations: number,
-  ): void {
-    if (engineName !== 'codex') return;
-    const session = this.sessionManager.getSession(original.chatId);
-    const goal = session.activeGoal;
-    if (!goal || lastState.status !== 'complete') return;
-
-    const status = this.parseCodexGoalStatus(lastState.responseText) ?? 'continue';
-    if (status === 'complete') {
-      this.sessionManager.setGoal(original.chatId, undefined);
-      void this.sender.sendTextNotice(original.chatId, '✅ Goal Complete', goal, 'green');
-      return;
-    }
-    if (status === 'blocked') {
-      void this.sender.sendTextNotice(
-        original.chatId,
-        '⏸️ Goal Blocked',
-        `Codex reported the goal is blocked and needs input.\n\n**Goal:** ${goal}`,
-        'orange',
-      );
-      return;
-    }
-    if (iteration >= maxIterations) {
-      void this.sender.sendTextNotice(
-        original.chatId,
-        '⏸️ Goal Paused',
-        `Reached the Codex goal safety cap (${maxIterations} iterations). Use \`/goal status\` or send a normal message to continue manually.`,
-        'orange',
-      );
-      return;
-    }
-    if (this.runningTasks.has(original.chatId) || this.messageQueues.has(original.chatId)) return;
-
-    const next: IncomingMessage = {
-      ...original,
-      messageId: `${original.messageId || 'goal'}-goal-${iteration + 1}`,
-      text: `Continue working toward the active goal: ${goal}`,
-      timestamp: Date.now(),
-    };
-    setTimeout(() => {
-      this.executeQuery(next).catch((err) => {
-        this.logger.error({ err, chatId: original.chatId }, 'Codex goal continuation failed');
-      });
-    }, 1000);
-  }
-
-  private async startCodexBackgroundTask(msg: IncomingMessage, prompt: string): Promise<void> {
-    const { chatId, userId } = msg;
-    const id = `bg-${Date.now().toString(36)}-${++this.codexBackgroundSeq}`;
-    const internalChatId = `${chatId}::codex-bg::${id}`;
-    const abortController = new AbortController();
-    const task: CodexBackgroundTask = {
-      id,
-      chatId,
-      internalChatId,
-      prompt,
-      status: 'running',
-      startedAt: Date.now(),
-      updatedAt: Date.now(),
-      abortController,
-    };
-    this.codexBackgroundTasks.set(id, task);
-    await this.sender.sendTextNotice(
-      chatId,
-      '🧵 Background Started',
-      `Started \`${id}\`.\nUse \`/background list\`, \`/background logs ${id}\`, or \`/background stop ${id}\`.`,
-      'blue',
-    );
-
-    void this.runCodexBackgroundTask(task, userId).catch((err) => {
-      this.logger.error({ err, chatId, taskId: id }, 'Codex background task crashed');
-    });
-  }
-
-  private async runCodexBackgroundTask(task: CodexBackgroundTask, userId: string): Promise<void> {
-    const baseSession = this.sessionManager.getSession(task.chatId);
-    const bgSession = this.sessionManager.getSession(task.internalChatId);
-    bgSession.engine = 'codex';
-    bgSession.workingDirectory = baseSession.workingDirectory;
-    bgSession.model = baseSession.model;
-    bgSession.modelEngine = baseSession.modelEngine;
-
-    const cwd = bgSession.workingDirectory;
-    const outputsDir = this.outputsManager.prepareDir(task.internalChatId);
-    const processor = new StreamProcessor(task.prompt);
-    const apiContext = { botName: this.config.name, chatId: task.chatId };
-    const activeGoal = baseSession.activeGoal;
-    const prompt = activeGoal
-      ? this.buildCodexGoalPrompt(task.prompt, activeGoal, baseSession.goalIterations ?? 0, baseSession.goalMaxIterations ?? 5)
-      : task.prompt;
-    let lastState: CardState = {
-      status: 'thinking',
-      userPrompt: task.prompt,
-      responseText: '',
-      toolCalls: [],
-      goalCondition: activeGoal,
-    };
-
-    const handle = await this.runOneTurn(task.internalChatId, 'codex', {
-      prompt,
-      cwd,
-      abortController: task.abortController,
-      outputsDir,
-      apiContext,
-      model: bgSession.model,
-    });
-    task.executionHandle = handle;
-
-    try {
-      for await (const message of handle.stream) {
-        if (task.abortController.signal.aborted) break;
-        lastState = processor.processMessage(message);
-        if (activeGoal) lastState.goalCondition = activeGoal;
-        const sid = processor.getSessionId();
-        if (sid) this.sessionManager.setSessionId(task.internalChatId, sid, 'codex');
-        if (lastState.status === 'complete' || lastState.status === 'error') break;
-      }
-      if (task.status === 'stopped') return;
-      if (lastState.status !== 'complete' && lastState.status !== 'error') {
-        lastState = {
-          ...lastState,
-          status: lastState.responseText ? 'complete' : 'error',
-          errorMessage: lastState.responseText ? undefined : 'Codex background task ended unexpectedly',
-        };
-      }
-      task.status = lastState.status === 'complete' ? 'completed' : 'failed';
-      task.responseText = lastState.responseText;
-      task.errorMessage = lastState.errorMessage;
-      task.updatedAt = Date.now();
-      await this.sender.sendCard(task.chatId, {
-        ...lastState,
-        userPrompt: `[Background ${task.id}] ${task.prompt}`,
-      });
-      await this.outputHandler.sendOutputFiles(task.chatId, outputsDir, processor, lastState);
-      this.audit.log({
-        event: task.status === 'completed' ? 'task_complete' : 'task_error',
-        botName: this.config.name,
-        chatId: task.chatId,
-        userId,
-        prompt: task.prompt,
-        error: task.errorMessage,
-        meta: { backgroundTaskId: task.id, engine: 'codex' },
-      });
-    } finally {
-      try { handle.finish(); } catch { /* ignore */ }
-      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
-    }
-  }
-
   private processQueue(chatId: string): void {
     const queue = this.messageQueues.get(chatId);
     if (!queue || queue.length === 0) {
@@ -2085,17 +1372,17 @@ export class MessageBridge {
       // Bare client-side slash commands (no argument) that we surface as a
       // selectable Feishu picker card instead of passing the argless command
       // through to the TUI (which would just open an autocomplete menu).
-      if (await this.tryHandleSlashPicker(msg)) return;
+      if (await this.slashPickers.tryOpen(msg)) return;
 
       const activeEngine = this.sessionManager.getSession(chatId).engine ?? resolveEngineName(this.config);
-      if (activeEngine === 'codex' && await this.tryHandleCodexBridgeCommand(msg)) return;
+      if (activeEngine === 'codex' && await this.codexCommands.tryHandleBridgeCommand(msg)) return;
 
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
 
       // Mirror /goal state locally so the card can show a persistent badge
       // across turns. The actual goal mechanism still runs inside Claude Code.
-      this.mirrorGoalCommand(chatId, text);
+      this.codexCommands.mirrorGoalCommand(chatId, text);
 
       // Unrecognized /xxx command — pass through to Claude
       if (this.runningTasks.has(chatId)) {
@@ -2122,7 +1409,7 @@ export class MessageBridge {
     // Reply to a client-side slash-command picker (e.g. the /effort card).
     // Must run before the between-turn reply check (same rationale: no
     // runningTasks entry exists) — it re-injects `<command> <choice>`.
-    if (await this.tryHandleSlashPickerReply(msg)) {
+    if (await this.slashPickers.tryHandleReply(msg)) {
       return;
     }
 
@@ -2141,12 +1428,12 @@ export class MessageBridge {
     if (this.runningTasks.has(chatId)) {
       // If there's a pending batch and this is a text message, merge batch into the queued text
       const batch = this.pendingBatches.get(chatId);
-      if (batch && !this.isDefaultMediaText(msg)) {
+      if (batch && !isDefaultMediaText(msg)) {
         clearTimeout(batch.timerId);
         this.pendingBatches.delete(chatId);
-        const merged = this.mergeBatchWithText(batch.messages, msg);
+        const merged = mergeBatchWithText(batch.messages, msg);
         msg = merged;
-      } else if (batch && this.isDefaultMediaText(msg)) {
+      } else if (batch && isDefaultMediaText(msg)) {
         // Another media message while task is running — just add to batch
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
@@ -2177,7 +1464,7 @@ export class MessageBridge {
     }
 
     // Smart debounce: batch media-only messages, execute text immediately
-    const isMediaOnly = this.isDefaultMediaText(msg);
+    const isMediaOnly = isDefaultMediaText(msg);
     const batch = this.pendingBatches.get(chatId);
 
     if (isMediaOnly) {
@@ -2198,7 +1485,7 @@ export class MessageBridge {
     if (batch) {
       clearTimeout(batch.timerId);
       this.pendingBatches.delete(chatId);
-      const merged = this.mergeBatchWithText(batch.messages, msg);
+      const merged = mergeBatchWithText(batch.messages, msg);
       this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch with text message');
       await this.executeQuery(merged);
       return;
@@ -2407,19 +1694,13 @@ export class MessageBridge {
     task.executionHandle.resolveQuestion(pending.toolUseId, collectedAnswers);
   }
 
-  /** Check if message is a media message with default (auto-generated) text. */
-  private isDefaultMediaText(msg: IncomingMessage): boolean {
-    return (!!msg.imageKey && msg.text === DEFAULT_IMAGE_TEXT)
-        || (!!msg.fileKey && msg.text === DEFAULT_FILE_TEXT);
-  }
-
   /** Timer expired: merge batched media messages and execute. */
   private flushBatch(chatId: string): void {
     const batch = this.pendingBatches.get(chatId);
     if (!batch) return;
     this.pendingBatches.delete(chatId);
 
-    const merged = this.mergeBatchMessages(batch.messages);
+    const merged = mergeBatchMessages(batch.messages);
     this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
 
     // If a task started running during the debounce window, queue instead
@@ -2437,42 +1718,6 @@ export class MessageBridge {
     this.executeQuery(merged).catch(err => {
       this.logger.error({ err, chatId }, 'Error executing batched messages');
     });
-  }
-
-  /** Merge multiple media-only messages into one (no user text). */
-  private mergeBatchMessages(messages: IncomingMessage[]): IncomingMessage {
-    const first = messages[0];
-    if (messages.length === 1) return first;
-
-    const imageCount = messages.filter(m => m.imageKey).length;
-    const fileCount = messages.filter(m => m.fileKey).length;
-    const parts: string[] = [];
-    if (imageCount > 0) parts.push(`${imageCount}张图片`);
-    if (fileCount > 0) parts.push(`${fileCount}个文件`);
-
-    return {
-      ...first,
-      text: `请分析这些${parts.join('和')}`,
-      extraMedia: messages.slice(1).map(m => ({
-        messageId: m.messageId,
-        imageKey: m.imageKey,
-        fileKey: m.fileKey,
-        fileName: m.fileName,
-      })),
-    };
-  }
-
-  /** Merge batched media messages with a user text message. */
-  private mergeBatchWithText(batchMsgs: IncomingMessage[], textMsg: IncomingMessage): IncomingMessage {
-    return {
-      ...textMsg,
-      extraMedia: batchMsgs.map(m => ({
-        messageId: m.messageId,
-        imageKey: m.imageKey,
-        fileKey: m.fileKey,
-        fileName: m.fileName,
-      })),
-    };
   }
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
@@ -2616,7 +1861,7 @@ export class MessageBridge {
     if (engineName === 'codex' && activeGoal) {
       codexGoalIteration = this.sessionManager.incrementGoalIteration(chatId);
       codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? 5;
-      prompt = this.buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
+      prompt = buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
     }
 
     // All turn-starting paths (initial + retry) route through runOneTurn so
@@ -2662,13 +1907,10 @@ export class MessageBridge {
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
-    // Idle detection: reset timer on every stream message. Also arms a shorter
-    // stall-warning timer that notifies the user once (no abort) if the stream
-    // goes silent — catches upstream API / TeamClaude proxy stalls so the card
-    // doesn't spin silently until the 1h idle abort.
+    // Idle detection: reset timer on every stream message. Background tasks can
+    // legitimately stay silent for a long time, so we only abort after the hard
+    // idle timeout and do not send short "stalled" warnings.
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
-    let stallTimerId: ReturnType<typeof setTimeout> | undefined;
-    let stalledNotified = false;
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
       idleTimerId = setTimeout(() => {
@@ -2677,19 +1919,6 @@ export class MessageBridge {
         executionHandle.finish();
         abortController.abort();
       }, IDLE_TIMEOUT_MS);
-      if (stallTimerId) clearTimeout(stallTimerId);
-      if (!stalledNotified) {
-        stallTimerId = setTimeout(() => {
-          stalledNotified = true;
-          this.logger.warn({ chatId, userId, ms: STALL_WARN_MS }, 'Task stalled — no stream output; notifying user');
-          void this.sender.sendTextNotice(
-            chatId,
-            '⚠️ 响应似乎卡住了',
-            `已 ${Math.round(STALL_WARN_MS / 1000)} 秒没有收到模型输出，可能是上游 API / TeamClaude 代理延迟或卡顿。\n请用 \`/stop\` 中止后重试。`,
-            'orange',
-          ).catch(() => { /* best-effort notice */ });
-        }, STALL_WARN_MS);
-      }
     };
     resetIdleTimer();
 
@@ -2948,11 +2177,18 @@ export class MessageBridge {
       this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
 
       // Send completion notification for long-running tasks (>10s) so user gets a Feishu push
-      await this.sendCompletionNotice(chatId, lastState, durationMs);
+      await sendCompletionNotice({
+        sender: this.sender,
+        config: this.config,
+        logger: this.logger,
+        chatId,
+        state: lastState,
+        durationMs,
+      });
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
-      this.maybeScheduleCodexGoalContinuation(
+      this.codexCommands.maybeScheduleGoalContinuation(
         msg,
         lastState,
         engineName,
@@ -3010,7 +2246,14 @@ export class MessageBridge {
           metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
 
           this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
-          await this.sendCompletionNotice(chatId, lastState, durationMs);
+          await sendCompletionNotice({
+            sender: this.sender,
+            config: this.config,
+            logger: this.logger,
+            chatId,
+            state: lastState,
+            durationMs,
+          });
           await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
           return; // skip the normal error handling below
         } catch (retryErr: any) {
@@ -3044,7 +2287,6 @@ export class MessageBridge {
     } finally {
       clearTimeout(timeoutId);
       if (idleTimerId) clearTimeout(idleTimerId);
-      if (stallTimerId) clearTimeout(stallTimerId);
       if (runningTask.questionTimeoutId) {
         clearTimeout(runningTask.questionTimeoutId);
       }
@@ -3461,73 +2703,22 @@ export class MessageBridge {
    * sends a plain text fallback so the user at least sees the result.
    */
   private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<void> {
-    // Accumulate usage into session and inject cumulative cost for display
-    if (chatId && (state.status === 'complete' || state.status === 'error')) {
-      this.sessionManager.addUsage(chatId, state.totalTokens ?? 0, state.costUsd ?? 0, state.durationMs ?? 0);
-      const session = this.sessionManager.getSession(chatId);
-      state.sessionCostUsd = session.cumulativeCostUsd;
-    }
-    for (let attempt = 0; attempt < FINAL_CARD_RETRIES; attempt++) {
-      const ok = await this.sender.updateCard(messageId, state);
-      if (ok) {
-        void this.sendVoiceReplyIfEnabled(chatId, state);
-        return;
-      }
-      const delay = FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt);
-      this.logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
-      await new Promise((r) => setTimeout(r, delay));
-    }
-    if (chatId) {
-      this.logger.error({ messageId, chatId }, 'All final card retries failed, sending text fallback');
-      const statusEmoji = state.status === 'complete' ? '✅' : '❌';
-      const summary = state.responseText
-        ? state.responseText.slice(0, 2000)
-        : state.errorMessage || 'Task finished';
-      try {
-        await this.sender.sendText(chatId, `${statusEmoji} ${summary}`);
-      } catch { /* last resort failed */ }
-    }
-  }
-
-  private async sendVoiceReplyIfEnabled(chatId: string | undefined, state: CardState): Promise<void> {
-    if (!chatId || state.status !== 'complete' || !state.responseText.trim() || !this.sender.sendAudioFile) return;
-
-    const audio = await createVoiceReplyOpus(this.config, state.responseText, this.logger);
-    if (!audio) return;
-    try {
-      const sent = await this.sender.sendAudioFile(chatId, audio.filePath, audio.fileName);
-      if (!sent) {
-        this.logger.warn({ chatId }, 'Voice reply audio send failed');
-      }
-    } catch (err) {
-      this.logger.warn({ err, chatId }, 'Unhandled error while sending voice reply');
-    } finally {
-      await audio.cleanup().catch(() => {});
-    }
+    await sendFinalCardWithRetry({
+      sender: this.sender,
+      config: this.config,
+      logger: this.logger,
+      sessionManager: this.sessionManager,
+      messageId,
+      state,
+      chatId,
+    });
   }
 
   /**
    * Read and send plan file content to the user when ExitPlanMode is triggered.
    */
   private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState): Promise<void> {
-    // Prefer the plan markdown captured straight from the ExitPlanMode tool
-    // input — it's always present, whereas the .claude/plans/*.md file only
-    // exists when the agent happened to Write one.
-    let planContent = processor.getPlanContent() || '';
-    if (!planContent.trim()) {
-      const planPath = processor.getPlanFilePath();
-      if (!planPath) return;
-      try {
-        planContent = await fsPromises.readFile(planPath, 'utf-8');
-      } catch (err) {
-        this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
-        return;
-      }
-    }
-    if (!planContent.trim()) return;
-
-    this.logger.info({ chatId }, 'Sending plan content to user');
-    await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
+    await sendPlanContent({ sender: this.sender, logger: this.logger, chatId, processor });
   }
 
   /**
@@ -3551,42 +2742,6 @@ export class MessageBridge {
       });
     } catch (err) {
       this.logger.warn({ err, chatId }, 'Failed to record session in registry');
-    }
-  }
-
-  /**
-   * Send a separate text message after the card update so the user gets a
-   * mobile push notification when a long task finishes. Card edits don't
-   * trigger Feishu push, but text messages do.
-   *
-   * Body is intentionally a single emoji + word (`✅ Done` / `❌ Failed`)
-   * — duration, cost, model, and context-usage all live in the card's grey
-   * footer already, so repeating them here just made the push banner
-   * harder to read at a glance. Don't re-add stats without first
-   * confirming the card footer is unreachable on the surface this push
-   * lands on.
-   *
-   * Skipped for:
-   *   - durations under 10s (the user is almost certainly still looking
-   *     at the screen and doesn't need a push for those)
-   *   - senders that route the final response as its own message
-   *     already (WeChat — `skipCompletionNotice`)
-   *   - continuation turns (between-turn agent activity); see the
-   *     handleContinuationTurn call site for the rationale.
-   */
-  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
-    if (this.sender.skipCompletionNotice) return;
-    if (state.status === 'complete' && isVoiceReplyEnabled(this.config)) return;
-    if (durationMs < 10_000) return;
-
-    const statusEmoji = state.status === 'complete' ? '✅' : '❌';
-    const statusWord  = state.status === 'complete' ? 'Done' : 'Failed';
-    const message     = `${statusEmoji} ${statusWord}`;
-
-    try {
-      await this.sender.sendText(chatId, message);
-    } catch (err) {
-      this.logger.warn({ err, chatId }, 'Failed to send completion notice');
     }
   }
 
@@ -3619,26 +2774,4 @@ export class MessageBridge {
       void this.persistentRegistry.shutdownAll('bridge-destroy');
     }
   }
-}
-
-export function isStaleSessionError(errorMessage?: string): boolean {
-  if (!errorMessage) return false;
-  return /no conversation found|conversation not found|session id|invalid session|thread\/resume.*failed|no rollout found|multiple.*tool_result.*blocks|each tool_use must have a single result/i.test(errorMessage);
-}
-
-export function normalizePromptForEngine(text: string, engine: EngineName): string {
-  if (engine !== 'codex') return text;
-  const match = text.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)([\s\S]*)$/);
-  if (!match) return text;
-  if (CODEX_BRIDGE_COMMANDS.has(match[1].toLowerCase())) return text;
-  const suffix = match[2] ?? '';
-  if (suffix && !/^\s/.test(suffix)) return text;
-  return `$${match[1]}${suffix}`;
-}
-
-const CODEX_BRIDGE_COMMANDS = new Set(['goal', 'background', 'bg']);
-
-export function isContextOverflowError(errorMessage?: string): boolean {
-  if (!errorMessage) return false;
-  return /context.window.exceeds.limit|context.length.exceeded|context.too.long|max.context.length|token.limit.exceeded|maximum.context/i.test(errorMessage);
 }

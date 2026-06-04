@@ -407,6 +407,272 @@ cmd_restart() { _write_restart_breadcrumb; pm2 restart metabot; }
 cmd_logs()    { pm2 logs metabot "${@}"; }
 cmd_status()  { pm2 describe metabot; }
 
+cmd_doctor() {
+  local json=false
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --json) json=true; shift ;;
+      --help|-h)
+        echo "Usage: metabot doctor [--json]"
+        echo "  Agent-native local diagnostics for runtime, PM2, package, core, bots, voice, Codex, and TeamClaude."
+        exit 0
+        ;;
+      *)
+        error "Unknown doctor option: $1"
+        echo "  Usage: metabot doctor [--json]"
+        exit 1
+        ;;
+    esac
+  done
+
+  METABOT_HOME="$METABOT_HOME" python3 - "$json" <<'PY'
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+want_json = sys.argv[1] == "true"
+home = Path(os.environ.get("METABOT_HOME") or str(Path.home() / "metabot")).expanduser()
+
+def load_env(path: Path):
+    env = {}
+    if not path.exists():
+        return env
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        v = v.strip().strip('"').strip("'")
+        env[k.strip()] = v
+    return env
+
+file_env = load_env(home / ".env")
+
+def env(name, default=None):
+    return os.environ.get(name) or file_env.get(name) or default
+
+def run(cmd, timeout=4):
+    try:
+        p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+        return {"ok": p.returncode == 0, "code": p.returncode, "stdout": p.stdout.strip(), "stderr": p.stderr.strip()}
+    except Exception as e:
+        return {"ok": False, "code": None, "stdout": "", "stderr": str(e)}
+
+def http_json(url, token=None, timeout=4):
+    req = urllib.request.Request(url)
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(512 * 1024).decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                parsed = None
+            return {"ok": 200 <= resp.status < 300, "status": resp.status, "json": parsed, "bodyPreview": body[:300]}
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "status": e.code, "json": None, "bodyPreview": e.read(300).decode("utf-8", errors="replace")}
+    except Exception as e:
+        return {"ok": False, "status": None, "json": None, "bodyPreview": str(e)}
+
+def check(name, ok, code=None, diagnosis="", recommendedAction="", canAutoFix=False, data=None):
+    severity = "ok" if ok else "warn"
+    item = {
+        "name": name,
+        "ok": bool(ok),
+        "severity": severity,
+        "code": code or ("ok" if ok else "check_failed"),
+        "diagnosis": diagnosis,
+        "recommendedAction": recommendedAction,
+        "canAutoFix": bool(canAutoFix),
+    }
+    if data is not None:
+        item["data"] = data
+    checks.append(item)
+
+checks = []
+report = {
+    "ok": True,
+    "schemaVersion": 1,
+    "generatedAt": int(time.time()),
+    "metabotHome": str(home),
+    "checks": checks,
+}
+
+check("metabot_home", home.exists(), "metabot_home_missing" if not home.exists() else "ok",
+      f"METABOT_HOME resolves to {home}", "Run the installer or set METABOT_HOME to the installed runtime.", False,
+      {"path": str(home), "hasPackageJson": (home / "package.json").exists(), "hasEnv": (home / ".env").exists(), "hasBotsJson": (home / "bots.json").exists()})
+
+manifest_paths = [home / ".metabot-package" / "manifest.json", home / ".metabot-package" / "default.env"]
+manifest_data = {}
+if manifest_paths[0].exists():
+    try:
+        manifest_data = json.loads(manifest_paths[0].read_text())
+    except Exception as e:
+        manifest_data = {"parseError": str(e)}
+check("package_manifest", any(p.exists() for p in manifest_paths),
+      "package_manifest_missing" if not any(p.exists() for p in manifest_paths) else "ok",
+      "Package manifest/default env marker found." if any(p.exists() for p in manifest_paths) else "No .metabot-package manifest/default.env marker found in runtime.",
+      "Package builds should include .metabot-package/manifest.json; package default env may include .metabot-package/default.env.",
+      False,
+      {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
+
+pm2 = shutil.which("pm2")
+pm2_data = {"installed": bool(pm2)}
+pm2_ok = False
+if pm2:
+    j = run([pm2, "jlist"])
+    pm2_data["jlistOk"] = j["ok"]
+    if j["ok"]:
+        try:
+            apps = json.loads(j["stdout"] or "[]")
+            app = next((a for a in apps if a.get("name") == "metabot"), None)
+            if app:
+                e = app.get("pm2_env", {})
+                pm2_data.update({
+                    "status": e.get("status"),
+                    "cwd": e.get("pm_cwd"),
+                    "script": e.get("pm_exec_path"),
+                    "restartTime": e.get("restart_time"),
+                    "unstableRestarts": e.get("unstable_restarts"),
+                })
+                pm2_ok = e.get("status") == "online" and str(e.get("pm_cwd")) == str(home)
+        except Exception as e:
+            pm2_data["parseError"] = str(e)
+check("pm2_runtime", pm2_ok, "pm2_wrong_cwd_or_offline" if not pm2_ok else "ok",
+      "PM2 metabot is online and running from METABOT_HOME." if pm2_ok else "PM2 metabot is missing, offline, or running from a different cwd.",
+      "Run from the desired runtime: pm2 delete metabot; cd $METABOT_HOME; pm2 start ecosystem.config.cjs --update-env.",
+      True,
+      pm2_data)
+
+api_port = env("API_PORT", "9100")
+api_secret = env("API_SECRET", "changeme")
+metabot_url = env("METABOT_URL", f"http://localhost:{api_port}")
+bridge_health = http_json(f"{metabot_url.rstrip('/')}/api/health", api_secret)
+check("bridge_health", bridge_health["ok"], "bridge_health_failed" if not bridge_health["ok"] else "ok",
+      "Local bridge health endpoint is reachable." if bridge_health["ok"] else "Local bridge health endpoint is not reachable.",
+      "Check PM2 status, API_PORT/API_SECRET, and logs/error.log.",
+      False,
+      {"url": metabot_url, "status": bridge_health["status"], "response": bridge_health["json"] or bridge_health["bodyPreview"]})
+
+core_url = env("METABOT_CORE_URL", "https://metabot-core.xvirobotics.com").rstrip("/")
+core_token_present = bool(env("METABOT_CORE_TOKEN") or (Path.home() / ".metabot-core" / "token").exists())
+core_health = http_json(f"{core_url}/health")
+check("metabot_core", core_health["ok"], "core_unreachable" if not core_health["ok"] else "ok",
+      "metabot-core health endpoint is reachable." if core_health["ok"] else "metabot-core health endpoint is not reachable.",
+      "Check VPN/network and METABOT_CORE_URL.",
+      False,
+      {"url": core_url, "status": core_health["status"], "tokenPresent": core_token_present, "response": core_health["json"] or core_health["bodyPreview"]})
+
+bots_data = []
+bots_path = home / "bots.json"
+if bots_path.exists():
+    try:
+        cfg = json.loads(bots_path.read_text())
+        all_bots = []
+        for key in ("feishuBots", "telegramBots", "webBots", "wechatBots"):
+            for b in cfg.get(key, []) or []:
+                all_bots.append((key, b))
+        for platform, b in all_bots:
+            voice = b.get("voiceReply") or {}
+            wd = b.get("defaultWorkingDirectory")
+            bots_data.append({
+                "name": b.get("name"),
+                "platform": platform,
+                "engine": b.get("engine", "claude"),
+                "workingDirectory": wd,
+                "workingDirectoryExists": bool(wd and Path(wd).expanduser().exists()),
+                "voiceReplyEnabled": voice.get("enabled"),
+            })
+    except Exception as e:
+        bots_data.append({"parseError": str(e)})
+bots_ok = bool(bots_data) and not any("parseError" in b for b in bots_data)
+check("bots_config", bots_ok, "bots_config_missing_or_invalid" if not bots_ok else "ok",
+      "bots.json parsed." if bots_ok else "bots.json missing, empty, or invalid.",
+      "Create/fix bots.json or run install.sh.",
+      False,
+      {"bots": bots_data})
+
+voice_default = {
+    "defaultOn": env("METABOT_VOICE_REPLY_DEFAULT_ON"),
+    "provider": env("METABOT_VOICE_REPLY_PROVIDER") or env("FEISHU_VOICE_REPLY_PROVIDER"),
+    "hasVolcengineAppId": bool(env("VOLCENGINE_TTS_APPID")),
+    "hasVolcengineAccessKey": bool(env("VOLCENGINE_TTS_ACCESS_KEY")),
+    "hasOpenAIKey": bool(env("OPENAI_API_KEY")),
+}
+voice_ok = bool(voice_default["provider"] or voice_default["hasVolcengineAppId"] or voice_default["hasOpenAIKey"])
+check("voice_defaults", voice_ok, "voice_defaults_missing" if not voice_ok else "ok",
+      "Voice/TTS defaults appear configured." if voice_ok else "No voice/TTS defaults found.",
+      "Install package default env or configure VOLCENGINE_TTS_* / OPENAI_API_KEY and bot voiceReply.",
+      False,
+      voice_default)
+
+codex_path = env("CODEX_EXECUTABLE_PATH") or shutil.which("codex")
+codex_data = {
+    "executable": codex_path,
+    "hasOpenAIKey": bool(env("OPENAI_API_KEY")),
+    "hasCodexApiKey": bool(env("CODEX_API_KEY")),
+    "baseUrl": env("CODEX_BASE_URL") or env("OPENAI_BASE_URL"),
+    "model": env("CODEX_MODEL"),
+    "configTomlExists": (Path.home() / ".codex" / "config.toml").exists(),
+}
+codex_ok = bool(codex_path)
+if codex_path:
+    v = run([codex_path, "--version"], timeout=3)
+    codex_data["versionOk"] = v["ok"]
+    codex_data["version"] = v["stdout"] or v["stderr"]
+check("codex_cli", codex_ok, "codex_missing" if not codex_ok else "ok",
+      "Codex executable found." if codex_ok else "Codex executable not found.",
+      "Install Codex CLI or set CODEX_EXECUTABLE_PATH.",
+      False,
+      codex_data)
+
+team_base = None
+for candidate in (env("CODEX_BASE_URL"), env("OPENAI_BASE_URL"), env("ANTHROPIC_BASE_URL")):
+    if candidate and "teamclaude" in candidate:
+        team_base = candidate.split("/openai/")[0].rstrip("/")
+        break
+team_token = env("OPENAI_API_KEY") or env("CODEX_API_KEY") or env("ANTHROPIC_AUTH_TOKEN") or env("ANTHROPIC_API_KEY")
+team_data = {"baseUrl": team_base, "tokenPresent": bool(team_token)}
+team_ok = bool(team_base and team_token)
+if team_ok:
+    me = http_json(f"{team_base}/api/me", team_token)
+    team_data.update({"meStatus": me["status"], "me": me["json"] or me["bodyPreview"]})
+    if me["status"] in (401, 403):
+        team_ok = False
+check("teamclaude", team_ok, "teamclaude_not_configured_or_invalid" if not team_ok else "ok",
+      "TeamClaude endpoint/token appear configured." if team_ok else "TeamClaude endpoint/token not configured or token check failed.",
+      "Set TeamClaude base URL and token, then verify token owner before assigning to bots.",
+      False,
+      team_data)
+
+report["ok"] = all(c.get("ok") for c in checks if c["name"] in ("metabot_home", "pm2_runtime", "bridge_health"))
+report["summary"] = {
+    "ok": sum(1 for c in checks if c["ok"]),
+    "warn": sum(1 for c in checks if not c["ok"]),
+    "criticalOk": report["ok"],
+}
+
+if want_json:
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+else:
+    print(f"MetaBot doctor: {'OK' if report['ok'] else 'WARN'}")
+    print(f"  METABOT_HOME: {home}")
+    for c in checks:
+        mark = "✓" if c["ok"] else "!"
+        print(f"  {mark} {c['name']}: {c['code']}")
+        if not c["ok"] and c["recommendedAction"]:
+            print(f"    next: {c['recommendedAction']}")
+    print("\nUse `metabot doctor --json` for agent-readable diagnostics.")
+PY
+}
+
 # Resolve the metabot-core feature CLI (t5t/agents/memory/skills).
 # Order: explicit override > in-tree monorepo > sibling workspace > npm-global on PATH.
 _resolve_core_cli() {
@@ -731,6 +997,7 @@ print_help() {
   echo "    metabot restart    Restart MetaBot"
   echo "    metabot logs       View live logs (pass -n 100 etc.)"
   echo "    metabot status     Show PM2 process status"
+  echo "    metabot doctor     Agent-readable runtime diagnostics (--json)"
   echo ""
   echo "  Bridge daemon API (localhost:9100):"
   echo "    metabot bots                       List all bots (local + peer)"
@@ -754,6 +1021,7 @@ case "${1:-}" in
   restart|rs)   cmd_restart ;;
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
+  doctor)       shift; cmd_doctor "$@" ;;
   bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
