@@ -50,6 +50,14 @@ export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontane
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+/**
+ * Window during which a freshly-resolved between-turn question card is reused
+ * (updated in place) for the next sub-question of the same AskUserQuestion
+ * call. The PTY backend renders one question tab at a time, so a multi-question
+ * call surfaces each sub-question as its own between-turn-question event a few
+ * hundred ms apart.
+ */
+const QUESTION_CARD_REUSE_MS = 30 * 1000;
 
 /**
  * Default for the persistent-executor pool when no per-bot `persistentExecutor.enabled`
@@ -207,6 +215,12 @@ export class MessageBridge {
     collectedAnswers: Record<string, string>;
     timeoutId?: ReturnType<typeof setTimeout>;
   }>();
+  /**
+   * Most recently surfaced/resolved between-turn question card per chat. Lets a
+   * multi-question AskUserQuestion reuse one card across its sub-questions
+   * instead of spawning a fresh card per tab.
+   */
+  private recentQuestionCard = new Map<string, { cardMessageId: string; at: number }>();
   /**
    * Chats whose ExitPlanMode plan body we've already shown as a "📋 Plan" card
    * from the approval flow. Keyed by chatId (NOT tool_use id): the screen
@@ -588,6 +602,7 @@ export class MessageBridge {
       }
     }
     const existing = this.pendingBetweenTurnQuestions.get(chatId);
+    const hadExisting = !!existing;
     if (existing) {
       this.logger.warn(
         { chatId, prevToolUseId: existing.toolUseId, newToolUseId: payload.toolUseId },
@@ -617,20 +632,48 @@ export class MessageBridge {
       pendingQuestion: displayQuestion,
     };
 
-    const send = this.sender.sendQuestionCard
-      ? this.sender.sendQuestionCard.bind(this.sender)
-      : this.sender.sendCard.bind(this.sender);
+    const recent = this.recentQuestionCard.get(chatId);
+    const canReuse =
+      !payload.planText &&
+      !hadExisting &&
+      !!recent &&
+      this.sender.updateQuestionCard != null &&
+      Date.now() - recent.at < QUESTION_CARD_REUSE_MS;
+
     let cardMessageId: string | undefined;
-    try {
-      cardMessageId = await send(chatId, card);
-    } catch (err) {
-      this.logger.error({ err, chatId, toolUseId: payload.toolUseId }, 'MessageBridge: failed to send between-turn question card');
-      return;
+    if (canReuse && recent && this.sender.updateQuestionCard) {
+      const update = this.sender.updateQuestionCard.bind(this.sender);
+      let ok = false;
+      try {
+        ok = await update(recent.cardMessageId, card);
+      } catch (err) {
+        this.logger.warn({ err, chatId }, 'MessageBridge: question-card reuse update failed; sending fresh card');
+      }
+      if (ok) {
+        cardMessageId = recent.cardMessageId;
+        this.logger.info(
+          { chatId, toolUseId: payload.toolUseId, cardMessageId },
+          'MessageBridge: reused question card for next sub-question',
+        );
+      }
+    }
+
+    if (!cardMessageId) {
+      const send = this.sender.sendQuestionCard
+        ? this.sender.sendQuestionCard.bind(this.sender)
+        : this.sender.sendCard.bind(this.sender);
+      try {
+        cardMessageId = await send(chatId, card);
+      } catch (err) {
+        this.logger.error({ err, chatId, toolUseId: payload.toolUseId }, 'MessageBridge: failed to send between-turn question card');
+        return;
+      }
     }
     if (!cardMessageId) {
       this.logger.warn({ chatId, toolUseId: payload.toolUseId }, 'MessageBridge: between-turn question card returned no messageId');
       return;
     }
+    this.recentQuestionCard.set(chatId, { cardMessageId, at: Date.now() });
 
     this.pendingBetweenTurnQuestions.set(chatId, {
       toolUseId: payload.toolUseId,
@@ -814,6 +857,7 @@ export class MessageBridge {
       responseText: `> **Reply:** ${Object.values(pending.collectedAnswers).join(', ')}`,
       toolCalls: [],
     });
+    this.recentQuestionCard.set(chatId, { cardMessageId: pending.cardMessageId, at: Date.now() });
     return true;
   }
 
