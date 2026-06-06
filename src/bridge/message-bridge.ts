@@ -2713,6 +2713,17 @@ export class MessageBridge {
 
         // Check if we hit a waiting_for_input state
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
+          // PTY backend: the AskUserQuestion menu blocks before flushing its
+          // jsonl record, so it's surfaced from the SCREEN by the executor's
+          // interactive-tool watcher the moment the menu renders. The tool_use
+          // record only reaches THIS stream AFTER the user already answered (the
+          // flush), so surfacing it here would be a post-answer DUPLICATE card.
+          // The synthetic-id watcher path owns AUQ on PTY — just clear and skip.
+          // (Mirrors the continuation-stream guard above.)
+          if (this.config.claude.backend === 'pty') {
+            processor.clearPendingQuestion();
+            continue;
+          }
           // Only initialize tracking when we see a NEW question call (different toolUseId).
           // Multi-question calls (same toolUseId, advance currentQuestionIndex) reuse the
           // already-sent question card via updateQuestionCard below.
