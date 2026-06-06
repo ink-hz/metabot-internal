@@ -169,6 +169,15 @@ export class MemoryStore {
 
       CREATE INDEX IF NOT EXISTS documents_folder_id_idx ON documents(folder_id);
 
+      -- Listing endpoints all sort by updated_at DESC (home feed, prefix
+      -- listing) or filter by folder then sort (folder view). Without these,
+      -- SQLite full-scans the documents table and sorts in a temp B-tree —
+      -- and since rows store large inline content BLOBs, that scan reads
+      -- hundreds of MB just to return 50 metadata rows (observed 2.9s on a
+      -- 757MB db). A covering-ish index on the sort key makes it O(limit).
+      CREATE INDEX IF NOT EXISTS documents_updated_at_idx ON documents(updated_at DESC);
+      CREATE INDEX IF NOT EXISTS documents_folder_updated_idx ON documents(folder_id, updated_at DESC);
+
       CREATE VIRTUAL TABLE IF NOT EXISTS documents_fts USING fts5(
         title, content, tags, doc_id UNINDEXED
       );
