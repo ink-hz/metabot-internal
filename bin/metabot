@@ -525,6 +525,32 @@ check("package_manifest", any(p.exists() for p in manifest_paths),
       False,
       {"manifest": manifest_data, "hasDefaultEnv": manifest_paths[1].exists()})
 
+bun_bin = shutil.which("bun")
+bun_lock = home / "bun.lock"
+bun_lockb = home / "bun.lockb"
+npm_lock = home / "package-lock.json"
+web_npm_lock = home / "web" / "package-lock.json"
+bun_data = {
+    "installed": bool(bun_bin),
+    "path": bun_bin,
+    "hasBunLock": bun_lock.exists() or bun_lockb.exists(),
+    "hasRootPackageLock": npm_lock.exists(),
+    "hasWebPackageLock": web_npm_lock.exists(),
+    "experimentalScripts": ["build:bridge:bun", "test:bridge:bun", "pack:verify:bun"],
+}
+if bun_bin:
+    version = run([bun_bin, "--version"])
+    bun_data["version"] = version["stdout"] if version["ok"] else version["stderr"]
+lock_drift = bool((bun_lock.exists() or bun_lockb.exists()) and (npm_lock.exists() or web_npm_lock.exists()))
+check("bun_toolchain", bool(bun_bin) and not lock_drift,
+      "bun_lock_drift" if lock_drift else ("bun_missing" if not bun_bin else "ok"),
+      "Bun is installed and no mixed npm/Bun lockfile drift was detected." if bun_bin and not lock_drift else (
+        "Both Bun and npm lockfiles are present; keep npm as the release default until lockfile policy is resolved." if lock_drift else
+        "Bun is not installed. This is OK for production Node/npm defaults; Bun scripts remain opt-in."),
+      "Use npm release gates by default. For Bun experiments, install Bun, keep lockfile policy explicit, then run build:bridge:bun/test:bridge:bun/pack:verify:bun.",
+      False,
+      bun_data)
+
 pm2 = shutil.which("pm2")
 pm2_data = {"installed": bool(pm2)}
 pm2_ok = False
