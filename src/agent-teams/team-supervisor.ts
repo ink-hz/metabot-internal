@@ -26,6 +26,7 @@ export class AgentTeamSupervisor {
   private tickInProgress = false;
   private readonly inFlight = new Set<string>();
   private readonly inFlightRuns = new Map<string, { teamName: string; agentName: string; chatId: string; bridge: MessageBridge; taskIds: number[] }>();
+  private readonly teamsAwaitingIdleDigest = new Set<string>();
 
   constructor(private readonly options: AgentTeamSupervisorOptions) {
     this.logger = options.logger.child({ module: 'agent-team-supervisor' });
@@ -86,6 +87,7 @@ export class AgentTeamSupervisor {
       if (!bot) return;
       for (const team of this.options.store.listTeams()) {
         if (team.status !== 'active') continue;
+        this.markOpenWorkForIdleDigest(team.name);
         if (!this.hasActiveLeadAgent(team.name)) {
           this.drainLeaderActivityInbox(team.name);
         }
@@ -98,8 +100,10 @@ export class AgentTeamSupervisor {
           this.inFlight.add(key);
           void this.runAgent(bot, team.name, runnable).finally(() => {
             this.inFlight.delete(key);
+            this.maybeEmitIdleDigest(team.name);
           });
         }
+        this.maybeEmitIdleDigest(team.name);
       }
     } finally {
       this.tickInProgress = false;
@@ -275,6 +279,7 @@ export class AgentTeamSupervisor {
     } finally {
       this.options.store.setAgentStatus(teamName, agent.name, 'idle');
       this.inFlightRuns.delete(run.id);
+      this.maybeEmitIdleDigest(teamName);
     }
   }
 
@@ -314,6 +319,54 @@ export class AgentTeamSupervisor {
     if (!latest) return;
     this.options.store.markMessagesRead(teamName, 'lead');
     this.notifyTeamActivity(teamName, 'lead', truncateActivity(latest.body));
+  }
+
+  private markOpenWorkForIdleDigest(teamName: string): void {
+    if (this.hasOpenWork(teamName)) {
+      this.teamsAwaitingIdleDigest.add(teamName);
+    }
+  }
+
+  private maybeEmitIdleDigest(teamName: string): void {
+    if (!this.teamsAwaitingIdleDigest.has(teamName)) return;
+    const team = this.options.store.getTeam(teamName);
+    if (!team || team.status !== 'active') {
+      this.teamsAwaitingIdleDigest.delete(teamName);
+      return;
+    }
+    if (this.hasOpenWork(teamName)) return;
+    this.teamsAwaitingIdleDigest.delete(teamName);
+    this.notifyTeamActivity(teamName, 'idle digest', this.buildIdleDigest(teamName));
+  }
+
+  private hasOpenWork(teamName: string): boolean {
+    const hasWorkingAgent = this.options.store.listAgents(teamName)
+      .some((agent) => agent.status === 'working');
+    if (hasWorkingAgent) return true;
+    const hasOpenTask = this.options.store.listTasks(teamName)
+      .some((task) => task.status === 'pending' || task.status === 'in_progress');
+    if (hasOpenTask) return true;
+    const hasRunningRun = this.options.store.listRuns(teamName)
+      .some((run) => run.status === 'running');
+    if (hasRunningRun) return true;
+    const hasInFlightRun = [...this.inFlightRuns.values()]
+      .some((run) => run.teamName === teamName);
+    if (hasInFlightRun) return true;
+    return this.options.store.listMessages(teamName, 'lead', true).length > 0;
+  }
+
+  private buildIdleDigest(teamName: string): string {
+    const agents = this.options.store.listAgents(teamName).filter((agent) => agent.status !== 'stopped');
+    const completedTasks = this.options.store.listTasks(teamName).filter((task) => task.status === 'completed');
+    const recentRuns = this.options.store.listRuns(teamName).slice(0, 3);
+    const runSummary = recentRuns.length
+      ? recentRuns.map((run) => `${run.agentName ?? 'agent'} ${run.status}`).join(', ')
+      : 'no recent runs';
+    return [
+      'Team is idle.',
+      `Members idle: ${agents.length}. Open tasks: 0. Running runs: 0. Unread lead messages: 0.`,
+      `Completed tasks: ${completedTasks.length}. Recent runs: ${runSummary}.`,
+    ].join('\n');
   }
 
   private notifyTeamActivity(teamName: string, agentName: string, body: string): void {

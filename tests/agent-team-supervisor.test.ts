@@ -164,6 +164,62 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
+  it('emits one idle digest when a busy team drains all open work', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'Digest task', owner: 'worker' });
+
+    const executeApiTask = vi.fn(async () => ({
+      success: true,
+      responseText: 'done',
+      sessionId: 'sid',
+    }));
+    const sendAgentActivityCard = vi.fn();
+    const { registry } = makeRegistry(executeApiTask, vi.fn(), sendAgentActivityCard);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(store.listMessages('demo', 'lead', true)).toHaveLength(1);
+    });
+    expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('demo / idle digest'))).toBe(false);
+
+    await supervisor.tick();
+    await waitFor(() => {
+      expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('demo / idle digest'))).toBe(true);
+    });
+
+    const digestCalls = sendAgentActivityCard.mock.calls.filter((call) => call[1].includes('demo / idle digest'));
+    expect(digestCalls).toHaveLength(1);
+    expect(digestCalls[0][0]).toBe('oc_main');
+    expect(digestCalls[0][1]).toContain('Team is idle.');
+    expect(digestCalls[0][1]).toContain('Open tasks: 0');
+    expect(digestCalls[0][1]).toContain('Running runs: 0');
+
+    await supervisor.tick();
+    const digestCallsAfterSecondTick = sendAgentActivityCard.mock.calls.filter((call) => call[1].includes('demo / idle digest'));
+    expect(digestCallsAfterSecondTick).toHaveLength(1);
+    supervisor.destroy();
+    store.close();
+  });
+
+  it('does not emit an idle digest while open work remains', async () => {
+    const store = makeStore();
+    store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
+    store.createAgent('demo', { name: 'worker', engine: 'codex' });
+    store.createTask('demo', { subject: 'Blocked task', owner: 'worker', blockedBy: [1] });
+
+    const sendAgentActivityCard = vi.fn();
+    const { registry } = makeRegistry(vi.fn(), vi.fn(), sendAgentActivityCard);
+    const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
+
+    await supervisor.tick();
+    expect(sendAgentActivityCard.mock.calls.some((call) => call[1].includes('idle digest'))).toBe(false);
+    supervisor.destroy();
+    store.close();
+  });
+
   it('sends lead inbox messages as activity when the team has no lead agent member', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });
