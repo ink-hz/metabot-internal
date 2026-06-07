@@ -139,6 +139,18 @@ export function postCliKill(
   return guarded(() => store.killProject(project, cred));
 }
 
+export function postCliReopen(
+  store: T5tStore,
+  body: Record<string, unknown>,
+  cred: Credential,
+): RouteResult {
+  const project = typeof body.project === 'string' ? body.project.trim() : '';
+  if (!project) return err(400, 'project_required');
+  const gate = ownerGate(store, project, cred);
+  if (gate) return gate;
+  return guarded(() => store.reopenProject(project, cred));
+}
+
 /**
  * POST /api/t5t/cli/delete — hard-delete smoke-test projects only. This is
  * intentionally narrower than kill: real project history remains append-only,

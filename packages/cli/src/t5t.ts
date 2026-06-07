@@ -15,6 +15,8 @@
  *   metabot t5t top5 <project> add "<text>"
  *   metabot t5t top5 <project> done|reopen|remove <itemId>
  *   metabot t5t top5 <project> list
+ *   metabot t5t kill <project>
+ *   metabot t5t reopen <project>
  *
  * Auth: `METABOT_CORE_TOKEN` env or `~/.metabot-core/token` (resolved by
  * `cli-core`'s `loadConfig`). Owner-auth errors (`owner_required`) surface
@@ -50,6 +52,7 @@ Subcommands:
   bottleneck <project> "<text>"                  Set the current bottleneck            (owner-auth)
   wip <project> <evaluatorId> "<title>"          Add a WIP item under an evaluator col (owner-auth)
   kill <project>                                 Mark a project as killed              (owner-auth)
+  reopen <project>                               Reopen a killed project               (owner-auth)
   delete <smoke-project>                         Hard-delete your own smoke test project
   top5 <project> add "<text>"                    Add a Top-5 todo item                 (owner-auth)
   top5 <project> done|reopen|remove <itemId>     Flip status of an existing Top-5 item (owner-auth)
@@ -181,6 +184,13 @@ async function cmdKill(client: T5tClient, args: string[]): Promise<void> {
   print(resp);
 }
 
+async function cmdReopen(client: T5tClient, args: string[]): Promise<void> {
+  const { positional } = parseArgs(args);
+  const project = need('<project>', positional[0]);
+  const resp = await client.post('/api/t5t/cli/reopen', { project });
+  print(resp);
+}
+
 async function cmdDelete(client: T5tClient, args: string[]): Promise<void> {
   const { positional } = parseArgs(args);
   const project = need('<smoke-project>', positional[0]);
@@ -274,6 +284,8 @@ export async function run(argv: string[]): Promise<void> {
       return cmdWip(client, rest);
     case 'kill':
       return cmdKill(client, rest);
+    case 'reopen':
+      return cmdReopen(client, rest);
     case 'delete':
       return cmdDelete(client, rest);
     case 'top5':
