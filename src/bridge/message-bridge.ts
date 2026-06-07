@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import type { IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
+import type { BackgroundEvent, IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type {
@@ -43,6 +43,8 @@ import { sendCompletionNotice } from './notification-policy.js';
 import { normalizePromptForEngine } from './prompt-normalizer.js';
 import { SlashPickerController } from './slash-picker-controller.js';
 import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
+import type { AgentTeamStore } from '../agent-teams/team-store.js';
+import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -232,6 +234,7 @@ export class MessageBridge {
   private exitPlanCardsShown = new Set<string>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
+  private agentTeamStore?: AgentTeamStore;
 
   constructor(
     private config: BotConfigBase,
@@ -353,6 +356,22 @@ export class MessageBridge {
   /** Inject the session registry for cross-platform session sync. */
   setSessionRegistry(registry: SessionRegistry): void {
     this.sessionRegistry = registry;
+  }
+
+  /** Inject MetaBot Agent Teams store so cards can show team and run state. */
+  setAgentTeamStore(store: AgentTeamStore): void {
+    this.agentTeamStore = store;
+  }
+
+  /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
+  async sendAgentActivityCard(chatId: string, body: string): Promise<void> {
+    const card: CardState = this.enrichWithAgentTeams({
+      status: 'agent_activity',
+      userPrompt: '(agent activity)',
+      responseText: body,
+      toolCalls: [],
+    }, chatId);
+    await this.sender.sendCard(chatId, card);
   }
 
   /** Expose session manager for cross-platform session linking. */
@@ -1080,7 +1099,7 @@ export class MessageBridge {
         if (state.status === 'complete' || state.status === 'error') break;
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId, state);
+            this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
           }
         });
       }
@@ -1325,6 +1344,20 @@ export class MessageBridge {
       upsertMember(event.teammate, 'idle');
     }
     return true;
+  }
+
+  private enrichWithAgentTeams(state: CardState, chatId?: string): CardState {
+    if (!this.agentTeamStore) return state;
+    const team = chatId ? this.agentTeamStore.findTeamForChat(chatId) : undefined;
+    if (!team) return state;
+    const snapshot = this.agentTeamStore.status(team.name);
+    if (!snapshot) return state;
+    const mapped = buildAgentTeamCardSnapshot(snapshot);
+    return {
+      ...state,
+      teamState: hasTeamState(state.teamState) ? state.teamState : mapped.teamState,
+      backgroundEvents: mergeBackgroundEvents(state.backgroundEvents, mapped.backgroundEvents),
+    };
   }
 
   /**
@@ -1873,11 +1906,11 @@ export class MessageBridge {
       if (changed && !abortController.signal.aborted) {
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId, {
+            this.sender.updateCard(messageId, this.enrichWithAgentTeams({
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
-            });
+            }, chatId));
           }
         });
       }
@@ -2118,7 +2151,7 @@ export class MessageBridge {
         if (!abortController.signal.aborted) {
           rateLimiter.schedule(() => {
             if (!abortController.signal.aborted) {
-              this.sender.updateCard(messageId, state);
+              this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
             }
           });
         }
@@ -2170,7 +2203,7 @@ export class MessageBridge {
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
-          rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+          rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
         }
         await rateLimiter.cancelAndWait();
       }
@@ -2197,7 +2230,7 @@ export class MessageBridge {
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
-          rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+          rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
         }
         await rateLimiter.cancelAndWait();
       }
@@ -2278,7 +2311,7 @@ export class MessageBridge {
             const newSid = processor.getSessionId();
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
-            rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
           }
           await rateLimiter.cancelAndWait();
           await this.sendFinalCard(messageId, lastState, chatId);
@@ -2413,11 +2446,11 @@ export class MessageBridge {
       if (changed && sendCards && messageId && !abortController.signal.aborted) {
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId!, {
+            this.sender.updateCard(messageId!, this.enrichWithAgentTeams({
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
-            });
+            }, chatId));
           }
         });
       }
@@ -2547,7 +2580,7 @@ export class MessageBridge {
 
         if (sendCards && messageId) {
           rateLimiter.schedule(() => {
-            this.sender.updateCard(messageId!, state);
+            this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId));
           });
         }
         options.onUpdate?.(state, effectiveMessageId, false);
@@ -2598,7 +2631,7 @@ export class MessageBridge {
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
           if (sendCards && messageId) {
-            rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
           }
           options.onUpdate?.(state, effectiveMessageId, false);
         }
@@ -2678,7 +2711,7 @@ export class MessageBridge {
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
             if (sendCards && messageId) {
-              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
             }
             options.onUpdate?.(state, effectiveMessageId, false);
           }
@@ -2764,7 +2797,7 @@ export class MessageBridge {
       logger: this.logger,
       sessionManager: this.sessionManager,
       messageId,
-      state,
+      state: this.enrichWithAgentTeams(state, chatId),
       chatId,
     });
   }
@@ -2829,4 +2862,18 @@ export class MessageBridge {
       void this.persistentRegistry.shutdownAll('bridge-destroy');
     }
   }
+}
+
+function hasTeamState(teamState: TeamState | undefined): boolean {
+  return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
+}
+
+function mergeBackgroundEvents(
+  existing: BackgroundEvent[] | undefined,
+  extra: BackgroundEvent[] | undefined,
+): BackgroundEvent[] | undefined {
+  if (!extra || extra.length === 0) return existing;
+  if (!existing || existing.length === 0) return extra;
+  const seen = new Set(existing.map((event) => event.taskId));
+  return [...existing, ...extra.filter((event) => !seen.has(event.taskId))];
 }

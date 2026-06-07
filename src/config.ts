@@ -2,6 +2,7 @@ import * as dotenv from 'dotenv';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { AgentTeamConfig } from './agent-teams/team-store.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -209,6 +210,8 @@ export interface AppConfig {
   };
   /** Peer MetaBot instances for cross-instance bot discovery and task delegation. */
   peers: PeerConfig[];
+  /** Resident MetaBot Agent Teams reconciled into the bridge runtime. */
+  agentTeams: AgentTeamConfig[];
 }
 
 function required(name: string): string {
@@ -579,6 +582,7 @@ export interface BotsJsonNewFormat {
   webBots?: WebBotJsonEntry[];
   wechatBots?: WechatBotJsonEntry[];
   peers?: PeerJsonEntry[];
+  agentTeams?: AgentTeamConfig[];
 }
 
 export function loadAppConfig(): AppConfig {
@@ -588,6 +592,7 @@ export function loadAppConfig(): AppConfig {
   let telegramBots: TelegramBotConfig[] = [];
   let webBots: BotConfigBase[] = [];
   let wechatBots: WechatBotConfig[] = [];
+  let agentTeams: AgentTeamConfig[] = [];
   let parsedConfig: unknown;
 
   if (botsConfigPath) {
@@ -616,6 +621,9 @@ export function loadAppConfig(): AppConfig {
       }
       if (cfg.wechatBots) {
         wechatBots = cfg.wechatBots.map(wechatBotFromJson);
+      }
+      if (cfg.agentTeams) {
+        agentTeams = cfg.agentTeams.map(normalizeAgentTeamConfig);
       }
       if (feishuBots.length === 0 && telegramBots.length === 0 && webBots.length === 0 && wechatBots.length === 0) {
         throw new Error(`BOTS_CONFIG file must define at least one bot: ${resolved}`);
@@ -699,5 +707,41 @@ export function loadAppConfig(): AppConfig {
       secret: apiSecret,
     },
     peers,
+    agentTeams,
+  };
+}
+
+function normalizeAgentTeamConfig(team: AgentTeamConfig): AgentTeamConfig {
+  return {
+    name: team.name,
+    ...(team.description ? { description: team.description } : {}),
+    ...(team.status === 'active' || team.status === 'stopped' ? { status: team.status } : {}),
+    ...(Array.isArray(team.chatIds) ? { chatIds: team.chatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
+    ...(Array.isArray(team.displayChatIds) ? { displayChatIds: team.displayChatIds.filter((v): v is string => typeof v === 'string' && !!v.trim()) } : {}),
+    ...(Array.isArray(team.agents) ? {
+      agents: team.agents
+        .filter((agent) => agent && typeof agent.name === 'string' && !!agent.name.trim())
+        .map((agent) => ({
+          name: agent.name.trim(),
+          ...(agent.role ? { role: agent.role } : {}),
+          ...(agent.engine === 'claude' || agent.engine === 'codex' || agent.engine === 'kimi' ? { engine: agent.engine } : {}),
+          ...(agent.prompt ? { prompt: agent.prompt } : {}),
+          ...(agent.sessionId ? { sessionId: agent.sessionId } : {}),
+          ...(agent.status === 'idle' || agent.status === 'working' || agent.status === 'stopped' ? { status: agent.status } : {}),
+        })),
+    } : {}),
+    ...(Array.isArray(team.tasks) ? {
+      tasks: team.tasks
+        .filter((task) => task && typeof task.subject === 'string' && !!task.subject.trim())
+        .map((task) => ({
+          ...(typeof task.id === 'number' ? { id: task.id } : {}),
+          subject: task.subject.trim(),
+          ...(task.description ? { description: task.description } : {}),
+          ...(task.owner ? { owner: task.owner } : {}),
+          ...(Array.isArray(task.blockedBy) ? { blockedBy: task.blockedBy.filter((v): v is number => typeof v === 'number') } : {}),
+          ...(task.status === 'pending' || task.status === 'in_progress' || task.status === 'completed' || task.status === 'deleted' ? { status: task.status } : {}),
+          ...(task.result ? { result: task.result } : {}),
+        })),
+    } : {}),
   };
 }

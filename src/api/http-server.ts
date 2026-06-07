@@ -1,6 +1,9 @@
 import * as http from 'node:http';
+import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
+import { loadAppConfig } from '../config.js';
+import type { AgentTeamConfig } from '../agent-teams/team-store.js';
 import type { BotRegistry } from './bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { DocSync } from '../sync/doc-sync.js';
@@ -16,6 +19,8 @@ import { VoiceMeetingService } from './voice-meeting.js';
 import { VoiceIdentityStore } from './voice-identity.js';
 import { RtcVoiceChatService } from './rtc-voice-chat.js';
 import { ActivityStore } from './activity-store.js';
+import { AgentTeamStore } from '../agent-teams/team-store.js';
+import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
@@ -29,6 +34,7 @@ import {
   handleRtcRoutes,
   handleSessionRoutes,
   handleExecutorRoutes,
+  handleAgentTeamRoutes,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
 
@@ -45,6 +51,8 @@ interface ApiServerOptions {
   circuitBreaker?: CircuitBreaker;
   budgetManager?: BudgetManager;
   teamManager?: TeamManager;
+  agentTeamStore?: AgentTeamStore;
+  agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
 }
 
@@ -117,9 +125,20 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const circuitBreaker = options.circuitBreaker ?? new CircuitBreaker(logger);
   const budgetManager = options.budgetManager ?? new BudgetManager(logger);
   const teamManager = options.teamManager ?? new TeamManager(logger);
+  const agentTeamStore = options.agentTeamStore ?? new AgentTeamStore(logger);
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
+  const agentTeamSupervisor = new AgentTeamSupervisor({ registry, store: agentTeamStore, logger });
+  if (options.agentTeams?.length) {
+    agentTeamStore.reconcileTeams(options.agentTeams);
+    logger.info({ count: options.agentTeams.length }, 'Agent teams reconciled from config');
+  }
+  const agentTeamsConfigWatcher = watchAgentTeamsConfig({
+    botsConfigPath,
+    store: agentTeamStore,
+    logger,
+  });
   const rtcService = new RtcVoiceChatService(logger);
   if (rtcService.isConfigured()) {
     logger.info('RTC voice chat service enabled');
@@ -137,7 +156,14 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     ws,
     sessionRegistry: options.sessionRegistry,
     activityStore,
+    agentTeamStore,
+    agentTeamSupervisor,
   };
+
+  for (const bot of registry.listRegistered()) {
+    bot.bridge.setAgentTeamStore(agentTeamStore);
+  }
+  agentTeamSupervisor.start();
 
   // Route handlers in priority order
   const routeHandlers = [
@@ -150,6 +176,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleRtcRoutes,
     handleSessionRoutes,
     handleExecutorRoutes,
+    handleAgentTeamRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {
@@ -237,6 +264,39 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   server.listen(port, host, () => {
     logger.info({ host, port }, 'API server started');
   });
+  server.on('close', () => {
+    agentTeamsConfigWatcher?.close();
+    agentTeamSupervisor.destroy();
+  });
 
   return server;
+}
+
+function watchAgentTeamsConfig(options: {
+  botsConfigPath?: string;
+  store: AgentTeamStore;
+  logger: Logger;
+}): fs.FSWatcher | undefined {
+  if (!options.botsConfigPath || process.env.METABOT_AGENT_TEAMS_HOT_RELOAD === '0') return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const reload = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      try {
+        const config = loadAppConfig();
+        options.store.reconcileTeams(config.agentTeams);
+        options.logger.info({ count: config.agentTeams.length }, 'Agent teams hot-reloaded from bots.json');
+      } catch (err: any) {
+        options.logger.warn({ err: err?.message || err }, 'Agent teams hot reload failed');
+      }
+    }, 250);
+  };
+  try {
+    const watcher = fs.watch(options.botsConfigPath, reload);
+    watcher.unref?.();
+    return watcher;
+  } catch (err: any) {
+    options.logger.warn({ err: err?.message || err, botsConfigPath: options.botsConfigPath }, 'Agent teams hot reload watcher failed');
+    return undefined;
+  }
 }

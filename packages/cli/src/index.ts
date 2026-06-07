@@ -9,6 +9,7 @@
  *   metabot skills <…>   → @xvirobotics/skill-hub   (former `mh`)
  *   metabot agents <…>   → in-tree (./agents.js)
  *   metabot inbox <…>    → in-tree (./inbox.js); wraps /api/inbox/*
+ *   metabot teams <…>    → in-tree (./teams.js); wraps local bridge /api/agent-teams/*
  *   metabot t5t <…>      → in-tree (./t5t.js); wraps /api/t5t/cli/*
  *   metabot help         → top-level help (also: bare invocation, --help, -h)
  */
@@ -42,6 +43,11 @@ export async function main(argv: string[]): Promise<void> {
     }
     case 'inbox': {
       const m = await import('./inbox.js');
+      await m.run(rest);
+      return;
+    }
+    case 'teams': {
+      const m = await import('./teams.js');
       await m.run(rest);
       return;
     }

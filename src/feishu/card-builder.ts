@@ -79,10 +79,15 @@ export function buildCard(state: CardState): string {
     }
     if (ts.tasks.length > 0) {
       // Show in-progress first, then most recent completions
+      const pending = ts.tasks.filter(t => t.status === 'pending');
       const inProgress = ts.tasks.filter(t => t.status === 'in_progress');
       const completed = ts.tasks.filter(t => t.status === 'completed').slice(-5);
       lines.push('');
-      lines.push(`**Tasks:** ${inProgress.length} in progress · ${ts.tasks.filter(t => t.status === 'completed').length} done`);
+      lines.push(`**Tasks:** ${pending.length} pending · ${inProgress.length} in progress · ${ts.tasks.filter(t => t.status === 'completed').length} done`);
+      for (const t of pending) {
+        const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
+        lines.push(`◻️ ${truncate(t.subject, 80)}${owner}`);
+      }
       for (const t of inProgress) {
         const owner = t.teammate ? ` → \`${t.teammate}\`` : '';
         lines.push(`⏳ ${truncate(t.subject, 80)}${owner}`);

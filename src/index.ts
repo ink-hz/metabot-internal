@@ -333,6 +333,7 @@ async function main() {
     feishuServiceClient,
     peerManager,
     sessionRegistry,
+    agentTeams: appConfig.agentTeams,
   });
 
   // Graceful shutdown

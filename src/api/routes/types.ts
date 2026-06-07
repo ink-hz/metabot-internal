@@ -17,6 +17,8 @@ import type { RtcVoiceChatService } from '../rtc-voice-chat.js';
 import type { WebSocketHandle } from '../../web/ws-server.js';
 import type { SessionRegistry } from '../../session/session-registry.js';
 import type { ActivityStore } from '../activity-store.js';
+import type { AgentTeamStore } from '../../agent-teams/team-store.js';
+import type { AgentTeamSupervisor } from '../../agent-teams/team-supervisor.js';
 
 export interface RouteContext {
   registry: BotRegistry;
@@ -37,6 +39,8 @@ export interface RouteContext {
   ws: { handle?: WebSocketHandle };
   sessionRegistry?: SessionRegistry;
   activityStore?: ActivityStore;
+  agentTeamStore?: AgentTeamStore;
+  agentTeamSupervisor?: AgentTeamSupervisor;
 }
 
 /**

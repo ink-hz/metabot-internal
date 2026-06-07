@@ -67,6 +67,42 @@ Bot 名称支持[限定名](../features/peers.md#限定名)（`peerName/botName`
 metabot peers                       # 列出 peer 及状态
 ```
 
+### Agent 团队
+
+`metabot teams` 调用本地 bridge 的 `/api/agent-teams/*` API。它是 MetaBot Agent 团队的协调入口，覆盖 agents、邮箱消息、共享任务和后台 runs。
+
+```bash
+metabot teams list
+metabot teams create <team> [--description <text>]
+metabot teams status <team>
+metabot teams start <team>
+metabot teams stop <team>
+metabot teams delete <team>
+
+metabot teams agents list <team>
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents stop <team> <name>
+metabot teams agents delete <team> <name>
+
+metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
+metabot teams inbox <team> <name> [--unread] [--read]
+
+metabot teams tasks list <team>
+metabot teams tasks create <team> <subject> [--description <text>] [--owner <name>]
+metabot teams tasks get <team> <id>
+metabot teams tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+
+metabot teams runs list <team>
+metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
+metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
+metabot teams runs output <team> <runId>
+metabot teams runs stop <team> <runId>
+```
+
+`runs stop` 会把 run 标记为 `stopped`；当该 in-flight run 由 bridge supervisor 管理时，还会请求 bridge 停止对应队友 chat task，把已分配且 in-progress 的任务重新排回 `pending`，并抑制该 stopped run 的迟到 executor output。
+
+同一套命令同时实现在 `bin/metabot` 和 `packages/cli` 的 TypeScript 功能 CLI 中。Bridge 从 `.env` 读取 `API_PORT` / `API_SECRET` 和可选的 `METABOT_URL`。
+
 ### 定时任务
 
 ```bash

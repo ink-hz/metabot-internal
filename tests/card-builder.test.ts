@@ -238,6 +238,27 @@ describe('buildCard', () => {
     expect(team.content).toContain('ux-researcher');
     expect(team.content).toContain('UX audit');
   });
+
+  it('renders pending Agent Team tasks', () => {
+    const state: CardState = {
+      status: 'running',
+      userPrompt: 't',
+      responseText: '',
+      toolCalls: [],
+      teamState: {
+        name: 'demo',
+        teammates: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
+      },
+    };
+    const json = JSON.parse(buildCard(state));
+    const team = json.elements.find(
+      (e: any) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content),
+    );
+    expect(team).toBeDefined();
+    expect(team.content).toContain('1 pending');
+    expect(team.content).toContain('Plan work');
+  });
 });
 
 describe('buildHelpCard', () => {

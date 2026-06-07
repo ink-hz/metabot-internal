@@ -68,6 +68,42 @@ path; `metabot agents talk` is the separate central-registry P2P variant.
 metabot peers                       # list peers and status
 ```
 
+### Agent Teams
+
+`metabot teams` talks to the local bridge `/api/agent-teams/*` API. It is the coordination surface for MetaBot Agent Teams: agents, mailbox messages, shared tasks, and background runs.
+
+```bash
+metabot teams list
+metabot teams create <team> [--description <text>]
+metabot teams status <team>
+metabot teams start <team>
+metabot teams stop <team>
+metabot teams delete <team>
+
+metabot teams agents list <team>
+metabot teams agents spawn <team> <name> [--role <role>] [--engine claude|codex|kimi] [--prompt <text>]
+metabot teams agents stop <team> <name>
+metabot teams agents delete <team> <name>
+
+metabot teams send <team> <to> <message> [--from <name>] [--summary <text>]
+metabot teams inbox <team> <name> [--unread] [--read]
+
+metabot teams tasks list <team>
+metabot teams tasks create <team> <subject> [--description <text>] [--owner <name>]
+metabot teams tasks get <team> <id>
+metabot teams tasks update <team> <id> [--status pending|in_progress|completed|deleted] [--owner <name>] [--result <text>]
+
+metabot teams runs list <team>
+metabot teams runs create <team> [--agent <name>] [--task-id <id>] [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
+metabot teams runs update <team> <runId> [--status running|completed|failed|stopped] [--output <text>] [--error <text>]
+metabot teams runs output <team> <runId>
+metabot teams runs stop <team> <runId>
+```
+
+`runs stop` marks the run `stopped` and, when the bridge supervisor owns the in-flight run, asks the bridge to stop that teammate chat task, requeues assigned in-progress tasks to `pending`, and suppresses late executor output for that stopped run.
+
+The same command surface is implemented in both `bin/metabot` and the TypeScript feature CLI under `packages/cli`. The bridge reads `API_PORT` / `API_SECRET` and optional `METABOT_URL` from `.env`.
+
 ### Scheduling
 
 ```bash

@@ -45,7 +45,7 @@ _load_bridge_api_config() {
     _api_url=$(sed -n 's/^METABOT_URL=//p' "$envf" 2>/dev/null || true)
   fi
   METABOT_URL="${METABOT_URL:-${_api_url:-http://localhost:${_api_port:-9100}}}"
-  _api_secret="${_api_secret:-${API_SECRET:-changeme}}"
+  _api_secret="${API_SECRET:-${_api_secret:-changeme}}"
   METABOT_AUTH="Authorization: Bearer $_api_secret"
 }
 
@@ -179,13 +179,15 @@ cmd_update() {
   )
   # Phase 4 consolidation: `metamemory` and `skill-hub` skill bundles are
   # subsumed by the unified `metabot` skill (which delegates memory/skills/
-  # agents/t5t to the metabot-core feature CLI). metaskill / metaschedule
-  # remain opt-in; sources still ship in src/skills/* for manual copy.
-  for skill in metabot voice; do
+  # agents/t5t to the metabot-core feature CLI). metabot-team is the compact
+  # Agent Teams coordination skill. metaskill / metaschedule remain opt-in;
+  # sources still ship in src/skills/* for manual copy.
+  for skill in metabot voice metabot-team; do
     case "$skill" in
-      metabot) src="$METABOT_HOME/packages/skills/metabot" ;;
-      voice)   src="$METABOT_HOME/src/skills/voice" ;;
-      *)       src="" ;;
+      metabot)      src="$METABOT_HOME/packages/skills/metabot" ;;
+      voice)        src="$METABOT_HOME/src/skills/voice" ;;
+      metabot-team) src="$METABOT_HOME/src/skills/metabot-team" ;;
+      *)            src="" ;;
     esac
     if [[ -n "$src" && -d "$src" ]]; then
       for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
@@ -1050,6 +1052,218 @@ print(json.dumps(body))
           ;;
       esac
       ;;
+    teams|team)
+      python3 - "$METABOT_URL" "${_api_secret:-changeme}" "$@" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+base = sys.argv[1].rstrip("/")
+token = sys.argv[2]
+argv = sys.argv[3:]
+
+def usage():
+    print("""metabot teams - MetaBot Agent Teams
+  metabot teams list
+  metabot teams create <team> [--description text]
+  metabot teams delete <team>
+  metabot teams status <team>
+  metabot teams bind <team> <chatId> [--display]
+  metabot teams start|stop <team>
+  metabot teams agents list <team>
+  metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--prompt p]
+  metabot teams agents stop <team> <name>
+  metabot teams agents delete <team> <name>
+  metabot teams send <team> <to> <message> [--from name] [--summary text]
+  metabot teams inbox <team> <name> [--unread] [--read]
+  metabot teams tasks list <team>
+  metabot teams tasks create <team> <subject> [--description text] [--owner name]
+  metabot teams tasks get <team> <id>
+  metabot teams tasks update <team> <id> [--status s] [--owner name] [--result text]
+  metabot teams runs list <team>
+  metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
+  metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
+  metabot teams runs output|stop <team> <runId>""")
+
+def parse(args):
+    pos, flags, i = [], {}, 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            pos.extend(args[i + 1:])
+            break
+        if a.startswith("--"):
+            key = a[2:]
+            if "=" in key:
+                k, v = key.split("=", 1)
+                flags[k] = v
+                i += 1
+            elif i + 1 < len(args) and not args[i + 1].startswith("-"):
+                flags[key] = args[i + 1]
+                i += 2
+            else:
+                flags[key] = True
+                i += 1
+        else:
+            pos.append(a)
+            i += 1
+    return pos, flags
+
+def req_data(method, path, body=None):
+    if isinstance(body, dict):
+        body = {k: v for k, v in body.items() if v is not None}
+    data = None if body is None else json.dumps(body).encode()
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    r = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(r) as resp:
+            text = resp.read().decode()
+            try:
+                return json.loads(text)
+            except Exception:
+                return text
+    except urllib.error.HTTPError as e:
+        sys.stdout.write(e.read().decode() or json.dumps({"error": str(e)}))
+        sys.exit(1)
+
+def emit(value):
+    if isinstance(value, (dict, list)):
+        print(json.dumps(value, indent=2, ensure_ascii=False))
+    else:
+        sys.stdout.write(str(value))
+
+def req(method, path, body=None):
+    emit(req_data(method, path, body))
+
+def enc(s):
+    return urllib.parse.quote(str(s), safe="")
+
+if not argv or argv[0] in ("help", "--help", "-h"):
+    usage()
+    raise SystemExit(0)
+
+cmd, rest = argv[0], argv[1:]
+if cmd == "list":
+    req("GET", "/api/agent-teams")
+elif cmd == "create":
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit("Usage: metabot teams create <team>")
+    req("POST", "/api/agent-teams", {"name": pos[0], "description": flags.get("description")})
+elif cmd == "delete":
+    if not rest: raise SystemExit("Usage: metabot teams delete <team>")
+    req("DELETE", f"/api/agent-teams/{enc(rest[0])}")
+elif cmd == "status":
+    if not rest: raise SystemExit("Usage: metabot teams status <team>")
+    req("GET", f"/api/agent-teams/{enc(rest[0])}")
+elif cmd == "bind":
+    pos, flags = parse(rest)
+    if len(pos) < 2: raise SystemExit("Usage: metabot teams bind <team> <chatId> [--display]")
+    current = req_data("GET", f"/api/agent-teams/{enc(pos[0])}")
+    team = current.get("team", {}) if isinstance(current, dict) else {}
+    chat_ids = list(team.get("chatIds") or [])
+    display_chat_ids = list(team.get("displayChatIds") or [])
+    target = display_chat_ids if flags.get("display") is True or flags.get("display") == "true" else chat_ids
+    if pos[1] not in target:
+        target.append(pos[1])
+    req("PATCH", f"/api/agent-teams/{enc(pos[0])}", {
+        "chatIds": chat_ids,
+        "displayChatIds": display_chat_ids,
+    })
+elif cmd in ("start", "stop"):
+    if not rest: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
+    req("POST", f"/api/agent-teams/{enc(rest[0])}/{cmd}", {})
+elif cmd == "agents":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        if not args: raise SystemExit("Usage: metabot teams agents list <team>")
+        req("GET", f"/api/agent-teams/{enc(args[0])}/agents")
+    elif sub == "spawn":
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams agents spawn <team> <name>")
+        req("POST", f"/api/agent-teams/{enc(pos[0])}/agents", {
+            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine"), "prompt": flags.get("prompt")
+        })
+    elif sub == "stop":
+        if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
+        req("POST", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}/stop", {})
+    elif sub in ("delete", "remove"):
+        if len(args) < 2: raise SystemExit(f"Usage: metabot teams agents {sub} <team> <name>")
+        req("DELETE", f"/api/agent-teams/{enc(args[0])}/agents/{enc(args[1])}")
+    else:
+        raise SystemExit("Usage: metabot teams agents list|spawn|stop|delete ...")
+elif cmd == "send":
+    pos, flags = parse(rest)
+    if len(pos) < 3: raise SystemExit("Usage: metabot teams send <team> <to> <message>")
+    req("POST", f"/api/agent-teams/{enc(pos[0])}/messages", {
+        "toName": pos[1], "body": " ".join(pos[2:]), "fromName": flags.get("from"), "summary": flags.get("summary")
+    })
+elif cmd == "inbox":
+    pos, flags = parse(rest)
+    if len(pos) < 2: raise SystemExit("Usage: metabot teams inbox <team> <name>")
+    q = f"?to={enc(pos[1])}" + ("&unread=1" if flags.get("unread") else "")
+    inbox = req_data("GET", f"/api/agent-teams/{enc(pos[0])}/messages{q}")
+    if flags.get("read"):
+        read = req_data("POST", f"/api/agent-teams/{enc(pos[0])}/messages/read?to={enc(pos[1])}", {})
+        if isinstance(inbox, dict) and isinstance(read, dict):
+            inbox["read"] = read.get("read", 0)
+    emit(inbox)
+elif cmd == "tasks":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        if not args: raise SystemExit("Usage: metabot teams tasks list <team>")
+        req("GET", f"/api/agent-teams/{enc(args[0])}/tasks")
+    elif sub == "create":
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams tasks create <team> <subject>")
+        req("POST", f"/api/agent-teams/{enc(pos[0])}/tasks", {
+            "subject": " ".join(pos[1:]), "description": flags.get("description"), "owner": flags.get("owner")
+        })
+    elif sub == "get":
+        if len(args) < 2: raise SystemExit("Usage: metabot teams tasks get <team> <id>")
+        req("GET", f"/api/agent-teams/{enc(args[0])}/tasks/{enc(args[1])}")
+    elif sub == "update":
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams tasks update <team> <id>")
+        req("PATCH", f"/api/agent-teams/{enc(pos[0])}/tasks/{enc(pos[1])}", {
+            "status": flags.get("status"), "owner": flags.get("owner"), "result": flags.get("result")
+        })
+    else:
+        raise SystemExit("Usage: metabot teams tasks list|create|get|update ...")
+elif cmd == "runs":
+    sub, args = (rest[0] if rest else ""), rest[1:]
+    if sub == "list":
+        if not args: raise SystemExit("Usage: metabot teams runs list <team>")
+        req("GET", f"/api/agent-teams/{enc(args[0])}/runs")
+    elif sub == "create":
+        pos, flags = parse(args)
+        if not pos: raise SystemExit("Usage: metabot teams runs create <team>")
+        task_id = flags.get("task-id")
+        req("POST", f"/api/agent-teams/{enc(pos[0])}/runs", {
+            "agentName": flags.get("agent"), "taskId": int(task_id) if task_id else None,
+            "status": flags.get("status"), "output": flags.get("output"), "error": flags.get("error")
+        })
+    elif sub == "update":
+        pos, flags = parse(args)
+        if len(pos) < 2: raise SystemExit("Usage: metabot teams runs update <team> <runId>")
+        req("PATCH", f"/api/agent-teams/{enc(pos[0])}/runs/{enc(pos[1])}", {
+            "status": flags.get("status"), "output": flags.get("output"), "error": flags.get("error")
+        })
+    elif sub in ("output", "stop"):
+        if len(args) < 2: raise SystemExit(f"Usage: metabot teams runs {sub} <team> <runId>")
+        if sub == "output":
+            req("GET", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/output")
+        else:
+            req("POST", f"/api/agent-teams/{enc(args[0])}/runs/{enc(args[1])}/stop", {})
+    else:
+        raise SystemExit("Usage: metabot teams runs list|create|update|output|stop ...")
+else:
+    raise SystemExit(f"Unknown metabot teams command: {cmd}")
+PY
+      ;;
     health|h)
       curl -s -H "$METABOT_AUTH" "$METABOT_URL/api/health" | _json
       ;;
@@ -1074,6 +1288,7 @@ print_help() {
   echo "    metabot bot <name>                 Get bot details"
   echo "    metabot talk <bot> <chatId> <msg>  Talk to a bot (bridge /api/talk)"
   echo "    metabot schedule …                 Task scheduling (list/add/cron/pause/resume/cancel)"
+  echo "    metabot teams …                    MetaBot Agent Teams (agents/tasks/messages/runs)"
   echo "    metabot peers                      List peers and their status"
   echo "    metabot stats                      Cost & usage stats"
   echo "    metabot metrics                    Prometheus metrics"
@@ -1092,7 +1307,7 @@ case "${1:-}" in
   logs|log)     shift; cmd_logs "$@" ;;
   status|st)    cmd_status ;;
   doctor)       shift; cmd_doctor "$@" ;;
-  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|health|h)
+  bots|b|bot|talk|t|schedule|sched|sc|peers|p|stats|metrics|m|voice|v|teams|team|health|h)
                 cmd_bridge_api "$@" ;;
   ""|help|--help|-h) print_help ;;
   *)            cmd_delegate "$@" ;;
