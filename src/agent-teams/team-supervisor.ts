@@ -17,12 +17,10 @@ interface RunnableAgent {
 }
 
 const DEFAULT_INTERVAL_MS = 5_000;
-const DEFAULT_STALE_RUNNING_RUN_MS = 10 * 60_000;
 
 export class AgentTeamSupervisor {
   private readonly logger: Logger;
   private readonly intervalMs: number;
-  private readonly staleRunningRunMs: number;
   private timer?: ReturnType<typeof setInterval>;
   private stopped = false;
   private tickInProgress = false;
@@ -34,11 +32,6 @@ export class AgentTeamSupervisor {
     this.logger = options.logger.child({ module: 'agent-team-supervisor' });
     const envInterval = Number(process.env.METABOT_AGENT_TEAM_SUPERVISOR_INTERVAL_MS);
     this.intervalMs = Math.max(1_000, options.intervalMs ?? (Number.isFinite(envInterval) && envInterval > 0 ? envInterval : DEFAULT_INTERVAL_MS));
-    const envStaleRunMs = Number(process.env.METABOT_AGENT_TEAM_STALE_RUN_MS);
-    this.staleRunningRunMs = Math.max(
-      60_000,
-      Number.isFinite(envStaleRunMs) && envStaleRunMs > 0 ? envStaleRunMs : DEFAULT_STALE_RUNNING_RUN_MS,
-    );
   }
 
   start(): void {
@@ -90,7 +83,6 @@ export class AgentTeamSupervisor {
     if (this.stopped || this.tickInProgress) return;
     this.tickInProgress = true;
     try {
-      this.recoverStaleRunningRuns(this.staleRunningRunMs);
       const bot = this.selectExecutionBot();
       if (!bot) return;
       for (const team of this.options.store.listTeams()) {
@@ -122,17 +114,11 @@ export class AgentTeamSupervisor {
     return this.options.registry.get('metabot') ?? this.options.registry.listRegistered()[0];
   }
 
-  private recoverStaleRunningRuns(maxAgeMs = 0): void {
-    const now = Date.now();
-    const activeRunIds = new Set(this.inFlightRuns.keys());
+  private recoverStaleRunningRuns(): void {
     for (const team of this.options.store.listTeams()) {
       for (const run of this.options.store.listRuns(team.name)) {
         if (run.status !== 'running') continue;
-        if (activeRunIds.has(run.id)) continue;
-        if (maxAgeMs > 0 && now - run.updatedAt <= maxAgeMs) continue;
-        const message = maxAgeMs > 0
-          ? `Agent Team run had no heartbeat for more than ${Math.round(maxAgeMs / 1000)}s; marking stale run failed and requeueing assigned task.`
-          : 'Bridge restarted before this Agent Team run completed; marking stale run failed and requeueing assigned task.';
+        const message = 'Bridge restarted before this Agent Team run completed; marking stale run failed and requeueing assigned task.';
         this.options.store.updateRun(team.name, run.id, {
           status: 'failed',
           error: message,

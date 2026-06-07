@@ -80,48 +80,6 @@ describe('metabot doctor command', () => {
     expect(source).toContain('"skillsDirExists"');
     expect(source).toContain('"mcpServerCount"');
   });
-
-  it('reports Bun toolchain readiness without changing Node/npm defaults', () => {
-    const source = fs.readFileSync(METABOT_BIN, 'utf-8');
-    expect(source).toContain('bun_toolchain');
-    expect(source).toContain('bun.lock');
-    expect(source).toContain('package-lock.json');
-    expect(source).toContain('build:bridge:bun');
-    expect(source).toContain('test:bridge:bun');
-    expect(source).toContain('pack:verify:bun');
-  });
-});
-
-describe('Bun package/build migration helpers', () => {
-  it('adds opt-in Bun scripts while preserving npm release build defaults', () => {
-    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8'));
-    expect(pkg.scripts.build).toContain('npm run build:web');
-    expect(pkg.scripts.build).toContain('npm run pack:standalone');
-    expect(pkg.scripts['build:bridge']).toBe('tsc -p tsconfig.bridge.json');
-    expect(pkg.scripts['test:bridge']).toBe('vitest run');
-    expect(pkg.scripts['build:bridge:bun']).toBe('node scripts/run-bun-if-available.mjs x tsc -p tsconfig.bridge.json');
-    expect(pkg.scripts['test:bridge:bun']).toBe('node scripts/run-bun-if-available.mjs x vitest run');
-    expect(pkg.scripts['pack:verify']).toBe('node scripts/verify-package-artifacts.mjs');
-    expect(pkg.scripts['pack:verify:bun']).toBe('node scripts/run-bun-if-available.mjs scripts/verify-package-artifacts.mjs');
-  });
-
-  it('ships an artifact verifier for install and standalone CLI tarballs', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'verify-package-artifacts.mjs'), 'utf-8');
-    expect(source).toContain('packages/server/static/install/latest.tgz');
-    expect(source).toContain('packages/server/static/cli/latest.tgz');
-    expect(source).toContain('src/agent-teams/');
-    expect(source).toContain('src/skills/metabot-team/SKILL.md');
-    expect(source).toContain('MetaBot Agent Teams');
-    expect(source).toContain('runs stop');
-    expect(source).toContain('sha256');
-  });
-
-  it('wraps Bun experiments with a clear missing-Bun error path', () => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, 'scripts', 'run-bun-if-available.mjs'), 'utf-8');
-    expect(source).toContain('Bun is not installed on PATH');
-    expect(source).toContain('npm/Node remain the release defaults');
-    expect(source).toContain("spawnSync('bun'");
-  });
 });
 
 describe('Codex install defaults', () => {

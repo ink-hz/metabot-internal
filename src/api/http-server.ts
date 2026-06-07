@@ -8,7 +8,6 @@ import type { BotRegistry } from './bot-registry.js';
 import type { TaskScheduler } from '../scheduler/task-scheduler.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type { PeerManager } from './peer-manager.js';
-import { getBridgeRuntimeInfo } from '../runtime-info.js';
 
 import { AsyncTaskStore } from './async-task-store.js';
 import { setupWebSocketServer, serveStaticFiles, type WebSocketHandle } from '../web/ws-server.js';
@@ -225,7 +224,6 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           peersHealthy: peerStatuses.filter((p) => p.healthy).length,
           scheduledTasks: scheduler.taskCount(),
           recurringTasks: scheduler.recurringTaskCount(),
-          runtime: getBridgeRuntimeInfo(),
         });
         return;
       }

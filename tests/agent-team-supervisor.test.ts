@@ -136,52 +136,6 @@ describe('AgentTeamSupervisor', () => {
     store.close();
   });
 
-  it('recovers stale running runs during ticks so idle members can accept new work', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
-    try {
-      vi.setSystemTime(new Date('2026-06-07T00:00:00.000Z'));
-      const store = makeStore();
-      store.createTeam('demo', 'Demo');
-      store.createAgent('demo', { name: 'worker', engine: 'codex' });
-      const staleTask = store.createTask('demo', { subject: 'Already handled', owner: 'worker' });
-      store.updateTask('demo', staleTask.id, { status: 'completed', result: 'completed outside stale run' });
-      const staleRun = store.createRun('demo', { agentName: 'worker', taskId: staleTask.id });
-
-      vi.setSystemTime(new Date('2026-06-07T00:11:00.000Z'));
-      const nextTask = store.createTask('demo', { subject: 'Next task', owner: 'worker' });
-      store.sendMessage('demo', { fromName: 'lead', toName: 'worker', body: 'Please handle next task' });
-
-      const executeApiTask = vi.fn(async () => ({
-        success: true,
-        responseText: 'handled next task',
-        sessionId: 'sid',
-      }));
-      const { registry } = makeRegistry(executeApiTask);
-      const supervisor = new AgentTeamSupervisor({ registry, store, logger, intervalMs: 60_000 });
-
-      await supervisor.tick();
-
-      await waitFor(() => {
-        expect(executeApiTask).toHaveBeenCalledWith(expect.objectContaining({
-          chatId: 'team:demo:worker',
-        }));
-      });
-      expect(store.getRun('demo', staleRun.id)).toMatchObject({
-        status: 'failed',
-        error: expect.stringContaining('no heartbeat'),
-      });
-      expect(store.getTask('demo', staleTask.id)).toMatchObject({ status: 'completed' });
-      expect(store.getTask('demo', nextTask.id)).toMatchObject({
-        status: 'completed',
-        result: 'handled next task',
-      });
-      supervisor.destroy();
-      store.close();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
   it('sends an agent activity card to display chats when a member finishes', async () => {
     const store = makeStore();
     store.createTeam('demo', 'Demo', { displayChatIds: ['oc_main'] });

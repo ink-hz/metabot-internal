@@ -32,7 +32,6 @@ metabot update --git
 
    ```bash
    npm run build
-   npm run pack:verify
    ```
 
    The root build runs `pack-metabot.sh` and writes:
@@ -51,20 +50,6 @@ metabot update --git
    The source env file must stay outside git. The packer embeds it as
    `.metabot-package/default.env`; the bootstrap installs it to
    `~/.metabot/default.env` with `chmod 600`.
-
-   Bun migration note: npm is still the release source of truth. During the
-   Bun dual-track migration, Bun is opt-in only for local experiments:
-
-   ```bash
-   npm run build:bridge:bun
-   npm run test:bridge:bun
-   npm run pack:verify:bun
-   ```
-
-   Do not publish artifacts produced by a Bun-only flow until the P0/P1 gates
-   explicitly approve Bun for release packaging. Keep `package-lock.json` as
-   authoritative unless the lockfile policy changes; `metabot doctor --json`
-   reports Bun presence and mixed npm/Bun lockfile drift.
 
 4. Deploy metabot-core so `packages/server/static/install/` is rsynced to the
    production static directory.
