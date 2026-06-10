@@ -1,6 +1,6 @@
 import type { BotConfigBase } from '../config.js';
 import type { EngineName, ExecutionHandle } from '../engines/index.js';
-import { StreamProcessor, SessionManager } from '../engines/index.js';
+import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS, StreamProcessor, SessionManager } from '../engines/index.js';
 import type { IncomingMessage, CardState } from '../types.js';
 import type { AuditLogger } from '../utils/audit-logger.js';
 import type { Logger } from '../utils/logger.js';
@@ -147,7 +147,7 @@ export class CodexCommandController {
       const body = session.activeGoal
         ? [
             `**Goal:** ${session.activeGoal}`,
-            `**Iterations:** ${session.goalIterations ?? 0}/${session.goalMaxIterations ?? 5}`,
+            `**Iterations:** ${session.goalIterations ?? 0}/${session.goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS}`,
             '',
             'Use `/goal clear` to stop it.',
           ].join('\n')
@@ -164,16 +164,35 @@ export class CodexCommandController {
     }
 
     this.deps.sessionManager.setGoal(chatId, args);
+    const maxIterations = this.deps.sessionManager.getSession(chatId).goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS;
     await this.deps.sender.sendTextNotice(
       chatId,
       '🎯 Goal Set',
       [
         args,
         '',
-        `Codex will keep working across turns until it reports complete, blocked, or reaches ${this.deps.sessionManager.getSession(chatId).goalMaxIterations ?? 5} iterations.`,
+        `Codex will keep working across turns until it reports complete, blocked, or reaches ${maxIterations} iterations.`,
       ].join('\n'),
       'green',
     );
+
+    this.scheduleGoalStart(msg, args);
+  }
+
+  private scheduleGoalStart(original: IncomingMessage, goal: string): void {
+    if (this.deps.hasRunningTask(original.chatId) || this.deps.hasQueuedMessages(original.chatId)) return;
+
+    const next: IncomingMessage = {
+      ...original,
+      messageId: `${original.messageId || 'goal'}-goal-start`,
+      text: `Start working toward the active goal: ${goal}`,
+      timestamp: Date.now(),
+    };
+    setTimeout(() => {
+      this.deps.executeQuery(next).catch((err) => {
+        this.deps.logger.error({ err, chatId: original.chatId }, 'Codex goal initial turn failed');
+      });
+    }, 100);
   }
 
   private async handleBackgroundCommand(msg: IncomingMessage, args: string): Promise<void> {
@@ -281,7 +300,12 @@ export class CodexCommandController {
     const apiContext = { botName: this.deps.config.name, chatId: task.chatId };
     const activeGoal = baseSession.activeGoal;
     const prompt = activeGoal
-      ? buildCodexGoalPrompt(task.prompt, activeGoal, baseSession.goalIterations ?? 0, baseSession.goalMaxIterations ?? 5)
+      ? buildCodexGoalPrompt(
+          task.prompt,
+          activeGoal,
+          baseSession.goalIterations ?? 0,
+          baseSession.goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS,
+        )
       : task.prompt;
     let lastState: CardState = {
       status: 'thinking',

@@ -61,6 +61,7 @@ interface PersistedSession {
 // from config, not from the persisted session, so old sessions don't interfere.
 const SESSION_TTL_MS = Infinity;
 const MAX_SESSIONS = 10_000;
+export const DEFAULT_CODEX_GOAL_MAX_ITERATIONS = 25;
 
 export class SessionManager {
   private sessions = new Map<string, UserSession>();
@@ -177,7 +178,9 @@ export class SessionManager {
       session.goalSetAt = Date.now();
       session.goalIterations = 0;
       const maxIterations = Number(process.env.METABOT_CODEX_GOAL_MAX_ITERATIONS);
-      session.goalMaxIterations = Number.isFinite(maxIterations) && maxIterations > 0 ? maxIterations : 5;
+      session.goalMaxIterations = Number.isFinite(maxIterations) && maxIterations > 0
+        ? maxIterations
+        : DEFAULT_CODEX_GOAL_MAX_ITERATIONS;
     } else {
       session.activeGoal = undefined;
       session.goalSetAt = undefined;

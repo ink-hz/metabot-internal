@@ -233,6 +233,7 @@ metabot t5t bottleneck <project> "<text>"      # owner-only ; pass --clear to re
 metabot t5t wip <project> <evaluatorId> "<title>"
                                                # owner-only
 metabot t5t kill <project>                     # owner-only ; soft-kill (append-only status=killed)
+metabot t5t reopen <project>                   # owner-only ; reopen by appending status=unknown
 metabot t5t delete <smoke-project>             # owner-only ; hard-delete smoke* test projects
 metabot t5t top5 <project> add "<text>"        # owner-only ; add a Top-5 todo item
 metabot t5t top5 <project> done|reopen|remove <itemId>

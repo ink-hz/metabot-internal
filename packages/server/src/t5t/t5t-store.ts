@@ -323,6 +323,27 @@ export class T5tStore {
   }
 
   /**
+   * Reopen a killed project by appending a NEW project doc with status reset to
+   * `unknown`. This preserves the append-only audit trail and all project
+   * metadata; latest-doc-wins surfaces the reopened state.
+   */
+  reopenProject(slug: string, cred: Credential): ProjectSummary {
+    const cur = this.getProject(slug);
+    if (!cur) throw httpErr(404, 'project_not_found');
+    return this.appendProject(
+      {
+        slug: cur.slug,
+        name: cur.name,
+        leaderEmail: cur.leaderEmail,
+        allowedUsers: cur.allowedUsers,
+        status: 'unknown',
+        killCriteria: cur.killCriteria,
+      },
+      cred,
+    );
+  }
+
+  /**
    * Hard-delete test projects only. T5T is append-only for real projects, but
    * smoke-test data creates noisy permanent board entries. Keep this escape
    * hatch tightly scoped to slugs that start with "smoke".

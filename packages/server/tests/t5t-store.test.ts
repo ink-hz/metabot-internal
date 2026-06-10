@@ -430,6 +430,28 @@ describe('T5tStore — append-only invariant', () => {
     expect(() => store.killProject('no-such-thing', cred)).toThrow(/project_not_found/);
   });
 
+  it('reopenProject appends a non-killed doc preserving prior fields', () => {
+    const cred = mkCred('ameng');
+    store.appendProject({
+      slug: 'paused', name: 'Paused', leaderEmail: 'ameng@xvi',
+      allowedUsers: ['bob@xvi'], status: 'yellow',
+      killCriteria: 'sunset if no users by Q3',
+    }, cred);
+    expect(store.killProject('paused', cred).status).toBe('killed');
+
+    const reopened = store.reopenProject('paused', cred);
+    expect(reopened.status).toBe('unknown');
+    expect(reopened.name).toBe('Paused');
+    expect(reopened.leaderEmail).toBe('ameng@xvi');
+    expect(reopened.allowedUsers).toEqual(['bob@xvi']);
+    expect(reopened.killCriteria).toBe('sunset if no users by Q3');
+  });
+
+  it('reopenProject throws 404 when slug is unknown', () => {
+    const cred = mkCred('ameng');
+    expect(() => store.reopenProject('no-such-thing', cred)).toThrow(/project_not_found/);
+  });
+
   it('purgeSmokeProject hard-deletes smoke project docs and related records', () => {
     const cred = mkCred('ameng');
     store.appendProject({ slug: 'smoke-test-proj', leaderEmail: 'ameng' }, cred);

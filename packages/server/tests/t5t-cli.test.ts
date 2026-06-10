@@ -229,6 +229,34 @@ describe('t5t CLI routes — MR3', () => {
     expect(res.body.error).toBe('project_required');
   });
 
+  it('POST /cli/reopen as leader → 200, project surfaces status=unknown; non-leader → 403', async () => {
+    kit = await startTestServer('t5t-cli-reopen');
+    const leader = 'owner@xvirobotics.com';
+    const token = await issueMember(kit, leader);
+    kit.handle.t5tStore.appendProject(
+      { slug: 'paused', name: 'Paused', leaderEmail: leader, status: 'yellow' },
+      { botName: 'seed', role: 'admin' } as never,
+    );
+    kit.handle.t5tStore.killProject('paused', { botName: 'seed', role: 'admin' } as never);
+
+    const intruderToken = await issueMember(kit, 'intruder@xvirobotics.com');
+    const denied = await call(kit.baseUrl, 'POST', '/api/t5t/cli/reopen', intruderToken, {
+      project: 'paused',
+    });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toBe('owner_required');
+
+    const ok = await call(kit.baseUrl, 'POST', '/api/t5t/cli/reopen', token, {
+      project: 'paused',
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe('unknown');
+
+    const detail = await call(kit.baseUrl, 'GET', '/api/t5t/cli/project/paused', token);
+    expect(detail.status).toBe(200);
+    expect(detail.body.project.status).toBe('unknown');
+  });
+
   it('POST /cli/delete only hard-deletes owner smoke projects', async () => {
     kit = await startTestServer('t5t-cli-delete-smoke');
     const owner = 'smoke-owner@xvirobotics.com';
