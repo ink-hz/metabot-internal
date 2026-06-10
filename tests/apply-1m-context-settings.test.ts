@@ -18,6 +18,13 @@ describe('apply1MContextSettings', () => {
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000');
   });
 
+  it('leaves Fable 5 on its native Claude Code context settings', () => {
+    const q: Record<string, unknown> = { model: 'claude-fable-5' };
+    apply1MContextSettings(q);
+    expect(q.betas).toBeUndefined();
+    expect(q.env).toBeUndefined();
+  });
+
   it('does NOT cap the auto-compact window when [1m] is requested', () => {
     const q: Record<string, unknown> = { model: 'claude-opus-4-8[1m]' };
     apply1MContextSettings(q);
