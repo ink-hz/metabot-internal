@@ -7,6 +7,8 @@ import {
   formatSpontaneousCardBody,
   resolvePersistentExecutorEnvDefault,
 } from '../src/bridge/message-bridge.js';
+import { CodexCommandController } from '../src/bridge/codex-command-controller.js';
+import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS } from '../src/engines/index.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
@@ -157,6 +159,61 @@ describe('MessageBridge between-turn questions', () => {
     expect(notices.at(-1)?.title).toContain('Goal Set');
     expect(notices.at(-1)?.content).toContain('ship Codex support');
     expect(bridge.getSessionManager().getSession('chat-1').activeGoal).toBe('ship Codex support');
+  });
+
+  it('starts the first Codex goal turn after setting a goal', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const session: any = {
+      sessionId: undefined,
+      workingDirectory: '/tmp',
+      lastUsed: Date.now(),
+      cumulativeTokens: 0,
+      cumulativeCostUsd: 0,
+      cumulativeDurationMs: 0,
+    };
+    const executeQuery = vi.fn(async () => {});
+    const controller = new CodexCommandController({
+      config: makeCodexConfig(),
+      logger: mockLogger,
+      sender,
+      sessionManager: {
+        getSession: () => session,
+        setGoal: (_chatId: string, condition: string | undefined) => {
+          session.activeGoal = condition;
+          session.goalIterations = condition ? 0 : undefined;
+          session.goalMaxIterations = condition ? DEFAULT_CODEX_GOAL_MAX_ITERATIONS : undefined;
+        },
+      } as any,
+      outputsManager: {} as any,
+      outputHandler: {} as any,
+      audit: {} as any,
+      runOneTurn: vi.fn() as any,
+      executeQuery,
+      hasRunningTask: () => false,
+      hasQueuedMessages: () => false,
+    });
+
+    const handled = await controller.tryHandleBridgeCommand({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/goal ship Codex support',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(handled).toBe(true);
+    expect(notices.at(-1)?.content).toContain(`reaches ${DEFAULT_CODEX_GOAL_MAX_ITERATIONS} iterations`);
+    expect(executeQuery).toHaveBeenCalledOnce();
+    expect(executeQuery.mock.calls[0][0]).toMatchObject({
+      chatId: 'chat-1',
+      text: 'Start working toward the active goal: ship Codex support',
+    });
   });
 
   it('handles Codex /background list without starting a model turn', async () => {

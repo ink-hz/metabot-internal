@@ -13,7 +13,13 @@ import type {
   TeamEvent,
   ApiContext,
 } from '../engines/index.js';
-import { createEngine, resolveEngineName, StreamProcessor, SessionManager } from '../engines/index.js';
+import {
+  createEngine,
+  DEFAULT_CODEX_GOAL_MAX_ITERATIONS,
+  resolveEngineName,
+  StreamProcessor,
+  SessionManager,
+} from '../engines/index.js';
 import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
@@ -1937,7 +1943,7 @@ export class MessageBridge {
     let codexGoalMaxIterations = 0;
     if (engineName === 'codex' && activeGoal) {
       codexGoalIteration = this.sessionManager.incrementGoalIteration(chatId);
-      codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? 5;
+      codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS;
       prompt = buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
     }
 

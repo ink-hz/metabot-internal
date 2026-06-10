@@ -51,6 +51,7 @@ export { CodexEngine } from './codex/index.js';
 // Moving these behind the engine boundary lets consumers import from a single place.
 export {
   ClaudeExecutor,
+  DEFAULT_CODEX_GOAL_MAX_ITERATIONS,
   StreamProcessor,
   SessionManager,
   extractImagePaths,
