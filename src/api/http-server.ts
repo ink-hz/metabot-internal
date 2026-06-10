@@ -212,8 +212,22 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     }
 
     try {
-      // GET /api/health — always handled here (lightweight)
+      // GET /api/health — minimal, unauthenticated-safe liveness probe.
+      // Deliberately returns ONLY status + uptime so an unauthenticated caller
+      // (deploy/k8s probe, or anyone if no api.secret is set) can't enumerate
+      // peer count, peer health, or peer URLs for reconnaissance. Detailed
+      // topology lives behind the authenticated /api/status route.
       if (method === 'GET' && url === '/api/health') {
+        jsonResponse(res, 200, {
+          status: 'ok',
+          uptime: Math.floor((Date.now() - startTime) / 1000),
+        });
+        return;
+      }
+
+      // GET /api/status — same diagnostics that /api/health used to leak, but
+      // gated by the auth check above (local secret or cross-verified Bearer).
+      if (method === 'GET' && url === '/api/status') {
         const peerStatuses = peerManager?.getPeerStatuses() ?? [];
         jsonResponse(res, 200, {
           status: 'ok',
