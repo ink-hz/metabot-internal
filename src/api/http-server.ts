@@ -190,7 +190,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // metabot-core `GET /api/whoami` validates (cross-bridge peer calls,
     // `metabot talk` from any user with a metabot-core token). Every other
     // API stays single-secret.
-    if (secret && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
+    // GET /api/health is exempt: it returns only minimal liveness info (see
+    // handler below) so probes/load-balancers can hit it without a secret.
+    const isPublicHealth = method === 'GET' && url === '/api/health';
+    if (secret && !isPublicHealth && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const urlToken = url.includes('token=')
         ? new URL(url, `http://${req.headers.host || 'localhost'}`).searchParams.get('token')
