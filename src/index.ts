@@ -1,3 +1,4 @@
+import * as https from 'node:https';
 import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
@@ -30,7 +31,41 @@ interface FeishuBotHandle {
   feishuClient: lark.Client;
 }
 
-async function startFeishuBot(botConfig: BotConfig, logger: Logger): Promise<FeishuBotHandle> {
+/**
+ * METABOT_LOCAL_ADDRESS=<source-ip> pins the source address of every Feishu
+ * socket (REST + the wss long-connection), so the OS routes them out the
+ * interface owning that IP instead of the default route. Workaround for VPN
+ * clients with smart split-tunneling (e.g. 飞连) that capture *.feishu.cn
+ * into a tunnel that is actually down while still claiming connected: live
+ * sockets held by an old process keep working, but the next restart can't
+ * reconnect and every bot goes silent — looking like the upgrade broke it.
+ *
+ * REST coverage works by setting the agent on the lark SDK's shared
+ * `defaultHttpInstance`, which every `lark.Client` here uses (bot clients,
+ * the Feishu service client, DocSync). Mutating it — rather than passing a
+ * custom `httpInstance` — keeps the SDK's own interceptors intact; a custom
+ * axios instance must re-implement the response-unwrap interceptor or the
+ * SDK's internal tenant-token fetch destructures `code` from the wrapped
+ * body and silently breaks ("code: undefined"). The returned agent must
+ * additionally be passed to each `lark.WSClient`, whose `agent` option goes
+ * straight to the underlying wss socket.
+ *
+ * Native-fetch traffic is deliberately NOT touched (no undici global
+ * dispatcher): nothing in this codebase calls Feishu via fetch, and a global
+ * dispatcher would also re-route peer/metabot-core traffic out of scope.
+ *
+ * Unset (the default) → returns undefined and nothing is constructed.
+ */
+function setupFeishuLocalAddress(logger: Logger): https.Agent | undefined {
+  const localAddress = process.env.METABOT_LOCAL_ADDRESS?.trim();
+  if (!localAddress) return undefined;
+  const agent = new https.Agent({ keepAlive: true, localAddress });
+  lark.defaultHttpInstance.defaults.httpsAgent = agent;
+  logger.info({ localAddress }, 'Feishu sockets bound to local address (METABOT_LOCAL_ADDRESS)');
+  return agent;
+}
+
+async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?: https.Agent): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
   botLogger.info('Starting Feishu bot...');
@@ -84,6 +119,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger): Promise<Fei
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     loggerLevel: lark.LoggerLevel.info,
+    agent: localAgent,
   });
 
   // Start WebSocket connection with event dispatcher
@@ -165,12 +201,16 @@ async function main() {
   // Create bot registry
   const registry = new BotRegistry();
 
+  // Must run before ANY lark.Client makes a request (token fetches included)
+  // so no Feishu socket ever goes out the default route.
+  const feishuLocalAgent = setupFeishuLocalAddress(logger);
+
   // Start bots independently so a single platform/API timeout does not
   // take down the whole MetaBot process.
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger),
+      (bot) => startFeishuBot(bot, logger, feishuLocalAgent),
       logger,
       'feishu',
     )
