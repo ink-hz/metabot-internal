@@ -544,7 +544,7 @@ export class PeerManager {
                 : [{
                     name: entry.botName,
                     platform: 'agent-bus',
-                    engine: 'claude',
+                    engine: 'codex',
                     workingDirectory: '',
                     peerUrl: normalizedUrl,
                     peerName: entry.botName,
@@ -625,7 +625,7 @@ export class PeerManager {
         state.bots = [{
           name: config.name,
           platform: 'agent-bus',
-          engine: 'claude',
+          engine: 'codex',
           workingDirectory: '',
           peerUrl: 'inbox:',
           peerName: config.name,
@@ -677,7 +677,7 @@ export class PeerManager {
           name: b.name,
           ...(b.description ? { description: b.description } : {}),
           platform: b.platform,
-          engine: b.engine ?? 'claude',
+          engine: b.engine ?? 'codex',
           ...(b.model ? { model: b.model } : {}),
           workingDirectory: b.workingDirectory,
           peerUrl: config.url,

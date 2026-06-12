@@ -127,14 +127,14 @@ function modelStorageKey(conversationId: string): string {
 function loadModelChoice(conversationId: string): { engine: ChatEngine; model: string } {
   try {
     const raw = window.localStorage.getItem(modelStorageKey(conversationId));
-    if (!raw) return { engine: 'claude', model: '' };
+    if (!raw) return { engine: 'codex', model: '' };
     const parsed = JSON.parse(raw) as { engine?: string; model?: string };
     const engine = parsed.engine === 'codex' || parsed.engine === 'kimi' || parsed.engine === 'claude'
       ? parsed.engine
-      : 'claude';
+      : 'codex';
     return { engine, model: typeof parsed.model === 'string' ? parsed.model : '' };
   } catch {
-    return { engine: 'claude', model: '' };
+    return { engine: 'codex', model: '' };
   }
 }
 
@@ -931,7 +931,7 @@ export function Chat() {
   const [runsByMessageId, setRunsByMessageId] = useState<Record<string, TimelineRun[]>>({});
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshAt, setLastRefreshAt] = useState<string | null>(null);
-  const [engine, setEngine] = useState<ChatEngine>('claude');
+  const [engine, setEngine] = useState<ChatEngine>('codex');
   const [model, setModel] = useState('');
   const [showNewChat, setShowNewChat] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -1092,7 +1092,7 @@ export function Chat() {
     if (!selected) return;
     const command = parseModelCommand(content);
     if (command) {
-      const nextEngine = command.reset ? 'claude' : command.engine || engine;
+      const nextEngine = command.reset ? 'codex' : command.engine || engine;
       const nextModel = command.reset || command.engine ? '' : command.model ?? model;
       setEngine(nextEngine);
       setModel(nextModel);

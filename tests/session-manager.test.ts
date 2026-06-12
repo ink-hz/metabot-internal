@@ -91,6 +91,19 @@ describe('SessionManager', () => {
     expect(session.modelEngine).toBe('codex');
   });
 
+  it('persists Codex reasoning effort metadata', () => {
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'effort-test');
+    manager.setReasoningEffort('chat1', 'high');
+    manager.destroy();
+
+    manager = new SessionManager('/tmp/test-dir', createLogger(), 'effort-test');
+    const session = manager.getSession('chat1');
+    expect(session.reasoningEffort).toBe('high');
+
+    manager.setReasoningEffort('chat1', undefined);
+    expect(manager.getSession('chat1').reasoningEffort).toBeUndefined();
+  });
+
   it('repairs persisted sessions whose working directory no longer exists', () => {
     const defaultDir = mkdtempSync(join(tmpdir(), 'metabot-session-default-'));
     const storePath = join(storeDir, 'sessions-repair-test.json');

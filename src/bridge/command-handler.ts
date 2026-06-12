@@ -1,4 +1,4 @@
-import type { BotConfigBase } from '../config.js';
+import type { BotConfigBase, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { IncomingMessage } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
@@ -74,6 +74,7 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/effort low|medium|high|xhigh` - Set Codex reasoning effort for this chat',
           '`/resume` - List & switch to a previous Claude session (Claude only)',
           '`/resume <id>` - Resume a session directly by id prefix',
           '`/memory` - Memory document commands',
@@ -178,6 +179,7 @@ export class CommandHandler {
           `**Working Directory:** \`${session.workingDirectory}\``,
           `**Session:** ${session.sessionId ? `\`${session.sessionId.slice(0, 8)}...\`` : '_None_'}`,
           `**Model:** \`${activeModel}\`${session.model ? ' (session override)' : ''}`,
+          `**Effort:** \`${session.reasoningEffort || this.config.codex?.reasoningEffort || 'codex default'}\`${session.reasoningEffort ? ' (session override)' : ''}`,
           `**Running:** ${isRunning ? 'Yes ⏳' : 'No'}`,
         ].join('\n'));
         return true;
@@ -198,6 +200,12 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(chatId, args);
+        return true;
+      }
+
+      case '/effort': {
+        const args = text.slice('/effort'.length).trim();
+        await this.handleEffortCommand(chatId, args);
         return true;
       }
 
@@ -436,6 +444,7 @@ export class CommandHandler {
     if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') {
       this.sessionManager.setSessionModel(chatId, undefined);
       this.sessionManager.setSessionEngine(chatId, undefined);
+      this.sessionManager.setReasoningEffort(chatId, undefined);
       const fallback = botDefault || '_default_';
       await this.sender.sendTextNotice(
         chatId,
@@ -453,6 +462,71 @@ export class CommandHandler {
       chatId,
       '✅ Model Set',
       `Session model set to \`${newModel}\` on engine \`${activeEngine}\`. It will take effect on the next message.`,
+      'green',
+    );
+  }
+
+  private async handleEffortCommand(chatId: string, args: string): Promise<void> {
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    const normalized = normalizeCodexEffort(args);
+
+    if (!args) {
+      const current = session.reasoningEffort || this.config.codex?.reasoningEffort || '_codex default_';
+      await this.sender.sendTextNotice(
+        chatId,
+        '🧠 Effort',
+        [
+          `**Engine:** \`${activeEngine}\``,
+          `**Current:** \`${current}\`${session.reasoningEffort ? ' (session override)' : ''}`,
+          '',
+          'Usage:',
+          '- `/effort low` — fastest',
+          '- `/effort medium` — balanced',
+          '- `/effort high` — deeper reasoning',
+          '- `/effort xhigh` — maximum Codex-supported effort',
+          '- `/effort reset` — clear session override',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (activeEngine !== 'codex') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ Codex effort only',
+        `This chat is on \`${activeEngine}\`. Switch with \`/model codex\`, then use \`/effort high\` or \`/effort xhigh\`.`,
+        'blue',
+      );
+      return;
+    }
+
+    if (normalized === 'reset') {
+      this.sessionManager.setReasoningEffort(chatId, undefined);
+      await this.sender.sendTextNotice(
+        chatId,
+        '✅ Effort Reset',
+        `Codex reasoning effort override cleared. Using \`${this.config.codex?.reasoningEffort || 'codex default'}\`.`,
+        'green',
+      );
+      return;
+    }
+
+    if (!normalized) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ Invalid Effort',
+        'Use one of: `low`, `medium`, `high`, `xhigh`. `max` is accepted as an alias for `xhigh`.',
+        'red',
+      );
+      return;
+    }
+
+    this.sessionManager.setReasoningEffort(chatId, normalized);
+    await this.sender.sendTextNotice(
+      chatId,
+      '✅ Effort Set',
+      `Codex reasoning effort set to \`${normalized}\`. It will take effect on the next message.`,
       'green',
     );
   }
@@ -580,4 +654,12 @@ export class CommandHandler {
 
 function isEngineName(value: string): value is EngineName {
   return value === 'claude' || value === 'kimi' || value === 'codex';
+}
+
+function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') return 'reset';
+  if (normalized === 'max') return 'xhigh';
+  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') return normalized;
+  return undefined;
 }

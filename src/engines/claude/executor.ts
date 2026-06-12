@@ -5,6 +5,7 @@ import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
+import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
@@ -261,6 +262,8 @@ export interface ExecutorOptions {
   maxTurns?: number;
   /** Override model for this execution (e.g. faster model for voice calls). */
   model?: string;
+  /** Per-turn Codex reasoning effort override. Ignored by non-Codex executors. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
   /** Called whenever Claude Code fires a team coordination hook. */

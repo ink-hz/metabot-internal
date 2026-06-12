@@ -2,7 +2,7 @@ import { execSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { BotConfigBase, CodexBotConfig } from '../../config.js';
+import type { BotConfigBase, CodexBotConfig, CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import type {
@@ -267,6 +267,7 @@ export function buildCodexArgs(
   prompt: string,
   sessionId: string | undefined,
   model: string | undefined,
+  reasoningEffort?: CodexReasoningEffort,
 ): string[] {
   const args: string[] = [];
 
@@ -281,6 +282,8 @@ export function buildCodexArgs(
   if (model) args.push('-m', model);
   if (codexConfig.profile) args.push('-p', codexConfig.profile);
   if (codexConfig.baseUrl) args.push('-c', `openai_base_url=${tomlString(codexConfig.baseUrl)}`);
+  const effectiveEffort = reasoningEffort ?? codexConfig.reasoningEffort;
+  if (effectiveEffort) args.push('-c', `model_reasoning_effort=${tomlString(effectiveEffort)}`);
   for (const extraArg of codexConfig.extraArgs ?? []) args.push(extraArg);
 
   args.push('exec');
@@ -309,7 +312,7 @@ export class CodexExecutor {
       model: modelMetadata.model,
       contextWindow: modelMetadata.contextWindow,
     });
-    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model);
+    const args = buildCodexArgs(codexConfig, cwd, fullPrompt, sessionId, model, options.reasoningEffort);
     const startTime = Date.now();
     let child: ChildProcess | undefined;
     let sawResult = false;

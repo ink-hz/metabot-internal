@@ -1323,6 +1323,7 @@ export class MessageBridge {
       outputsDir: string;
       apiContext?: ApiContext;
       model?: string;
+      reasoningEffort?: import('../config.js').CodexReasoningEffort;
       onTeamEvent?: (event: TeamEvent) => void;
       maxTurns?: number;
       allowedTools?: string[];
@@ -1369,6 +1370,7 @@ export class MessageBridge {
       outputsDir: opts.outputsDir,
       apiContext: opts.apiContext,
       model: opts.model,
+      reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
       onTeamEvent: opts.onTeamEvent,
       maxTurns: opts.maxTurns,
       allowedTools: opts.allowedTools,

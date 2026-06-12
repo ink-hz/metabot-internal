@@ -54,6 +54,18 @@ describe('buildCodexArgs', () => {
     expect(args.indexOf('-c')).toBeLessThan(args.indexOf('exec'));
   });
 
+  it('passes Codex reasoning effort as a config override', () => {
+    const args = buildCodexArgs({}, cwd, prompt, undefined, 'gpt-5.5', 'high');
+    expect(args).toContain('-c');
+    expect(args).toContain('model_reasoning_effort="high"');
+    expect(args.indexOf('model_reasoning_effort="high"')).toBeLessThan(args.indexOf('exec'));
+  });
+
+  it('uses codex.reasoningEffort when no per-turn effort is provided', () => {
+    const args = buildCodexArgs({ reasoningEffort: 'xhigh' }, cwd, prompt, undefined, undefined);
+    expect(args).toContain('model_reasoning_effort="xhigh"');
+  });
+
   it('appends extraArgs verbatim between global flags and the exec subcommand', () => {
     const cfg: CodexBotConfig = { extraArgs: ['--foo', 'bar baz', '--qux'] };
     const args = buildCodexArgs(cfg, cwd, prompt, undefined, undefined);

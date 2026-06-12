@@ -587,7 +587,7 @@ if bots_path.exists():
             bots_data.append({
                 "name": b.get("name"),
                 "platform": platform,
-                "engine": b.get("engine", "claude"),
+                "engine": b.get("engine", "codex"),
                 "workingDirectory": wd,
                 "workingDirectoryExists": bool(wd and Path(wd).expanduser().exists()),
                 "voiceReplyEnabled": voice.get("enabled"),

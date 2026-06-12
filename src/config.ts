@@ -36,6 +36,7 @@ loadEnvFiles();
 
 /** Agent engine backing a bot. */
 export type EngineName = 'claude' | 'kimi' | 'codex';
+export type CodexReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
 /** Shared config fields used by MessageBridge and Executors (platform-agnostic). */
 export interface BotConfigBase {
@@ -71,7 +72,7 @@ export interface BotConfigBase {
    * the bridge re-asserts it on every bulk-register.
    */
   memoryPublic?: boolean;
-  /** Agent engine. Defaults to 'claude' for backward compatibility. */
+  /** Agent engine. Defaults to 'codex' unless METABOT_ENGINE or bots.json overrides it. */
   engine?: EngineName;
   claude: {
     defaultWorkingDirectory: string;
@@ -156,6 +157,8 @@ export interface CodexBotConfig {
   dangerouslyBypassApprovalsAndSandbox?: boolean;
   /** Context window size in tokens for display only. */
   contextWindow?: number;
+  /** Default reasoning effort for Codex CLI (`model_reasoning_effort`). */
+  reasoningEffort?: CodexReasoningEffort;
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -264,6 +267,7 @@ export interface CodexJsonConfig {
   dangerouslyBypassApprovalsAndSandbox?: boolean;
   /** Context window size in tokens for display only. */
   contextWindow?: number;
+  reasoningEffort?: CodexReasoningEffort;
   extraArgs?: string[];
   env?: Record<string, string>;
 }
@@ -494,9 +498,14 @@ function buildCodexConfig(entry?: CodexJsonConfig): BotConfigBase['codex'] | und
     ...(process.env.CODEX_SANDBOX ? { sandbox: process.env.CODEX_SANDBOX as CodexJsonConfig['sandbox'] } : {}),
     ...(process.env.CODEX_BYPASS_APPROVALS_AND_SANDBOX === 'true' ? { dangerouslyBypassApprovalsAndSandbox: true } : {}),
     ...(process.env.CODEX_CONTEXT_WINDOW ? { contextWindow: parseInt(process.env.CODEX_CONTEXT_WINDOW, 10) } : {}),
+    ...(isCodexReasoningEffort(process.env.CODEX_REASONING_EFFORT) ? { reasoningEffort: process.env.CODEX_REASONING_EFFORT } : {}),
     ...(entry ?? {}),
   };
   return Object.keys(cfg).length > 0 ? cfg : undefined;
+}
+
+function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return value === 'low' || value === 'medium' || value === 'high' || value === 'xhigh';
 }
 
 // --- Single-bot env var mode ---

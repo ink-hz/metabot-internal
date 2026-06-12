@@ -26,6 +26,7 @@ function buildHandler(opts: BuildOpts = {}) {
   const notices: RecordedNotice[] = [];
   let sessionEngine: string | undefined = opts.engine;
   let sessionModel: string | undefined = opts.sessionModel;
+  let reasoningEffort: string | undefined;
 
   const sender = {
     sendCard: async () => undefined,
@@ -44,6 +45,7 @@ function buildHandler(opts: BuildOpts = {}) {
     getSession: (_chatId: string) => ({
       engine: sessionEngine,
       model: sessionModel,
+      reasoningEffort,
       workingDirectory: '/workspace',
       sessionId: opts.sessionId,
     }),
@@ -53,6 +55,9 @@ function buildHandler(opts: BuildOpts = {}) {
     },
     setSessionModel: (_chatId: string, model: string | undefined) => {
       sessionModel = model;
+    },
+    setReasoningEffort: (_chatId: string, effort: string | undefined) => {
+      reasoningEffort = effort;
     },
   } as any;
 
@@ -73,7 +78,7 @@ function buildHandler(opts: BuildOpts = {}) {
     },
   } as any;
 
-  // Config: claude engine by default, with model set
+  // Config has engine defaults for all supported engines.
   const config = {
     name: 'test-bot',
     claude: { model: 'claude-opus-4-6' },
@@ -104,7 +109,13 @@ function buildHandler(opts: BuildOpts = {}) {
     } as any);
   }
 
-  return { handler, notices, getSessionEngine: () => sessionEngine, getSessionModel: () => sessionModel };
+  return {
+    handler,
+    notices,
+    getSessionEngine: () => sessionEngine,
+    getSessionModel: () => sessionModel,
+    getReasoningEffort: () => reasoningEffort,
+  };
 }
 
 function msg(text: string): IncomingMessage {
@@ -145,7 +156,7 @@ describe('CommandHandler /status', () => {
     await handler.handle(msg('/status'));
     const body = notices[0].content;
     expect(body).toContain('u1');               // userId
-    expect(body).toContain('claude');            // engine
+    expect(body).toContain('codex');             // default engine
     expect(body).toContain('/workspace');        // working directory
     expect(body).toContain('abc-123');           // session id prefix
   });
@@ -159,7 +170,7 @@ describe('CommandHandler /status', () => {
   it('shows default model when no session model is set', async () => {
     const { handler, notices } = buildHandler({});
     await handler.handle(msg('/status'));
-    expect(notices[0].content).toContain('claude-opus-4-6');
+    expect(notices[0].content).toContain('gpt-5.5');
   });
 });
 
@@ -173,11 +184,11 @@ describe('CommandHandler /model', () => {
     const handled = await handler.handle(msg('/model'));
     expect(handled).toBe(true);
     expect(notices[0].title).toContain('Model');
-    expect(notices[0].content).toContain('claude-opus-4-6');
+    expect(notices[0].content).toContain('gpt-5.5');
   });
 
-  it('lists claude models on /model list', async () => {
-    const { handler, notices } = buildHandler({});
+  it('lists claude models on /model list when engine is claude', async () => {
+    const { handler, notices } = buildHandler({ engine: 'claude' });
     await handler.handle(msg('/model list'));
     expect(notices[0].content).toContain('claude-opus-4-8');
     expect(notices[0].content).toContain('claude-sonnet-4-6');
@@ -200,7 +211,7 @@ describe('CommandHandler /model', () => {
   it('accepts /model ls as alias for list', async () => {
     const { handler, notices } = buildHandler({});
     await handler.handle(msg('/model ls'));
-    expect(notices[0].content).toContain('claude-opus-4-8');
+    expect(notices[0].content).toContain('gpt-5.5');
   });
 
   it('switches engine to kimi on /model kimi', async () => {
@@ -212,7 +223,7 @@ describe('CommandHandler /model', () => {
   });
 
   it('switches engine to codex on /model codex', async () => {
-    const { handler, getSessionEngine } = buildHandler({});
+    const { handler, getSessionEngine } = buildHandler({ engine: 'claude' });
     await handler.handle(msg('/model codex'));
     expect(getSessionEngine()).toBe('codex');
   });
@@ -266,9 +277,49 @@ describe('CommandHandler /model', () => {
   });
 
   it('uses only the first token for model name (ignores trailing text)', async () => {
-    const { handler, getSessionModel } = buildHandler({});
+    const { handler, getSessionModel } = buildHandler({ engine: 'claude' });
     await handler.handle(msg('/model claude-opus-4-8 extra-junk'));
     expect(getSessionModel()).toBe('claude-opus-4-8');
+  });
+});
+
+// =====================================================================
+// /effort
+// =====================================================================
+
+describe('CommandHandler /effort', () => {
+  it('shows current Codex effort when called with no args', async () => {
+    const { handler, notices } = buildHandler({});
+    await handler.handle(msg('/effort'));
+    expect(notices[0].title).toContain('Effort');
+    expect(notices[0].content).toContain('codex');
+  });
+
+  it('sets Codex effort for the current session', async () => {
+    const { handler, notices, getReasoningEffort } = buildHandler({});
+    await handler.handle(msg('/effort high'));
+    expect(getReasoningEffort()).toBe('high');
+    expect(notices[0].color).toBe('green');
+  });
+
+  it('accepts max as an alias for xhigh', async () => {
+    const { handler, getReasoningEffort } = buildHandler({});
+    await handler.handle(msg('/effort max'));
+    expect(getReasoningEffort()).toBe('xhigh');
+  });
+
+  it('refuses effort changes when the active engine is not Codex', async () => {
+    const { handler, notices, getReasoningEffort } = buildHandler({ engine: 'claude' });
+    await handler.handle(msg('/effort high'));
+    expect(getReasoningEffort()).toBeUndefined();
+    expect(notices[0].color).toBe('blue');
+  });
+
+  it('clears Codex effort override', async () => {
+    const { handler, getReasoningEffort } = buildHandler({});
+    await handler.handle(msg('/effort xhigh'));
+    await handler.handle(msg('/effort reset'));
+    expect(getReasoningEffort()).toBeUndefined();
   });
 });
 
