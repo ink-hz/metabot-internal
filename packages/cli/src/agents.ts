@@ -9,11 +9,11 @@
  *   metabot agents hide    <botName>
  *   metabot agents talk <peer>[/<bot>] <chatId> "<message>"
  *
- * Wire shapes match `packages/server/src/agents/agent-routes.ts`. Cross-bridge
- * talk uses the caller's own `METABOT_CORE_TOKEN` as the Bearer to the peer
- * bridge `/api/talk`; the bridge verifies it via the central `/api/whoami`
- * endpoint. There is no per-bot talkSecret anymore — visibility in the
- * registry is itself the permission to be addressed.
+ * Wire shapes match `packages/server/src/agents/agent-routes.ts`. Cross-agent
+ * talk from the CLI always enqueues through metabot-core's inbox relay. Resident
+ * bridges still route same-bridge local bots directly before peer lookup; the
+ * CLI has no local bridge registry, so it should not attempt direct P2P based on
+ * registry URLs.
  */
 
 import * as fs from 'node:fs';
@@ -125,13 +125,10 @@ Subcommands:
                                         Send a message to a peer's bot. When <chatId>
                                         is omitted, defaults to the cwd-derived
                                         project chatId.
-                                        If the peer's registry url is 'inbox:',
-                                        routes through metabot-core's central inbox
-                                        instead of /api/talk (use \`metabot inbox poll\`
-                                        on the receiving end). Otherwise POSTs to the
-                                        peer bridge's /api/talk with your own
-                                        METABOT_CORE_TOKEN; the bridge verifies via
-                                        central /api/whoami.
+                                        Routes through metabot-core's central inbox
+                                        relay; resident bridges poll and execute
+                                        their own local bots, while CLI agents use
+                                        \`metabot inbox poll\` on the receiving end.
 
 Env:
   METABOT_CORE_URL              memory + agents URL (default ${DEFAULT_BUS_URL})
@@ -292,38 +289,15 @@ async function cmdTalk(args: string[]): Promise<void> {
     process.stderr.write(`→ using project-derived chatId: ${chatId}\n`);
   }
 
-  // `url:'inbox:'` marker means the peer is a CLI-only agent without a
-  // resident bridge. Route through the central inbox instead of POSTing to
-  // <peer.url>/api/talk (which would fail with ECONNREFUSED).
-  if (peer.url === 'inbox:') {
-    const resp = await busRequest(
-      cfg, 'POST', `/api/inbox/${encodeURIComponent(botName)}`, { chatId, content },
-    );
-    process.stdout.write(`→ ${peerName}/${botName} @ ${chatId} (inbox)\n`);
-    if (typeof resp === 'object' && resp !== null) {
-      // Surface the message id so the sender can correlate with audit logs.
-      const id = (resp as { message?: { id?: unknown } }).message?.id;
-      if (typeof id === 'string') process.stderr.write(`  id=${id}\n`);
-    }
-    return;
+  const resp = await busRequest(
+    cfg, 'POST', `/api/inbox/${encodeURIComponent(botName)}`, { chatId, content },
+  );
+  process.stdout.write(`→ ${peerName}/${botName} @ ${chatId} (relay)\n`);
+  if (typeof resp === 'object' && resp !== null) {
+    // Surface the message id so the sender can correlate with audit logs.
+    const id = (resp as { message?: { id?: unknown } }).message?.id;
+    if (typeof id === 'string') process.stderr.write(`  id=${id}\n`);
   }
-
-  const peerUrl = peer.url.replace(/\/+$/, '') + '/api/talk';
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    'X-MetaBot-Origin': 'peer',
-    Authorization: `Bearer ${cfg.token}`,
-  };
-  const res = await fetch(peerUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({ botName, chatId, prompt: content, content }),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`POST ${peerUrl} → ${res.status}: ${text}`);
-  }
-  process.stdout.write(`→ ${peerName}/${botName} @ ${chatId}\n`);
 }
 
 export async function run(args: string[]): Promise<void> {

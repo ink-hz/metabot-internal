@@ -64,6 +64,8 @@ interface PeerState {
   bots: PeerBotInfo[];
   skills: PeerSkillInfo[];
   error?: string;
+  /** Registry-discovered bot that should be reached through metabot-core inbox relay, not direct P2P. */
+  relay?: boolean;
   /**
    * Static peers come from bots.json/env (loaded in the constructor) or are
    * added at runtime via addPeer(). Unlike dynamic peers discovered from the
@@ -224,6 +226,15 @@ function loadMetabotCoreToken(): string | undefined {
     /* missing/unreadable — caller warns */
   }
   return undefined;
+}
+
+function normalizedUrlHost(url: string | undefined): string | undefined {
+  if (!url || url === 'inbox:') return undefined;
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 export class PeerManager {
@@ -436,7 +447,7 @@ export class PeerManager {
     const payload = {
       bots: this.localBots.map((b) => ({
         botName: b.name,
-        url: process.env.METABOT_AGENT_RELAY === 'false' ? this.selfUrl : 'inbox:',
+        url: this.selfUrl || 'inbox:',
         visible: b.visible !== false,
         // Omit memoryPublic from the payload when bots.json doesn't set it,
         // so a CLI-time `metabot memory visibility` toggle isn't clobbered by
@@ -505,6 +516,7 @@ export class PeerManager {
 
     const next = new Map<string, PeerState>();
     const selfUrlNorm = this.selfUrl?.replace(/\/+$/, '');
+    const selfHost = normalizedUrlHost(selfUrlNorm);
     for (const entry of data.agents || []) {
       if (!entry.botName || !entry.url) continue;
       const normalizedUrl = entry.url.replace(/\/+$/, '');
@@ -514,40 +526,31 @@ export class PeerManager {
       const newConfig: PeerConfig = { name: entry.botName, url: normalizedUrl };
       const prev = this.peers.get(entry.botName);
       const unchanged = prev && prev.config.url === normalizedUrl;
-      if (normalizedUrl === 'inbox:') {
-        next.set(
-          entry.botName,
-          unchanged
-            ? { ...prev, healthy: true, lastChecked: Date.now(), lastHealthy: Date.now(), error: undefined }
-            : {
-                config: newConfig,
-                healthy: true,
-                lastChecked: Date.now(),
-                lastHealthy: Date.now(),
-                bots: [{
-                  name: entry.botName,
-                  platform: 'agent-bus',
-                  engine: 'claude',
-                  workingDirectory: '',
-                  peerUrl: 'inbox:',
-                  peerName: entry.botName,
-                }],
-                skills: [],
-              },
-        );
-        continue;
-      }
+      const entryHost = normalizedUrlHost(normalizedUrl);
+      const sameHost = Boolean(selfHost && entryHost && selfHost === entryHost);
       next.set(
         entry.botName,
-        unchanged
-          ? prev
+        unchanged && sameHost
+          ? { ...prev, relay: false }
+          : unchanged
+            ? { ...prev, relay: true, healthy: true, lastChecked: Date.now(), lastHealthy: Date.now(), error: undefined }
           : {
               config: newConfig,
-              healthy: false,
-              lastChecked: 0,
-              lastHealthy: 0,
-              bots: [],
+              healthy: !sameHost,
+              lastChecked: sameHost ? 0 : Date.now(),
+              lastHealthy: sameHost ? 0 : Date.now(),
+              bots: sameHost
+                ? []
+                : [{
+                    name: entry.botName,
+                    platform: 'agent-bus',
+                    engine: 'claude',
+                    workingDirectory: '',
+                    peerUrl: normalizedUrl,
+                    peerName: entry.botName,
+                  }],
               skills: [],
+              relay: !sameHost,
             },
       );
     }
@@ -613,7 +616,7 @@ export class PeerManager {
 
   private async refreshPeer(state: PeerState): Promise<void> {
     const { config } = state;
-    if (config.url === 'inbox:') {
+    if (state.relay || config.url === 'inbox:') {
       state.healthy = true;
       state.lastChecked = Date.now();
       state.lastHealthy = Date.now();
@@ -814,7 +817,7 @@ export class PeerManager {
 
   /** Forward a task request to a peer. Adds X-MetaBot-Origin header to prevent loops. */
   async forwardTask(peer: PeerConfig, body: object): Promise<object> {
-    if (peer.url === 'inbox:') {
+    if (peer.url === 'inbox:' || this.isRelayPeer(peer)) {
       return this.enqueueRelayTask(peer, body);
     }
     const rejection = this.rejectForwardTarget(peer.url);
@@ -848,6 +851,18 @@ export class PeerManager {
     });
 
     return (await response.json()) as object;
+  }
+
+  private isRelayPeer(peer: PeerConfig): boolean {
+    const normalized = peer.url.replace(/\/+$/, '');
+    const byName = this.peers.get(peer.name);
+    if (byName && byName.config.url === normalized) return byName.relay === true;
+    for (const state of this.peers.values()) {
+      if (state.config.url === normalized && state.config.name === peer.name) {
+        return state.relay === true;
+      }
+    }
+    return false;
   }
 
   private async enqueueRelayTask(peer: PeerConfig, body: any): Promise<object> {

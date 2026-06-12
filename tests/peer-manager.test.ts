@@ -320,7 +320,7 @@ describe('PeerManager', () => {
   // ---------------------------------------------------------------------------
 
   describe('registry mode (METABOT_CORE_AGENT_BUS_URL)', () => {
-    it('bulk-registers all local bots through the core inbox relay by default', async () => {
+    it('bulk-registers all local bots with this bridge self URL', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
       process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
@@ -362,8 +362,8 @@ describe('PeerManager', () => {
       const body = JSON.parse((bulkInit as RequestInit).body as string);
       expect(body).toEqual({
         bots: [
-          { botName: 'visible-bot', url: 'inbox:', visible: true },
-          { botName: 'hidden-bot', url: 'inbox:', visible: false },
+          { botName: 'visible-bot', url: 'http://self.example:9100', visible: true },
+          { botName: 'hidden-bot', url: 'http://self.example:9100', visible: false },
         ],
       });
       // No legacy talkSecret field anywhere in the wire payload.
@@ -415,11 +415,10 @@ describe('PeerManager', () => {
       });
     });
 
-    it('drives peer list from GET /api/agents (no talkSecret in response)', async () => {
+    it('drives peer list from GET /api/agents as core relay peers', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
-      // SELF_URL deliberately unset → no bulk-register, no heartbeat — keeps
-      // this test focused on the registry-discovery path.
+      process.env.METABOT_AGENT_SELF_URL = 'http://self.example:9100';
 
       const fetchMock = vi.fn().mockImplementation((url: string) => {
         if (url === 'https://metabot.example.com/core/api/agents') {
@@ -427,22 +426,11 @@ describe('PeerManager', () => {
             ok: true,
             json: () => Promise.resolve({
               agents: [
+                { botName: 'self-bot', url: 'http://self.example:9100', visible: true, lastSeenAt: 'now' },
                 { botName: 'alice', url: 'http://alice:9100', visible: true, lastSeenAt: 'now' },
               ],
             }),
           });
-        }
-        // Subsequent refreshAll() will hit http://alice:9100/api/bots + /api/skills
-        if (url === 'http://alice:9100/api/bots') {
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve({
-              bots: [{ name: 'alice-bot', platform: 'feishu', workingDirectory: '/work/alice' }],
-            }),
-          });
-        }
-        if (url === 'http://alice:9100/api/skills') {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
         }
         return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
       });
@@ -462,11 +450,16 @@ describe('PeerManager', () => {
 
       const bots = manager.getPeerBots();
       expect(bots).toHaveLength(1);
-      expect(bots[0].name).toBe('alice-bot');
+      expect(bots[0].name).toBe('alice');
       expect(bots[0].peerName).toBe('alice');
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        'http://alice:9100/api/bots',
+        expect.anything(),
+      );
+      expect(peers.some((p) => p.name === 'self-bot')).toBe(false);
     });
 
-    it('cross-bridge call carries METABOT_CORE_TOKEN as Bearer (not legacy peer.secret)', async () => {
+    it('cross-bridge registry calls enqueue through core inbox instead of direct peer HTTP', async () => {
       process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
       process.env.METABOT_CORE_TOKEN = 'core-bearer';
 
@@ -479,11 +472,11 @@ describe('PeerManager', () => {
             }),
           });
         }
-        if (url === 'http://alice:9100/api/bots') {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve({ bots: [] }) });
-        }
-        if (url === 'http://alice:9100/api/skills') {
-          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
+        if (url === 'https://metabot.example.com/core/api/inbox/alice') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ message: { id: 'msg_1' } }),
+          });
         }
         return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
       });
@@ -492,16 +485,89 @@ describe('PeerManager', () => {
       manager = new PeerManager([], [], createLogger());
 
       await (manager as any).runPollTick();
-
-      const peerBotCall = fetchMock.mock.calls.find(
-        (c) => typeof c[0] === 'string' && c[0] === 'http://alice:9100/api/bots',
+      const result = await manager.forwardTask(
+        { name: 'alice', url: 'http://alice:9100' },
+        { botName: 'alice', chatId: 'chat1', prompt: 'hello' },
       );
-      expect(peerBotCall, 'expected cross-bridge GET /api/bots').toBeDefined();
-      const [, peerInit] = peerBotCall!;
-      expect((peerInit as RequestInit).headers).toMatchObject({
+
+      expect(result).toMatchObject({ accepted: true, relay: 'inbox' });
+      const relayCall = fetchMock.mock.calls.find(
+        (c) => typeof c[0] === 'string' && c[0] === 'https://metabot.example.com/core/api/inbox/alice',
+      );
+      expect(relayCall, 'expected cross-bridge core inbox enqueue').toBeDefined();
+      const [, relayInit] = relayCall!;
+      expect((relayInit as RequestInit).headers).toMatchObject({
         'Authorization': 'Bearer core-bearer',
-        'X-MetaBot-Origin': 'peer',
+        'Content-Type': 'application/json',
       });
+      expect(JSON.parse((relayInit as RequestInit).body as string)).toEqual({
+        chatId: 'chat1',
+        content: JSON.stringify({
+          type: 'talk',
+          botName: 'alice',
+          chatId: 'chat1',
+          prompt: 'hello',
+        }),
+      });
+      expect(fetchMock).not.toHaveBeenCalledWith('http://alice:9100/api/talk', expect.anything());
+    });
+
+    it('keeps same-host registry peers on direct local HTTP instead of core relay', async () => {
+      process.env.METABOT_CORE_AGENT_BUS_URL = 'https://metabot.example.com/core';
+      process.env.METABOT_CORE_TOKEN = 'core-bearer';
+      process.env.METABOT_AGENT_SELF_URL = 'http://10.0.0.5:9100';
+
+      const fetchMock = vi.fn().mockImplementation((url: string) => {
+        if (url === 'https://metabot.example.com/core/api/agents') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              agents: [
+                { botName: 'same-host', url: 'http://10.0.0.5:9200', visible: true },
+              ],
+            }),
+          });
+        }
+        if (url === 'http://10.0.0.5:9200/api/bots') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({
+              bots: [{ name: 'local-worker', platform: 'feishu', workingDirectory: '/work/local' }],
+            }),
+          });
+        }
+        if (url === 'http://10.0.0.5:9200/api/skills') {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve({ skills: [] }) });
+        }
+        if (url === 'http://10.0.0.5:9200/api/talk') {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ success: true, responseText: 'local done' }),
+          });
+        }
+        return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      manager = new PeerManager([], [], createLogger());
+
+      await (manager as any).runPollTick();
+      expect(manager.getPeerBots().map((b) => b.name)).toEqual(['local-worker']);
+
+      const result = await manager.forwardTask(
+        { name: 'same-host', url: 'http://10.0.0.5:9200' },
+        { botName: 'local-worker', chatId: 'chat1', prompt: 'hello' },
+      );
+
+      expect(result).toEqual({ success: true, responseText: 'local done' });
+      expect(fetchMock).toHaveBeenCalledWith(
+        'http://10.0.0.5:9200/api/talk',
+        expect.objectContaining({ method: 'POST' }),
+      );
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        'https://metabot.example.com/core/api/inbox/local-worker',
+        expect.anything(),
+      );
     });
 
     it('falls back to static configs when GET /api/agents fails', async () => {
