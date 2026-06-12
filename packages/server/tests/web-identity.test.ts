@@ -1,11 +1,15 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { call, rawRequest, startTestServer, type ServerKit } from './helpers.js';
 
 let kit: ServerKit | undefined;
+const ORIG_ENV = { ...process.env };
 
 afterEach(async () => {
   await kit?.cleanup();
   kit = undefined;
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  process.env = { ...ORIG_ENV };
 });
 
 const WHITELISTED = 'flood-sung@xvirobotics.com';
@@ -157,6 +161,35 @@ describe('web-identity — enabled (METABOT_CORE_UI_ALLOWED_EMAILS set)', () => 
     expect(h.status).toBe(200);
     const m = await rawRequest(kit.port, 'GET', '/api/manifest', { 'X-Forwarded-Email': WHITELISTED });
     expect(m.status).toBe(200);
+  });
+
+  it('whitelisted email can transcribe chat voice through the bridge STT proxy', async () => {
+    process.env.METABOT_CORE_CHAT_VOICE_URL = 'http://bridge.test/api/voice';
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      success: true,
+      transcript: '你好 metabot',
+    }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })) as unknown as typeof fetch;
+    vi.stubGlobal('fetch', fetchMock);
+    kit = await startTestServer('web-id-voice', { uiAllowedEmails: [WHITELISTED] });
+
+    const res = await rawRequest(
+      kit.port,
+      'POST',
+      '/api/chat/voice/transcribe?stt=doubao&language=zh',
+      { 'X-Forwarded-Email': WHITELISTED, 'Content-Type': 'audio/webm' },
+      'voice-bytes',
+    );
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(res.body).transcript).toBe('你好 metabot');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = (fetchMock as unknown as { mock: { calls: [URL, RequestInit][] } }).mock.calls[0]!;
+    expect(url.toString()).toBe('http://bridge.test/api/voice?sttOnly=true&stt=doubao&language=zh');
+    expect(init.method).toBe('POST');
+    expect(init.headers).toMatchObject({ 'Content-Type': 'audio/webm' });
   });
 });
 

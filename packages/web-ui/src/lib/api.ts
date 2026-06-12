@@ -326,6 +326,12 @@ export interface ChatParticipantSearchResult {
   source: 'exact' | 'known' | 'agent' | string;
 }
 
+export interface VoiceTranscribeResponse {
+  success: boolean;
+  transcript: string;
+  error?: string;
+}
+
 // ---- self-service web token (mirror of packages/server/src/web/web-routes.ts) ----
 
 export interface IssueTokenResponse {
@@ -502,6 +508,16 @@ export const api = {
         body: JSON.stringify({ content, mentionedAgentRefs, ...options }),
       },
     ),
+  transcribeChatVoice: (audio: Blob, options?: { stt?: string; language?: string }) => {
+    const qs = new URLSearchParams();
+    qs.set('stt', options?.stt || 'doubao');
+    qs.set('language', options?.language || 'zh');
+    return request<VoiceTranscribeResponse>(`/api/chat/voice/transcribe?${qs.toString()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': audio.type || 'audio/webm' },
+      body: audio,
+    });
+  },
   markChatRead: (conversationId: string, messageId: string | null) =>
     request<{ conversationId: string; userRef: string; lastReadMessageId: string | null; lastReadAt: string }>(
       `/api/chat/conversations/${encodeURIComponent(conversationId)}/read`,

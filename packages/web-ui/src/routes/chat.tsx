@@ -335,6 +335,7 @@ function RunStatePanel({ runs }: { runs: TimelineRun[] }) {
             <span>{runIsActive(run) ? 'executing' : runStatusLabel(run.status)}</span>
             <strong>@{run.targetAgentRef}</strong>
           </div>
+          {run.latestText && <div className="chat-run-body">{run.latestText}</div>}
           {runToolLabels(run).length > 0 && (
             <details className="chat-tool-details">
               <summary>tools · {runToolLabels(run).length}</summary>
@@ -351,7 +352,7 @@ function RunStatePanel({ runs }: { runs: TimelineRun[] }) {
 
 function MessageBubble({ msg, runs }: { msg: ChatMessage; runs: TimelineRun[] }) {
   return (
-    <div className={`chat-message ${msg.senderKind}`}>
+    <div className={`chat-message ${msg.kind} ${msg.senderKind}`}>
       <div className="chat-message-head">
         <span>{msg.senderDisplayName}</span>
         <time title={formatAbsolute(msg.createdAt)}>{formatRelative(msg.createdAt)}</time>
@@ -682,15 +683,35 @@ function Composer({
 }) {
   const [value, setValue] = useState('');
   const [sending, setSending] = useState(false);
-  const [voiceState, setVoiceState] = useState<'idle' | 'listening' | 'unsupported' | 'error'>('idle');
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'listening' | 'transcribing' | 'unsupported' | 'error'>('idle');
+  const [voiceHint, setVoiceHint] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<BlobPart[]>([]);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const mentions = useMemo(() => parseMentionedAgents(value, knownAgents), [value, knownAgents]);
 
   useEffect(() => () => {
     recognitionRef.current?.stop();
+    recorderRef.current?.stop();
+    mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  const toggleVoice = () => {
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 190)}px`;
+  }, [value]);
+
+  const appendTranscript = (text: string) => {
+    const clean = text.trim();
+    if (!clean) return;
+    setValue((cur) => `${cur}${cur.endsWith(' ') || !cur ? '' : ' '}${clean}`);
+  };
+
+  const startBrowserSpeechFallback = () => {
     if (voiceState === 'listening') {
       recognitionRef.current?.stop();
       return;
@@ -720,7 +741,7 @@ function Composer({
         if (result?.isFinal && result[0]?.transcript) chunks.push(result[0].transcript.trim());
       }
       if (chunks.length > 0) {
-        setValue((cur) => `${cur}${cur.endsWith(' ') || !cur ? '' : ' '}${chunks.join(' ')}`);
+        appendTranscript(chunks.join(' '));
       }
     };
     recognitionRef.current = recognition;
@@ -729,6 +750,74 @@ function Composer({
     } catch {
       setVoiceState('error');
       recognitionRef.current = null;
+    }
+  };
+
+  const stopRecording = () => {
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') recorder.stop();
+  };
+
+  const toggleVoice = async () => {
+    if (voiceState === 'recording') {
+      stopRecording();
+      return;
+    }
+    if (voiceState === 'listening') {
+      recognitionRef.current?.stop();
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+      startBrowserSpeechFallback();
+      return;
+    }
+    try {
+      setVoiceHint(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      recorderRef.current = recorder;
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) audioChunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        setVoiceState('error');
+        setVoiceHint('recording failed');
+      };
+      recorder.onstop = () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        recorderRef.current = null;
+        if (chunks.length === 0) {
+          setVoiceState('idle');
+          return;
+        }
+        const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+        setVoiceState('transcribing');
+        setVoiceHint('Doubao STT');
+        api.transcribeChatVoice(audio, { stt: 'doubao', language: navigator.language?.startsWith('zh') ? 'zh' : 'en' })
+          .then((res) => {
+            if (res.transcript) {
+              appendTranscript(res.transcript);
+              setVoiceHint('transcribed');
+            } else {
+              setVoiceHint(res.error || 'no speech detected');
+            }
+            setVoiceState('idle');
+          })
+          .catch(() => {
+            setVoiceState('error');
+            setVoiceHint('Doubao STT unavailable');
+          });
+      };
+      recorder.start();
+      setVoiceState('recording');
+      setVoiceHint('recording');
+    } catch {
+      startBrowserSpeechFallback();
     }
   };
 
@@ -779,6 +868,11 @@ function Composer({
             </label>
           </div>
         </details>
+        <div className="chat-capability-strip">
+          <span>Doubao STT</span>
+          <span>voice input</span>
+          <span>tool activity</span>
+        </div>
         {knownAgents.length > 0 && (
           <div className="chat-agent-hints">
             {knownAgents.map((ref) => (
@@ -793,6 +887,7 @@ function Composer({
           </div>
         )}
         <textarea
+          ref={textareaRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           disabled={disabled || sending}
@@ -808,15 +903,16 @@ function Composer({
         <div className="chat-composer-actions">
           {voiceState === 'unsupported' && <span>voice unsupported</span>}
           {voiceState === 'error' && <span>voice unavailable</span>}
+          {voiceHint && voiceState !== 'error' && <span className="chat-voice-hint">{voiceHint}</span>}
           <button
             type="button"
             className={`chat-voice-button ${voiceState}`}
-            disabled={disabled || sending}
+            disabled={disabled || sending || voiceState === 'transcribing'}
             onClick={toggleVoice}
-            title={voiceState === 'listening' ? 'stop voice input' : 'start voice input'}
-            aria-pressed={voiceState === 'listening'}
+            title={voiceState === 'recording' || voiceState === 'listening' ? 'stop voice input' : 'start voice input'}
+            aria-pressed={voiceState === 'recording' || voiceState === 'listening'}
           >
-            {voiceState === 'listening' ? 'Stop' : 'Mic'}
+            {voiceState === 'recording' || voiceState === 'listening' ? 'Stop' : voiceState === 'transcribing' ? 'STT' : 'Mic'}
           </button>
           <button type="button" disabled={disabled || sending || !value.trim()} onClick={() => void submit()}>
             {sending ? 'Sending' : 'Send'}
@@ -846,6 +942,7 @@ export function Chat() {
   const params = new URLSearchParams(loc.search);
   const selectedId = params.get('c');
   const agent = params.get('agent');
+  const listMode = params.get('list') === '1';
 
   const refreshConversations = useCallback(async () => {
     const res = await api.listChatConversations();
@@ -920,7 +1017,7 @@ export function Chat() {
         }
         const list = await refreshConversations();
         if (!live) return;
-        const next = (selectedId && list.find((c) => c.id === selectedId)) || list[0] || null;
+        const next = listMode ? null : (selectedId && list.find((c) => c.id === selectedId)) || list[0] || null;
         setSelected(next);
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) return;
@@ -928,7 +1025,7 @@ export function Chat() {
       }
     })();
     return () => { live = false; };
-  }, [agent, selectedId]);
+  }, [agent, selectedId, listMode]);
 
   useEffect(() => {
     if (!selected) {
@@ -1062,7 +1159,7 @@ export function Chat() {
   const users = knownUserRefs(conversations);
 
   return (
-    <div className="main chat-main">
+    <div className={`main chat-main ${selected ? 'chat-has-selected' : 'chat-no-selection'}`}>
       <aside className="sidebar chat-sidebar">
         <button
           type="button"
@@ -1100,12 +1197,30 @@ export function Chat() {
       <div className="content chat-content">
         <div className="page-head chat-page-head">
           <div>
-            <div className="kicker">metabot core</div>
             <h1>{selected?.title || 'chat'}</h1>
           </div>
-          <span className="crumbs">
-            {selected ? `${selected.kind} / ${selected.participants.length} participants` : '/ chat'}
-          </span>
+          <div className="chat-head-actions">
+            {selected && (
+              <button
+                type="button"
+                className="chat-mobile-list-button"
+                onClick={() => {
+                  setSelected(null);
+                  setMessages([]);
+                  setRunsByMessageId({});
+                  nav('/chat?list=1');
+                }}
+              >
+                Chats
+              </button>
+            )}
+            <span className={`chat-refresh-state${refreshing ? ' active' : ''}`}>
+              {refreshing ? 'syncing' : lastRefreshAt ? formatRelative(lastRefreshAt) : 'live'}
+            </span>
+            <span className="crumbs">
+              {selected ? `${selected.kind} · ${selected.participants.length}` : '/ chat'}
+            </span>
+          </div>
         </div>
         {err && <div className="state err">{err}</div>}
         {!err && !selected && (
@@ -1125,9 +1240,6 @@ export function Chat() {
                   </span>
                 ))}
               </div>
-              <span className={`chat-refresh-state${refreshing ? ' active' : ''}`}>
-                {refreshing ? 'syncing' : lastRefreshAt ? formatRelative(lastRefreshAt) : 'live'}
-              </span>
             </div>
             <details className="chat-thread-settings">
               <summary>Manage participants</summary>

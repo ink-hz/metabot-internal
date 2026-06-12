@@ -104,6 +104,25 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+function readRawBody(req: http.IncomingMessage): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      if (tooLarge) return;
+      total += chunk.length;
+      if (total > MAX_BODY_SIZE) { tooLarge = true; return; }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (tooLarge) return reject(new PayloadTooLargeError());
+      resolve(Buffer.concat(chunks));
+    });
+    req.on('error', reject);
+  });
+}
+
 async function parseJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   const raw = await readBody(req);
   if (!raw) return {};
@@ -298,6 +317,7 @@ function isWebWritableRoute(method: string, pathname: string): boolean {
   if (pathname === '/api/chat/conversations' && method === 'POST') return true;
   if (pathname === '/api/chat/conversations/agent-dm' && method === 'POST') return true;
   if (pathname === '/api/chat/conversations/user-dm' && method === 'POST') return true;
+  if (pathname === '/api/chat/voice/transcribe' && method === 'POST') return true;
   if (/^\/api\/chat\/conversations\/[^/]+\/(messages|participants|read)$/.test(pathname) && method === 'POST') {
     return true;
   }
@@ -855,6 +875,35 @@ export function startServer(options: ServerOptions): ServerHandle {
       if (pathname === '/api/chat/conversations/user-dm' && method === 'POST') {
         const body = await parseJsonBody(req);
         return jsonResult(res, chatRoutes.findOrCreateUserDm(chatDeps, body, cred));
+      }
+      if (pathname === '/api/chat/voice/transcribe' && method === 'POST') {
+        const voiceBase = (process.env.METABOT_CORE_CHAT_VOICE_URL || 'http://127.0.0.1:9100/api/voice').trim();
+        if (!voiceBase) return jsonResponse(res, 503, { error: 'voice_transcribe_unconfigured' });
+        const audio = await readRawBody(req);
+        if (audio.length === 0) return jsonResponse(res, 400, { error: 'empty_audio' });
+        const target = new URL(voiceBase);
+        target.searchParams.set('sttOnly', 'true');
+        target.searchParams.set('stt', query.get('stt') || 'doubao');
+        target.searchParams.set('language', query.get('language') || query.get('lang') || 'zh');
+        const audioBody = audio.buffer.slice(audio.byteOffset, audio.byteOffset + audio.byteLength) as ArrayBuffer;
+        const voiceResp = await fetch(target, {
+          method: 'POST',
+          headers: {
+            'Content-Type': req.headers['content-type'] || 'application/octet-stream',
+          },
+          body: new Blob([audioBody]),
+          signal: AbortSignal.timeout(45_000),
+        });
+        const text = await voiceResp.text();
+        let body: unknown = text;
+        if (text) {
+          try { body = JSON.parse(text); } catch { /* keep raw */ }
+        }
+        if (!voiceResp.ok) {
+          logger.warn({ status: voiceResp.status }, 'chat voice transcription proxy failed');
+          return jsonResponse(res, voiceResp.status, typeof body === 'object' && body ? body : { error: 'voice_transcribe_failed' });
+        }
+        return jsonResponse(res, 200, body);
       }
       const chatParticipantsMatch = pathname.match(/^\/api\/chat\/conversations\/([^/]+)\/participants$/);
       if (chatParticipantsMatch && method === 'GET') {
