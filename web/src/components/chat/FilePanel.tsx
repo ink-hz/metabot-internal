@@ -7,6 +7,8 @@ import { FilePreviewContent } from './FilePreviewContent';
 import { IconChevronLeft, IconDownload, IconX, IconFileSidebar } from './icons';
 import styles from '../ChatView.module.css';
 
+const FILE_PANEL_TURN_RETENTION = 10;
+
 export function useFilePanel(messages: ChatMessage[]) {
   const [filePanelOpen, setFilePanelOpen] = useState(false);
   const [filePanelWidth, setFilePanelWidth] = useState(420);
@@ -20,8 +22,15 @@ export function useFilePanel(messages: ChatMessage[]) {
 
   const allFiles = useMemo(() => {
     const files: FileAttachment[] = [];
-    for (const msg of messages) {
-      if (msg.attachments) files.push(...msg.attachments);
+    let userTurnsAfter = 0;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.attachments && userTurnsAfter <= FILE_PANEL_TURN_RETENTION) {
+        files.unshift(...msg.attachments);
+      }
+      if (msg.type === 'user') {
+        userTurnsAfter += 1;
+      }
     }
     return files;
   }, [messages]);

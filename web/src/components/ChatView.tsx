@@ -9,7 +9,7 @@
 import { useRef, useCallback, useMemo, useState, useEffect } from 'react';
 import { useStore } from '../store';
 import { useWebSocket } from '../hooks/useWebSocket';
-import type { CardState, FileAttachment } from '../types';
+import type { CardState, ChatMessage, FileAttachment } from '../types';
 import {
   MessageList,
   InputBar,
@@ -29,6 +29,41 @@ import {
   type IncomingVoiceCall,
 } from './chat';
 import styles from './ChatView.module.css';
+
+const FILE_CONTEXT_TURN_RETENTION = 10;
+
+function formatAttachmentLine(a: FileAttachment) {
+  const cat = fileCategory(a.type);
+  if (cat === 'image') return `  - ${a.path} (image: ${a.name}, ${formatFileSize(a.size)})`;
+  if (cat === 'audio') return `  - ${a.path} (audio: ${a.name}, ${formatFileSize(a.size)})`;
+  if (cat === 'video') return `  - ${a.path} (video: ${a.name}, ${formatFileSize(a.size)})`;
+  return `  - ${a.path} (${a.name}, ${formatFileSize(a.size)})`;
+}
+
+function retainedFileAttachments(messages: ChatMessage[], currentTurnOffset = 0): FileAttachment[] {
+  const files: FileAttachment[] = [];
+  let userTurnsAfter = currentTurnOffset;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.attachments && userTurnsAfter <= FILE_CONTEXT_TURN_RETENTION) {
+      files.unshift(...msg.attachments);
+    }
+    if (msg.type === 'user') userTurnsAfter += 1;
+  }
+  return files;
+}
+
+function buildFileContext(current: FileAttachment[], retained: FileAttachment[]) {
+  const sections: string[] = [];
+  if (current.length > 0) {
+    sections.push(`The user uploaded ${current.length} file(s):\n${current.map(formatAttachmentLine).join('\n')}`);
+  }
+  if (retained.length > 0) {
+    sections.push(`Recent uploaded/output files still available from the last ${FILE_CONTEXT_TURN_RETENTION} user turns:\n${retained.map(formatAttachmentLine).join('\n')}`);
+  }
+  if (sections.length === 0) return '';
+  return `\n\n${sections.join('\n\n')}\n\nFor text-based files (txt, csv, json, md, code, etc.), use the Read tool. For images, use the Read tool to view them. For binary files (pdf, docx, xlsx, etc.), acknowledge receipt and describe what you can help with.`;
+}
 
 /* ── Mobile detection hook ── */
 function useIsMobile(breakpoint = 768) {
@@ -240,22 +275,14 @@ export function ChatView() {
       return;
     }
 
-    // Upload files first if any
-    let fileInfo = '';
+    // Upload files first if any. Keep recent file paths in prompt context for
+    // follow-up turns so users do not have to re-upload the same file.
     let attachments: FileAttachment[] = [];
     if (hasFiles) {
       attachments = await uploadFiles(files, sessionId);
-      if (attachments.length > 0) {
-        const lines = attachments.map((a) => {
-          const cat = fileCategory(a.type);
-          if (cat === 'image') return `  - ${a.path} (image: ${a.name}, ${formatFileSize(a.size)})`;
-          if (cat === 'audio') return `  - ${a.path} (audio: ${a.name}, ${formatFileSize(a.size)})`;
-          if (cat === 'video') return `  - ${a.path} (video: ${a.name}, ${formatFileSize(a.size)})`;
-          return `  - ${a.path} (${a.name}, ${formatFileSize(a.size)})`;
-        });
-        fileInfo = `\n\nThe user uploaded ${attachments.length} file(s):\n${lines.join('\n')}\n\nFor text-based files (txt, csv, json, md, code, etc.), use the Read tool. For images, use the Read tool to view them. For binary files (pdf, docx, xlsx, etc.), acknowledge receipt and describe what you can help with.`;
-      }
     }
+    const retainedFiles = session ? retainedFileAttachments(session.messages, 1) : [];
+    const fileInfo = buildFileContext(attachments, retainedFiles);
 
     const fullText = (text + fileInfo).trim();
 
