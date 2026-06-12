@@ -1056,6 +1056,7 @@ print(json.dumps(body))
       python3 - "$METABOT_URL" "${_api_secret:-changeme}" "$@" <<'PY'
 import json
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -1069,20 +1070,27 @@ def usage():
   metabot teams list
   metabot teams create <team> [--description text]
   metabot teams delete <team>
-  metabot teams status <team>
+  metabot teams status <team> [--summary|--plain]
   metabot teams bind <team> <chatId> [--display]
   metabot teams start|stop <team>
+  metabot teams dispatch <team> <agent> <subject> [--description text] [--message text] [--from name] [--plain]
+  metabot teams next <team> <agent> [--read] [--summary|--plain]
+  metabot teams watch <team> [--interval sec] [--count n] [--summary|--plain]
   metabot teams agents list <team>
   metabot teams agents spawn <team> <name> [--role r] [--engine claude|codex|kimi] [--prompt p]
   metabot teams agents stop <team> <name>
   metabot teams agents delete <team> <name>
   metabot teams send <team> <to> <message> [--from name] [--summary text]
-  metabot teams inbox <team> <name> [--unread] [--read]
-  metabot teams tasks list <team>
-  metabot teams tasks create <team> <subject> [--description text] [--owner name]
+  metabot teams inbox <team> <name> [--unread] [--read] [--summary|--plain]
+  metabot teams tasks list <team> [--summary|--plain]
+  metabot teams tasks create <team> <subject> [--description text] [--owner name] [--blocked-by id,id]
   metabot teams tasks get <team> <id>
-  metabot teams tasks update <team> <id> [--status s] [--owner name] [--result text]
-  metabot teams runs list <team>
+  metabot teams tasks update <team> <id> [--subject s] [--description d] [--status s] [--owner name|none] [--blocked-by id,id] [--result text]
+  metabot teams tasks claim <team> <id> [owner|--owner name]
+  metabot teams tasks done <team> <id> <result>
+  metabot teams tasks block <team> <id> <reason> [--blocked-by id,id]
+  metabot teams tasks reopen <team> <id>
+  metabot teams runs list <team> [--summary|--plain]
   metabot teams runs create <team> [--agent name] [--task-id id] [--status s] [--output text] [--error text]
   metabot teams runs update <team> <runId> [--status s] [--output text] [--error text]
   metabot teams runs output|stop <team> <runId>""")
@@ -1113,7 +1121,8 @@ def parse(args):
 
 def req_data(method, path, body=None):
     if isinstance(body, dict):
-        body = {k: v for k, v in body.items() if v is not None}
+        keep_null = set(body.pop("__keepNull", []))
+        body = {k: v for k, v in body.items() if v is not None or k in keep_null}
     data = None if body is None else json.dumps(body).encode()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     if body is not None:
@@ -1134,13 +1143,137 @@ def emit(value):
     if isinstance(value, (dict, list)):
         print(json.dumps(value, indent=2, ensure_ascii=False))
     else:
-        sys.stdout.write(str(value))
+        text = str(value)
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
 
 def req(method, path, body=None):
     emit(req_data(method, path, body))
 
 def enc(s):
     return urllib.parse.quote(str(s), safe="")
+
+def bool_flag(flags, name):
+    return flags.get(name) is True or flags.get(name) in ("true", "1")
+
+def wants_summary(flags):
+    return bool_flag(flags, "summary") or bool_flag(flags, "plain")
+
+def parse_number_list(value):
+    if not value:
+        return None
+    nums = []
+    for part in str(value).split(","):
+        try:
+            num = int(part.strip())
+        except Exception:
+            continue
+        if num > 0:
+            nums.append(num)
+    return nums or None
+
+def default_agent_name():
+    import os
+    return os.environ.get("METABOT_TEAM_AGENT") or os.environ.get("METABOT_AGENT_NAME")
+
+def compact(value, limit=120):
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[:max(0, limit - 3)] + "..."
+
+def task_line(task):
+    owner = f" @{task.get('owner')}" if task.get("owner") else ""
+    blocked = ""
+    if task.get("blockedBy"):
+        blocked = " blocked_by=" + ",".join(str(x) for x in task.get("blockedBy"))
+    result = f" - {compact(task.get('result'), 80)}" if task.get("result") else ""
+    return f"#{task.get('id')} {task.get('status')}{owner}{blocked} {task.get('subject')}{result}"
+
+def run_line(run):
+    agent = f" @{run.get('agentName')}" if run.get("agentName") else ""
+    task = f" task=#{run.get('taskId')}" if run.get("taskId") is not None else ""
+    if run.get("error"):
+        detail = f" error={compact(run.get('error'), 80)}"
+    elif run.get("output"):
+        detail = f" output={compact(run.get('output'), 80)}"
+    else:
+        detail = ""
+    return f"{run.get('id')} {run.get('status')}{agent}{task}{detail}"
+
+def format_messages(messages):
+    if not messages:
+        return ["- none"]
+    lines = []
+    for message in messages[:12]:
+        from_name = f" from {message.get('fromName')}" if message.get("fromName") else ""
+        summary = f"{message.get('summary')}: " if message.get("summary") else ""
+        lines.append(f"- #{message.get('id')}{from_name} {summary}{compact(message.get('body'), 140)}")
+    return lines
+
+def format_tasks(body):
+    tasks = body.get("tasks", []) if isinstance(body, dict) else []
+    open_tasks = [t for t in tasks if t.get("status") in ("pending", "in_progress")]
+    lines = [f"Tasks: {len(tasks)} total, {len(open_tasks)} open"]
+    lines.extend(f"- {task_line(task)}" for task in tasks[:20])
+    if len(tasks) > 20:
+        lines.append(f"... {len(tasks) - 20} more")
+    return "\n".join(lines)
+
+def format_runs(body):
+    runs = body.get("runs", []) if isinstance(body, dict) else []
+    running = len([run for run in runs if run.get("status") == "running"])
+    lines = [f"Runs: {len(runs)} total, {running} running"]
+    lines.extend(f"- {run_line(run)}" for run in runs[:12])
+    if len(runs) > 12:
+        lines.append(f"... {len(runs) - 12} more")
+    return "\n".join(lines)
+
+def format_inbox(body):
+    messages = body.get("messages", []) if isinstance(body, dict) else []
+    read = f", read {body.get('read')}" if isinstance(body, dict) and isinstance(body.get("read"), int) else ""
+    return "\n".join([f"Inbox: {len(messages)} messages{read}", *format_messages(messages)])
+
+def format_next(body):
+    unread = body.get("unreadMessages", []) if isinstance(body, dict) else []
+    tasks = body.get("assignedTasks", []) if isinstance(body, dict) else []
+    read = f" ({body.get('read')} marked read)" if isinstance(body, dict) and body.get("read") else ""
+    lines = [
+        f"Next: {body.get('team', '?')} / {body.get('agent', '?')}",
+        f"Unread: {len(unread)}{read}",
+        *format_messages(unread),
+        f"Assigned open tasks: {len(tasks)}",
+    ]
+    lines.extend(f"- {task_line(task)}" for task in tasks[:12])
+    if not tasks:
+        lines.append("- none")
+    return "\n".join(lines)
+
+def format_status(body):
+    team = body.get("team", {}) if isinstance(body, dict) else {}
+    agents = body.get("agents", []) if isinstance(body, dict) else []
+    tasks = body.get("tasks", []) if isinstance(body, dict) else []
+    runs = body.get("runs", []) if isinstance(body, dict) else []
+    open_tasks = [task for task in tasks if task.get("status") in ("pending", "in_progress")]
+    running_runs = [run for run in runs if run.get("status") == "running"]
+    agent_text = ", ".join(
+        f"{agent.get('name')}:{agent.get('status', 'unknown')}{('/' + agent.get('engine')) if agent.get('engine') else ''}"
+        for agent in agents
+    )
+    lines = [
+        f"Team: {team.get('name', '?')} [{team.get('status', '?')}]",
+    ]
+    if team.get("description"):
+        lines.append(compact(team.get("description"), 160))
+    lines.append(f"Agents: {len(agents)}" + (f" ({agent_text})" if agent_text else ""))
+    lines.append(f"Tasks: {len(tasks)} total, {len(open_tasks)} open")
+    lines.extend(f"- {task_line(task)}" for task in open_tasks[:8])
+    lines.append(f"Unread messages: {body.get('unreadMessages', 0) if isinstance(body, dict) else 0}")
+    lines.append(f"Runs: {len(runs)} total, {len(running_runs)} running")
+    lines.extend(f"- {run_line(run)}" for run in runs[:5])
+    return "\n".join(lines)
+
+def format_dispatch(task, message):
+    return f"Dispatched task #{task.get('id')} to {task.get('owner') or message.get('toName')}: {task.get('subject')}\nMessage #{message.get('id')} sent to {message.get('toName')}"
 
 if not argv or argv[0] in ("help", "--help", "-h"):
     usage()
@@ -1157,8 +1290,10 @@ elif cmd == "delete":
     if not rest: raise SystemExit("Usage: metabot teams delete <team>")
     req("DELETE", f"/api/agent-teams/{enc(rest[0])}")
 elif cmd == "status":
-    if not rest: raise SystemExit("Usage: metabot teams status <team>")
-    req("GET", f"/api/agent-teams/{enc(rest[0])}")
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit("Usage: metabot teams status <team>")
+    status = req_data("GET", f"/api/agent-teams/{enc(pos[0])}")
+    emit(format_status(status) if wants_summary(flags) else status)
 elif cmd == "bind":
     pos, flags = parse(rest)
     if len(pos) < 2: raise SystemExit("Usage: metabot teams bind <team> <chatId> [--display]")
@@ -1176,6 +1311,66 @@ elif cmd == "bind":
 elif cmd in ("start", "stop"):
     if not rest: raise SystemExit(f"Usage: metabot teams {cmd} <team>")
     req("POST", f"/api/agent-teams/{enc(rest[0])}/{cmd}", {})
+elif cmd == "dispatch":
+    pos, flags = parse(rest)
+    if len(pos) < 3: raise SystemExit("Usage: metabot teams dispatch <team> <agent> <subject>")
+    team, agent = pos[0], pos[1]
+    subject = " ".join(pos[2:])
+    description = flags.get("description")
+    task = req_data("POST", f"/api/agent-teams/{enc(team)}/tasks", {
+        "subject": subject,
+        "description": description,
+        "owner": agent,
+        "blockedBy": parse_number_list(flags.get("blocked-by")),
+    })
+    body = flags.get("message")
+    if not body:
+        parts = [
+            f"Start task #{task.get('id')}: {subject}",
+            f"\n{description}" if description else "",
+            "",
+            f"Expected: claim with `metabot teams tasks claim {team} {task.get('id')} {agent}`, then finish with `metabot teams tasks done {team} {task.get('id')} \"<result>\"`.",
+        ]
+        body = "\n".join(part for part in parts if part)
+    message = req_data("POST", f"/api/agent-teams/{enc(team)}/messages", {
+        "toName": agent,
+        "fromName": flags.get("from") or "lead",
+        "summary": (flags.get("summary") if isinstance(flags.get("summary"), str) else None) or f"Task #{task.get('id')}: {subject}",
+        "body": body,
+    })
+    emit(format_dispatch(task, message) if wants_summary(flags) else {"task": task, "message": message})
+elif cmd == "next":
+    pos, flags = parse(rest)
+    if len(pos) < 2: raise SystemExit("Usage: metabot teams next <team> <agent>")
+    team, agent = pos[0], pos[1]
+    unread = req_data("GET", f"/api/agent-teams/{enc(team)}/messages?to={enc(agent)}&unread=1")
+    tasks_body = req_data("GET", f"/api/agent-teams/{enc(team)}/tasks")
+    tasks = tasks_body.get("tasks", []) if isinstance(tasks_body, dict) else []
+    assigned = [
+        task for task in tasks
+        if task.get("owner") == agent and task.get("status") in ("pending", "in_progress")
+    ]
+    result = {
+        "team": team,
+        "agent": agent,
+        "unreadMessages": unread.get("messages", []) if isinstance(unread, dict) else [],
+        "assignedTasks": assigned,
+    }
+    if flags.get("read") and result["unreadMessages"]:
+        read = req_data("POST", f"/api/agent-teams/{enc(team)}/messages/read?to={enc(agent)}", {})
+        if isinstance(read, dict):
+            result["read"] = read.get("read", 0)
+    emit(format_next(result) if wants_summary(flags) else result)
+elif cmd == "watch":
+    pos, flags = parse(rest)
+    if not pos: raise SystemExit("Usage: metabot teams watch <team>")
+    interval = max(1.0, float(flags.get("interval") or 5))
+    count = max(1, int(flags.get("count") or 1))
+    for i in range(count):
+        status = req_data("GET", f"/api/agent-teams/{enc(pos[0])}")
+        emit(format_status(status) if wants_summary(flags) else status)
+        if i < count - 1:
+            time.sleep(interval)
 elif cmd == "agents":
     sub, args = (rest[0] if rest else ""), rest[1:]
     if sub == "list":
@@ -1185,7 +1380,7 @@ elif cmd == "agents":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams agents spawn <team> <name>")
         req("POST", f"/api/agent-teams/{enc(pos[0])}/agents", {
-            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine"), "prompt": flags.get("prompt")
+            "name": pos[1], "role": flags.get("role"), "engine": flags.get("engine") or "codex", "prompt": flags.get("prompt")
         })
     elif sub == "stop":
         if len(args) < 2: raise SystemExit("Usage: metabot teams agents stop <team> <name>")
@@ -1197,9 +1392,11 @@ elif cmd == "agents":
         raise SystemExit("Usage: metabot teams agents list|spawn|stop|delete ...")
 elif cmd == "send":
     pos, flags = parse(rest)
-    if len(pos) < 3: raise SystemExit("Usage: metabot teams send <team> <to> <message>")
+    if len(pos) < 2: raise SystemExit("Usage: metabot teams send <team> <to> <message>")
+    message = flags.get("message") or " ".join(pos[2:])
+    if not message: raise SystemExit("Usage: metabot teams send <team> <to> <message>")
     req("POST", f"/api/agent-teams/{enc(pos[0])}/messages", {
-        "toName": pos[1], "body": " ".join(pos[2:]), "fromName": flags.get("from"), "summary": flags.get("summary")
+        "toName": pos[1], "body": message, "fromName": flags.get("from"), "summary": flags.get("summary")
     })
 elif cmd == "inbox":
     pos, flags = parse(rest)
@@ -1210,17 +1407,20 @@ elif cmd == "inbox":
         read = req_data("POST", f"/api/agent-teams/{enc(pos[0])}/messages/read?to={enc(pos[1])}", {})
         if isinstance(inbox, dict) and isinstance(read, dict):
             inbox["read"] = read.get("read", 0)
-    emit(inbox)
+    emit(format_inbox(inbox) if wants_summary(flags) else inbox)
 elif cmd == "tasks":
     sub, args = (rest[0] if rest else ""), rest[1:]
     if sub == "list":
-        if not args: raise SystemExit("Usage: metabot teams tasks list <team>")
-        req("GET", f"/api/agent-teams/{enc(args[0])}/tasks")
+        pos, flags = parse(args)
+        if not pos: raise SystemExit("Usage: metabot teams tasks list <team>")
+        tasks = req_data("GET", f"/api/agent-teams/{enc(pos[0])}/tasks")
+        emit(format_tasks(tasks) if wants_summary(flags) else tasks)
     elif sub == "create":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams tasks create <team> <subject>")
         req("POST", f"/api/agent-teams/{enc(pos[0])}/tasks", {
-            "subject": " ".join(pos[1:]), "description": flags.get("description"), "owner": flags.get("owner")
+            "subject": " ".join(pos[1:]), "description": flags.get("description"), "owner": flags.get("owner"),
+            "blockedBy": parse_number_list(flags.get("blocked-by"))
         })
     elif sub == "get":
         if len(args) < 2: raise SystemExit("Usage: metabot teams tasks get <team> <id>")
@@ -1229,15 +1429,51 @@ elif cmd == "tasks":
         pos, flags = parse(args)
         if len(pos) < 2: raise SystemExit("Usage: metabot teams tasks update <team> <id>")
         req("PATCH", f"/api/agent-teams/{enc(pos[0])}/tasks/{enc(pos[1])}", {
-            "status": flags.get("status"), "owner": flags.get("owner"), "result": flags.get("result")
+            "subject": flags.get("subject"),
+            "description": flags.get("description"),
+            "status": flags.get("status"),
+            "owner": None if flags.get("owner") == "none" else flags.get("owner"),
+            "__keepNull": ["owner"] if flags.get("owner") == "none" else [],
+            "blockedBy": parse_number_list(flags.get("blocked-by")),
+            "result": flags.get("result"),
+        })
+    elif sub == "claim":
+        pos, flags = parse(args)
+        owner = flags.get("owner") or (pos[2] if len(pos) >= 3 else None) or default_agent_name()
+        if len(pos) < 2 or not owner: raise SystemExit("Usage: metabot teams tasks claim <team> <id> [owner|--owner name]")
+        req("PATCH", f"/api/agent-teams/{enc(pos[0])}/tasks/{enc(pos[1])}", {
+            "status": "in_progress", "owner": owner
+        })
+    elif sub in ("done", "complete"):
+        pos, flags = parse(args)
+        result = flags.get("result") or (" ".join(pos[2:]) if len(pos) >= 3 else "")
+        if len(pos) < 2 or not result: raise SystemExit(f"Usage: metabot teams tasks {sub} <team> <id> <result>")
+        req("PATCH", f"/api/agent-teams/{enc(pos[0])}/tasks/{enc(pos[1])}", {
+            "status": "completed", "result": result
+        })
+    elif sub == "block":
+        pos, flags = parse(args)
+        reason = flags.get("result") or (" ".join(pos[2:]) if len(pos) >= 3 else "")
+        if len(pos) < 2 or not reason: raise SystemExit("Usage: metabot teams tasks block <team> <id> <reason>")
+        req("PATCH", f"/api/agent-teams/{enc(pos[0])}/tasks/{enc(pos[1])}", {
+            "status": "pending",
+            "blockedBy": parse_number_list(flags.get("blocked-by")),
+            "result": f"Blocked: {reason}",
+        })
+    elif sub == "reopen":
+        if len(args) < 2: raise SystemExit("Usage: metabot teams tasks reopen <team> <id>")
+        req("PATCH", f"/api/agent-teams/{enc(args[0])}/tasks/{enc(args[1])}", {
+            "status": "pending"
         })
     else:
-        raise SystemExit("Usage: metabot teams tasks list|create|get|update ...")
+        raise SystemExit("Usage: metabot teams tasks list|create|get|update|claim|done|block|reopen ...")
 elif cmd == "runs":
     sub, args = (rest[0] if rest else ""), rest[1:]
     if sub == "list":
-        if not args: raise SystemExit("Usage: metabot teams runs list <team>")
-        req("GET", f"/api/agent-teams/{enc(args[0])}/runs")
+        pos, flags = parse(args)
+        if not pos: raise SystemExit("Usage: metabot teams runs list <team>")
+        runs = req_data("GET", f"/api/agent-teams/{enc(pos[0])}/runs")
+        emit(format_runs(runs) if wants_summary(flags) else runs)
     elif sub == "create":
         pos, flags = parse(args)
         if not pos: raise SystemExit("Usage: metabot teams runs create <team>")

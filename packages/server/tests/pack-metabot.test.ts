@@ -117,8 +117,9 @@ describe('pack-metabot.sh', () => {
     }
   });
 
-  it('tarball includes the metabot skill bundle (Phase 6 SKILL_SENTINEL)', () => {
+  it('tarball includes the packaged skill bundles', () => {
     expect(tarListing).toContain('packages/skills/metabot/SKILL.md');
+    expect(tarListing).toContain('packages/skills/metabot-team/SKILL.md');
   });
 
   it('tarball includes engine sources and workspace skills', () => {

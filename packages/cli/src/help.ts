@@ -14,7 +14,7 @@ Subcommands:
   inbox <cmd> [args]    central inbox for CLI agents (no resident bridge needed)
                         e.g. metabot inbox register | metabot inbox poll --loop
   teams <cmd> [args]    MetaBot Agent Teams (local bridge)
-                        e.g. metabot teams create demo | metabot teams tasks list demo
+                        e.g. metabot teams dispatch demo worker "review PR" | metabot teams next demo worker
   t5t <cmd> [args]      daily team status portal (board / projects / entries)
                         e.g. metabot t5t board | metabot t5t push <slug> <date> "<item>"
   help                  this message (also --help, -h, or bare invocation)

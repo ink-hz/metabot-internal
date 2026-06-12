@@ -11,6 +11,7 @@
 #   - src/                              (engine + workspace skill sources)
 #   - packages/cli, cli-core, metamemory, skill-hub  (4 bot-host workspaces)
 #   - packages/skills/metabot           (Phase 6 SKILL_SENTINEL)
+#   - packages/skills/metabot-team      (Agent Teams CLI skill)
 #
 # What does NOT ship (central-only / build artifacts / user state):
 #   - packages/server, packages/web-ui
@@ -64,6 +65,8 @@ TAR_EXCLUDES=(
 # Explicit include list — only these paths get into the tarball.
 # packages/server + packages/web-ui are intentionally OMITTED (central-only).
 # packages/skills/metabot/ is required for Phase 6 SKILL_SENTINEL check.
+# packages/skills/metabot-team/ keeps the Codex Agent Teams workflow installable
+# from the packaged Skill Hub path.
 INCLUDES=(
   'bin'
   'install.sh'
@@ -98,7 +101,7 @@ done
 # install.sh and the metabot SKILL bundle are load-bearing — if either is
 # missing, the bootstrap → install.sh → Phase 6 chain will explode on the
 # bot host. Fail loud here instead.
-for required in 'install.sh' 'packages/skills/metabot/SKILL.md'; do
+for required in 'install.sh' 'packages/skills/metabot/SKILL.md' 'packages/skills/metabot-team/SKILL.md'; do
   if [[ ! -e "$REPO_ROOT/$required" ]]; then
     echo "error: required path missing from repo: $required" >&2
     exit 1
@@ -153,6 +156,11 @@ tar --sort=name \
 TARBALL_LISTING="$(tar tzf "$SERVER_STATIC_DIR/$TARBALL_NAME.new")"
 if ! grep -Eq '^(\./)?packages/skills/metabot/SKILL\.md$' <<<"$TARBALL_LISTING"; then
   echo "error: packed tarball is missing packages/skills/metabot/SKILL.md" >&2
+  rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
+  exit 1
+fi
+if ! grep -Eq '^(\./)?packages/skills/metabot-team/SKILL\.md$' <<<"$TARBALL_LISTING"; then
+  echo "error: packed tarball is missing packages/skills/metabot-team/SKILL.md" >&2
   rm -f "$SERVER_STATIC_DIR/$TARBALL_NAME.new"
   exit 1
 fi

@@ -12,11 +12,12 @@ metabot memory <cmd>   # shared knowledge / notes
 metabot skills <cmd>   # skill registry                (alias: skill)
 metabot agents <cmd>   # peer-bot address book
 metabot inbox  <cmd>   # central inbox for CLI agents (CC / Codex with no bridge)
+metabot teams  <cmd>   # local Agent Teams orchestration
 metabot t5t    <cmd>   # daily team status portal
 metabot help           # top-level help (also --help, -h, bare invocation)
 ```
 
-`metabot` is the **single** CLI binary. Beyond the four metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm`, `mh`, and per-bot `bot-skills` surfaces were removed in P4-MR4 and the follow-on cleanup; `mb` is now a thin deprecation wrapper that forwards to `metabot`. Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
+`metabot` is the **single** CLI binary. Beyond the metabot-core surfaces above, it also handles bridge process control (`update`/`start`/`stop`/`restart`/`logs`/`status`) and a bridge daemon API (`bots`/`bot`/`talk`/`schedule`/`voice`/`stats`/`peers`/`metrics`/`health` — see the bridge-local section below). The legacy `mm`, `mh`, and per-bot `bot-skills` surfaces were removed in P4-MR4 and the follow-on cleanup; `mb` is now a thin deprecation wrapper that forwards to `metabot`. Switch any script still calling them to the `metabot <subcommand>` form (see the migration table below).
 
 Auth is automatic: `METABOT_CORE_TOKEN` (env) or `~/.metabot-core/token` (first line). Server URL is `METABOT_CORE_URL`, default `https://metabot-core.xvirobotics.com` (dedicated front-door domain since the P4-MR6 pivot — no `/core` path prefix, no shared multi-tenant host). CLIs explicitly configured against the legacy `https://metabot.xvirobotics.com/core` keep working unchanged — the multi-tenant `/core` sub-handle is untouched.
 
@@ -213,6 +214,43 @@ metabot inbox clear   [--chat <id>] [--all-chats]
 
 **Storage.** SQLite table `agent_inbox(id, target_bot, chat_id, from_bot, from_owner, from_credential_id, content, enqueued_at)` with index `(target_bot, chat_id, enqueued_at)`. No TTL — use `clear` or `metabot inbox count` (if added) to manage size. The table lives in the same `central.db` as `agents`, `memory_*`, and `t5t_*`.
 
+## `metabot teams` — local Agent Teams
+
+Agent Teams live in the local bridge (`/api/agent-teams/*`) and are optimized
+for Codex-first delegation. New CLI-spawned teammates default to `codex`; pass
+`--engine claude|kimi` only for explicit exceptions.
+
+Lead path:
+
+```bash
+metabot teams create <team> --description "..."
+metabot teams agents spawn <team> <agent> --role "runtime" --prompt "Own runtime work."
+metabot teams dispatch <team> <agent> "Fix update package" --description "Self-contained scope." --plain
+metabot teams status <team> --summary
+metabot teams runs list <team>
+```
+
+`dispatch` is the smooth path: it creates a task, assigns it to the agent, and
+sends the wake-up message in one command.
+
+Teammate path:
+
+```bash
+metabot teams next <team> <agent> --read
+metabot teams status <team> --summary
+metabot teams tasks claim <team> <taskId> <agent>
+metabot teams tasks done <team> <taskId> "result"
+metabot teams tasks block <team> <taskId> "blocked reason" --blocked-by <id,id>
+metabot teams send <team> lead "Completed task <taskId>: ..."
+```
+
+For repeated local teammate use, set `METABOT_TEAM_AGENT=<agent>` and omit the
+owner argument in `tasks claim`.
+
+Add `--summary` or `--plain` to `status`, `next`, `inbox`, `tasks list`,
+`runs list`, `dispatch`, and `watch` for concise text output. Omit it when you
+need the default JSON for scripts.
+
 ## `metabot t5t` — daily team status portal
 
 T5T (天天天天天 — daily team status) is the team's append-only project tracker: each member pushes a daily entry, evaluators score evaluator-columns, leaders set goals and surface bottlenecks. All state is append-only docs in central memory; there are no updates or deletes — latest-doc-wins per `(project, type)` at read time.
@@ -274,6 +312,7 @@ bridge `.env`). These commands act on the bot process running on this host:
 metabot bots                              # list all bots (local + peer)
 metabot bot <name>                        # get bot details
 metabot talk [peer/]<bot> <chatId> <msg>  # talk to a bot via the bridge /api/talk
+metabot teams ...                          # local Agent Teams
 metabot schedule list|add|cron|pause|resume|cancel …   # task scheduler
 metabot peers                             # list peers and status
 metabot stats                             # cost & usage statistics
