@@ -57,6 +57,16 @@ cd ~/metabot && bash install.sh
 
 ---
 
+## 🔑 自托管 & 鉴权（个人版）
+
+MetaBot 开箱即是**可自托管的个人版**：本地跑、单 token 鉴权、**不依赖任何 SSO / 企业登录**。
+
+- **本地优先**：`metabot-core` 默认只监听 `http://localhost:9200`，首次启动自动生成本地 API token（写入 `~/.metabot-core/token`）。CLI 与 Web 控制台都用它鉴权。数据默认落在 `~/.metabot-core/`。
+- **无需 SSO**：不需要 OAuth / OIDC / 企业 VPN。要多人或公网访问时，自行在前面挂一个反向代理（可选 oauth2-proxy）即可，应用层不强制。
+- **分发端点默认上锁**：`/cli/*`、`/install/*` 安装分发端点默认需要 token；确认你的构建不含密钥后，可设 `METABOT_PUBLIC_DISTRIBUTION=1` 放开匿名下载。
+
+---
+
 ## 三引擎：Claude Code ✕ Kimi Code ✕ Codex CLI 并列一等支持
 
 MetaBot 不是只绑定一家 — 三大顶级 AI 编码 Agent 都内置原生支持，**你的订阅直接用**。
@@ -568,10 +578,8 @@ npm run build        # TypeScript 编译
 
 ## Roadmap
 
-- [ ] Agent 异步双向通信协议
 - [ ] 插件市场（MCP Server 一键安装）
 - [ ] 更多 IM 平台（Slack、Discord、钉钉）
-- [ ] 多租户模式
 
 ## 关于
 

@@ -57,6 +57,16 @@ The installer walks you through everything: working directory → **engine choic
 
 ---
 
+## 🔑 Self-Hosted & Auth (Personal Edition)
+
+MetaBot is a **self-hostable personal edition** out of the box: runs locally, single-token auth, **no SSO or corporate login required**.
+
+- **Local-first**: `metabot-core` listens on `http://localhost:9200` by default and generates a local API token on first launch (written to `~/.metabot-core/token`). The CLI and web console both authenticate with it. Data lives under `~/.metabot-core/` by default.
+- **No SSO**: no OAuth / OIDC / corporate VPN needed. To expose it to other people or the public internet, put your own reverse proxy (optionally oauth2-proxy) in front — it's never required at the app layer.
+- **Distribution endpoints are locked by default**: `/cli/*` and `/install/*` require a token; once you've confirmed your build embeds no secrets, set `METABOT_PUBLIC_DISTRIBUTION=1` to allow anonymous downloads.
+
+---
+
 ## Multi-Engine: Claude Code, Kimi Code, and Codex CLI
 
 MetaBot isn't locked to one vendor — all three top AI coding agents ship with native support, and **your subscription works directly**.
@@ -567,10 +577,8 @@ npm run build        # TypeScript compile
 
 ## Roadmap
 
-- [ ] Async bidirectional agent communication protocol
 - [ ] Plugin marketplace (one-click MCP Server install)
 - [ ] More IM platforms (Slack, Discord, DingTalk)
-- [ ] Multi-tenant mode
 
 ## About
 
