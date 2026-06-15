@@ -375,15 +375,20 @@ export class DocSync {
 
     if (existing) {
       // Update existing document
-      await this.updateDocumentContent(existing.feishuDocId, doc);
-      this.store.upsertDocMapping({
-        ...existing,
-        memoryPath: doc.path,
-        contentHash: hash,
-        syncedAt: new Date().toISOString(),
-      });
-      if (result) result.updated++;
-      this.logger.info({ doc: doc.title, docId: existing.feishuDocId }, 'Updated wiki document');
+      try {
+        await this.updateDocumentContent(existing.feishuDocId, doc);
+        this.store.upsertDocMapping({
+          ...existing,
+          memoryPath: doc.path,
+          contentHash: hash,
+          syncedAt: new Date().toISOString(),
+        });
+        if (result) result.updated++;
+        this.logger.info({ doc: doc.title, docId: existing.feishuDocId }, 'Updated wiki document');
+      } catch (err: any) {
+        if (result) result.errors.push(`Document "${doc.title}": ${err.message || err}`);
+        this.logger.error({ err, doc: doc.title, docId: existing.feishuDocId }, 'Failed to update wiki document');
+      }
     } else {
       // Create new wiki page
       try {

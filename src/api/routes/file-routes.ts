@@ -87,11 +87,11 @@ export async function handleFileRoutes(
         }
         html = wrapPreviewHtml(path.basename(fullPath), tables.join('\n'));
       } else if (ext === '.pptx' || ext === '.ppt') {
-        const { execSync } = await import('child_process');
+        const { execFileSync } = await import('child_process');
         const tmpOut = path.join(os.tmpdir(), 'metabot-preview-' + Date.now());
         fs.mkdirSync(tmpOut, { recursive: true });
         try {
-          execSync(`soffice --headless --convert-to html --outdir "${tmpOut}" "${fullPath}"`, { timeout: 30000 });
+          execFileSync('soffice', ['--headless', '--convert-to', 'html', '--outdir', tmpOut, fullPath], { timeout: 30000 });
           const htmlFile = fs.readdirSync(tmpOut).find((f: string) => f.endsWith('.html'));
           if (htmlFile) {
             html = fs.readFileSync(path.join(tmpOut, htmlFile), 'utf-8');
