@@ -173,7 +173,7 @@ metabot/                       # repo root — bridge runtime (bot hosts run thi
 │   ├── metamemory/            # thin client for /api/memory/*
 │   ├── skill-hub/             # thin client for /api/skills/*
 │   └── skills/                # default skill bundle source (metabot SKILL.md)
-└── docs/                      # all docs (including absorbed docs/metabot-core/)
+└── docs/                      # all docs
 ```
 
 The two halves communicate **only over HTTP `/api/*`** — cross-package imports are blocked by ESLint `no-restricted-imports` plus a tight `packages/server/package.json` exports lock. A bot-host `install.sh` installs only the bridge + CLI/CLI-Core dependency closure — server-only deps (fastify / react / vite / server-side better-sqlite3) are **not** pulled. Central-server deployment still uses `cd packages/server && bash deploy/install.sh` (the script uses `$PKG_DIR` and is unaffected by the source-path move).

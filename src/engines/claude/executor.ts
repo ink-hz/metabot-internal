@@ -189,7 +189,7 @@ export interface ApiContext {
  *         so on 1M-capable auth this forces auto-compaction to fire near 200K
  *         (≈ window − 13K) instead of ~987K. NOTE: on auth where the model
  *         already reports a 200K window (e.g. a proxy that doesn't grant the
- *         1M tier — verified for opus-4-8 via teamclaude.xvirobotics.com),
+ *         1M tier — as observed for opus-4-8 behind some auth proxies),
  *         this is a no-op, since min(200K, 200K) = 200K. It's a defensive
  *         guard for the day this bot runs on 1M-capable auth. Pushing the
  *         window *above* the model's reported size isn't possible here: the

@@ -173,4 +173,22 @@ describe('CLI distribution endpoints (default: token-gated)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toBe(INSTALL_SH);
   });
+
+  it('slash-variant paths cannot bypass the gate (regression: //, trailing /)', async () => {
+    for (const p of ['/cli//install.sh', '/cli/install.sh/', '/cli//latest.tgz']) {
+      const res = await rawRequest(kit!.port, 'GET', p);
+      expect(res.status).not.toBe(200);
+      expect(res.body).not.toBe(INSTALL_SH);
+    }
+  });
+
+  it('on the UI host, slash-variant distribution paths are not served anonymously (regression)', async () => {
+    await kit!.cleanup();
+    kit = await startTestServer('cli-dist-gated-ui', { uiHost: 'test-ui.local' });
+    for (const p of ['/cli/install.sh', '/cli//install.sh', '/cli/install.sh/']) {
+      const res = await rawRequest(kit!.port, 'GET', p, { Host: 'test-ui.local' });
+      expect(res.status).not.toBe(200);
+      expect(res.body).not.toBe(INSTALL_SH);
+    }
+  });
 });

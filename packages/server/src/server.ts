@@ -214,6 +214,20 @@ function tryServeStatic(
     return true;
   }
 
+  // Defense-in-depth: the distribution subtrees (cli/, install/) are reserved
+  // for the token-gated handlers. Never serve them via this (anonymous) UI-host
+  // static path — even if a slash-variant slipped past the gate's path match,
+  // it must not be retrievable here.
+  const cliRoot = path.join(STATIC_DIR, 'cli');
+  const installRoot = path.join(STATIC_DIR, 'install');
+  if (
+    resolved === cliRoot || resolved.startsWith(cliRoot + path.sep)
+    || resolved === installRoot || resolved.startsWith(installRoot + path.sep)
+  ) {
+    jsonResponse(res, 404, { error: 'not_found' });
+    return true;
+  }
+
   const isImmutable = pathname.startsWith('/assets/');
   if (serveStaticFile(res, resolved, isImmutable)) return true;
 
@@ -280,10 +294,9 @@ async function deliverChatRunToAgent(
 
 /**
  * Structural read-only fork for web-identity (browser SSO) credentials.
- * Returns true only for the explicitly enumerated GETs in §11.5 of
- * `docs/internal/web-ui-arch.md`. Anything else is returned as a 404
- * `not_found` (deliberately not 403 — we don't leak route existence to a
- * browser-origin caller).
+ * Returns true only for the explicitly enumerated GETs in the allowlist
+ * below. Anything else is returned as a 404 `not_found` (deliberately not
+ * 403 — we don't leak route existence to a browser-origin caller).
  */
 function isWebReadableRoute(method: string, pathname: string): boolean {
   if (method !== 'GET') return false;
@@ -556,6 +569,14 @@ export function startServer(options: ServerOptions): ServerHandle {
     const distributionAuthorized = (): boolean =>
       publicDistribution || !isAuthFailure(authenticate(req, credentialsStore));
 
+    // Canonicalize slashes before matching the protected paths. The WHATWG URL
+    // parser does NOT collapse duplicate ('/cli//install.sh') or trailing
+    // ('/cli/install.sh/') slashes, but path.join (in the static-serve layer)
+    // does — so without this, slash variants would skip the exact-match gate
+    // yet still resolve to the protected file. Gate + serve on the normalized
+    // form so no variant slips past.
+    const distPath = pathname.replace(/\/{2,}/g, '/').replace(/(.)\/+$/, '$1');
+
     // Self-hosted CLI install:
     //   curl -fsSL <host>/cli/install.sh | METABOT_CORE_TOKEN=... bash
     // The tarball + script are built by `packages/cli/scripts/pack.sh` into
@@ -563,13 +584,13 @@ export function startServer(options: ServerOptions): ServerHandle {
     // not embedded.
     if (
       (method === 'GET' || method === 'HEAD')
-      && (pathname === '/cli/install.sh' || pathname === '/cli/latest.tgz')
+      && (distPath === '/cli/install.sh' || distPath === '/cli/latest.tgz')
     ) {
       if (!distributionAuthorized()) {
         jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
-      const rel = pathname.replace(/^\/+/, '');
+      const rel = distPath.replace(/^\/+/, '');
       const abs = path.resolve(path.join(STATIC_DIR, rel));
       if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {
         jsonResponse(res, 400, { error: 'bad_path' });
@@ -593,13 +614,13 @@ export function startServer(options: ServerOptions): ServerHandle {
     // another reason these endpoints are not anonymous by default.
     if (
       (method === 'GET' || method === 'HEAD')
-      && (pathname === '/install/install.sh' || pathname === '/install/latest.tgz')
+      && (distPath === '/install/install.sh' || distPath === '/install/latest.tgz')
     ) {
       if (!distributionAuthorized()) {
         jsonResponse(res, 401, { error: 'unauthorized' });
         return;
       }
-      const rel = pathname.replace(/^\/+/, '');
+      const rel = distPath.replace(/^\/+/, '');
       const abs = path.resolve(path.join(STATIC_DIR, rel));
       if (abs !== STATIC_DIR && !abs.startsWith(STATIC_DIR + path.sep)) {
         jsonResponse(res, 400, { error: 'bad_path' });

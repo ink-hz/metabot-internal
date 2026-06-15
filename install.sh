@@ -733,10 +733,10 @@ API_TIMEOUT_MS=600000"
   prompt_input METABOT_CORE_URL "metabot-core URL" "http://localhost:9200"
 
   echo ""
-  info "Get your personal Bearer token at ${METABOT_CORE_URL}/cli"
-  info "  1) Open the URL in your browser (sign in via your org's SSO)"
-  info "  2) Click 'Generate' on the CLI Access page"
-  info "  3) Paste the mt_... token below — or press Enter to configure later"
+  info "Get your personal Bearer token:"
+  info "  - metabot-core generates one on first launch at ~/.metabot-core/token"
+  info "  - or open ${METABOT_CORE_URL}/cli and click 'Generate'"
+  info "  Paste the mt_... token below — or press Enter to configure later"
   info "     (later: drop it into ${METABOT_HOME}/.env or ~/.metabot-core/token)"
   prompt_secret METABOT_CORE_TOKEN "metabot-core Bearer token (blank = skip)"
 fi
@@ -793,7 +793,7 @@ if [[ "$SKIP_CONFIG" == "false" ]]; then
     if [[ -n "${METABOT_CORE_TOKEN:-}" ]]; then
       echo "METABOT_CORE_TOKEN=${METABOT_CORE_TOKEN}"
     else
-      echo "# Get your token at ${METABOT_CORE_URL}/cli (sign in, click Generate)"
+      echo "# Token is at ~/.metabot-core/token on first launch, or ${METABOT_CORE_URL}/cli (Generate)"
       echo "# Either paste it here OR save to ~/.metabot-core/token (chmod 600)"
       echo "# METABOT_CORE_TOKEN="
     fi
@@ -1282,9 +1282,9 @@ echo "    metabot t5t board         # T5T project board"
 echo ""
 if [[ -z "${METABOT_CORE_TOKEN:-}" ]]; then
   echo -e "  ${BOLD}metabot-core onboarding:${NC}"
-  echo "    1. Open ${CORE_URL_DISPLAY}/cli in your browser (sign in via SSO)"
-  echo "    2. Click 'Generate' to mint a personal Bearer token"
-  echo "    3. Paste it into ${METABOT_HOME}/.env as METABOT_CORE_TOKEN=mt_..."
+  echo "    1. Grab your token from ~/.metabot-core/token (generated on first launch)"
+  echo "       or open ${CORE_URL_DISPLAY}/cli and click 'Generate'"
+  echo "    2. Paste it into ${METABOT_HOME}/.env as METABOT_CORE_TOKEN=mt_..."
   echo "       (or save to ~/.metabot-core/token, chmod 600)"
   echo ""
 fi

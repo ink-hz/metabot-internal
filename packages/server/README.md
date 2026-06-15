@@ -26,10 +26,11 @@ Save it — it is never displayed again.
 
 | Var | Default | Notes |
 |---|---|---|
-| `METABOT_CORE_HOST` | `127.0.0.1` | Bind address. Loopback-only by default — Caddy fronts it. |
+| `METABOT_CORE_HOST` | `127.0.0.1` | Bind address. Loopback-only by default; put your own reverse proxy in front to expose it. |
 | `METABOT_CORE_PORT` | `9200` | TCP port. |
 | `METABOT_CORE_DATA_DIR` | `~/.metabot-core/data` | SQLite + audit live here. |
 | `METABOT_CORE_AUDIT_DIR` | `$METABOT_CORE_DATA_DIR/audit` | Override audit dir. |
+| `METABOT_PUBLIC_DISTRIBUTION` | _unset_ | `/cli/*` + `/install/*` install endpoints are token-gated by default; set `1`/`true` to serve them anonymously. Only when you self-distribute and your build embeds no secrets. |
 | `METABOT_CORE_AUDIT_ENABLED` | `true` | Set `false` to disable audit writes. |
 | `METABOT_CORE_INSTANCE_NAME` | _pkg name_ | Surfaced in `/api/manifest`. |
 | `METABOT_CORE_UI_HOST` | _unset_ | Hostname that triggers the SPA Web UI fall-through. See "Web UI" below. Unset → API-only. |
@@ -240,16 +241,15 @@ on `127.0.0.1:9200` with a data dir and an API token — no proxy, no SSO. See
   NoNewPrivileges + ProtectSystem=strict + PrivateTmp + ReadWritePaths).
   Set `User=`, `WorkingDirectory=`, and `METABOT_CORE_DATA_DIR` to your own
   paths.
-- `caddy/snippet.caddyfile` — optional example reverse-proxy host block if
-  you want to terminate TLS on your own hostname
-  (`your-metabot-host.example.com`). Not required for a localhost-only setup.
-- The remaining `oauth2-proxy/*` and cert-renewal helpers are **optional**
-  and only relevant if you choose to put your own SSO/identity proxy and
-  managed certificates in front of the server. The personal edition does not
-  need any of them.
 - `install.sh` — idempotent installer. Run after `npm install && npm run
   build` from the package dir. Installs the metabot-core unit, enables +
   starts the service.
+
+TLS and SSO are **out of scope** for the personal edition and not required:
+the server listens on localhost with token auth. If you want to expose it on
+your own hostname, put any reverse proxy (Caddy, nginx, …) in front to
+terminate TLS, and optionally an SSO/identity proxy (e.g. oauth2-proxy) — both
+are entirely your choice and bring-your-own.
 
 ## Tests
 

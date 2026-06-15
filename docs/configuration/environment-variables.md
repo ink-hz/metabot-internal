@@ -13,6 +13,7 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `API_SECRET` | — | Bearer token auth for API and MetaMemory. Generate one with `openssl rand -hex 32` |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
 | `METABOT_LOCAL_ADDRESS` | — | Bind all Feishu sockets (REST + wss long-connection) to this local source IP, forcing source-based routing past VPN smart split-tunneling (e.g. a corporate VPN hijacking `*.feishu.cn` into a dead tunnel). Unset = default route |
+| `METABOT_PUBLIC_DISTRIBUTION` | — | metabot-core server flag. The `/cli/*` and `/install/*` install endpoints are token-gated by default; set to `1` (or `true`) to serve them anonymously. Only enable when you intentionally self-distribute and your build embeds no secrets |
 
 ## Claude Code
 
