@@ -56,7 +56,7 @@ export interface TeamMember {
 export interface TeamTask {
   taskId: string;
   subject: string;
-  status: 'in_progress' | 'completed';
+  status: 'pending' | 'in_progress' | 'completed';
   teammate?: string;
 }
 
@@ -76,7 +76,7 @@ export interface CardState {
   durationMs?: number;
   errorMessage?: string;
   pendingQuestion?: PendingQuestion;
-  /** Primary model used (e.g. "claude-opus-4-7") */
+  /** Primary model used (e.g. "claude-fable-5") */
   model?: string;
   /** Total input+output tokens consumed */
   totalTokens?: number;
@@ -98,6 +98,7 @@ export interface IncomingMessage {
   chatType: string;
   userId: string;
   text: string;
+  timestamp?: number;
   imageKey?: string;
   fileKey?: string;
   fileName?: string;

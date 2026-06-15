@@ -5,6 +5,7 @@ import path from 'node:path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKUserMessage, SpawnOptions, SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { BotConfigBase } from '../../config.js';
+import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
@@ -45,6 +46,7 @@ const CLAUDE_ENV_PASSTHROUGH = new Set([
   'CLAUDE_CODE_SIMPLE',                   // --bare equivalent
   'CLAUDE_CODE_DISABLE_AUTO_MEMORY',      // toggle auto-memory (project patterns/learnings)
   'CLAUDE_CODE_DISABLE_1M_CONTEXT',       // opt out of Max-tier silent 1M context upgrade
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',      // hard-cap the auto-compact window (keeps non-[1m] models at 200k)
 ]);
 
 /**
@@ -173,24 +175,52 @@ export interface ApiContext {
  *     to the API. Belt-and-braces for API-key auth modes where the SDK
  *     may not auto-infer the beta from the suffix alone.
  *
- *   - Without `[1m]`: set `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` in the
- *     spawn env. The Claude CLI silently auto-enables 1M context for
- *     Max-tier OAuth subscriptions on models that support it (opus-4-7,
- *     opus-4-6, sonnet-4-6) — billing every request at 2× rate even
- *     though the user didn't request 1M. This env var is the binary's
- *     opt-out switch. (MetaBot's spawn handler merges `queryOptions.env`
- *     on top of `process.env`, so we only need to set the override key.)
+ *   - Fable 5 has native 1M context in Claude Code, so leave its env alone
+ *     and let the CLI use the model's default window.
+ *
+ *   - Without `[1m]` on legacy 1M-capable Opus/Sonnet models: keep the model
+ *     at the standard 200K window. We set
+ *     two env vars in the spawn env:
+ *       • `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` — the binary's opt-out switch
+ *         for the silent Max-tier 1M upgrade (opus-4-8, opus-4-7, opus-4-6,
+ *         sonnet-4-6), which otherwise bills all tokens at 2× past 200K.
+ *       • `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` — caps the auto-compact
+ *         window. The CLI's window resolver takes `min(modelWindow, configured)`,
+ *         so on 1M-capable auth this forces auto-compaction to fire near 200K
+ *         (≈ window − 13K) instead of ~987K. NOTE: on auth where the model
+ *         already reports a 200K window (e.g. a proxy that doesn't grant the
+ *         1M tier — as observed for opus-4-8 behind some auth proxies),
+ *         this is a no-op, since min(200K, 200K) = 200K. It's a defensive
+ *         guard for the day this bot runs on 1M-capable auth. Pushing the
+ *         window *above* the model's reported size isn't possible here: the
+ *         only upward override is `DISABLE_COMPACT + CLAUDE_CODE_MAX_CONTEXT_TOKENS`,
+ *         which turns auto-compaction off entirely. Value must stay within
+ *         the binary's 100K–1M bounds.
+ *     (MetaBot's spawn handler merges `queryOptions.env` on top of
+ *     `process.env`, so we only need to set the override keys. Both keys are
+ *     in CLAUDE_ENV_PASSTHROUGH so the CLAUDE* env filter doesn't strip them.)
+ *     Append `[1m]` to opt back in to the full 1M window.
  *
  * Must be called *after* any per-call `options.model` override so the
  * suffix detection sees the actually-effective model, not the bot default.
  */
+export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
+const FABLE_5_MODEL_RE = /^claude-fable-5(?:$|\[)/;
+
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;
+  if (model && FABLE_5_MODEL_RE.test(model)) {
+    return;
+  }
   if (model?.includes('[1m]')) {
     queryOptions.betas = ['context-1m-2025-08-07'];
   } else {
     const existingEnv = (queryOptions.env as Record<string, string> | undefined) ?? {};
-    queryOptions.env = { ...existingEnv, CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' };
+    queryOptions.env = {
+      ...existingEnv,
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: DEFAULT_AUTO_COMPACT_WINDOW,
+    };
   }
 }
 
@@ -232,6 +262,8 @@ export interface ExecutorOptions {
   maxTurns?: number;
   /** Override model for this execution (e.g. faster model for voice calls). */
   model?: string;
+  /** Per-turn Codex reasoning effort override. Ignored by non-Codex executors. */
+  reasoningEffort?: CodexReasoningEffort;
   /** Override allowed tools for this execution (empty array = no tools). */
   allowedTools?: string[];
   /** Called whenever Claude Code fires a team coordination hook. */
@@ -362,11 +394,11 @@ export class ClaudeExecutor {
         const groupId = apiContext.groupId;
         if (groupId) {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${groupId}-<botName> chatId pattern when talking to other bots in this group.`
+            `## Group Chat\nYou are in a group chat (group: ${groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${groupId}-<botName> "message"\`\nExample: \`metabot talk ${others[0]} grouptalk-${groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${groupId}-<botName> chatId pattern when talking to other bots in this group.`
           );
         } else {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`mb talk <botName> <chatId> "message"\` to communicate with other bots in the group.`
+            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`metabot talk <botName> <chatId> "message"\` to communicate with other bots in the group.`
           );
         }
       }
@@ -525,10 +557,12 @@ export class ClaudeExecutor {
     queryOptions.canUseTool = makeCanUseTool(this.logger);
 
     queryOptions.hooks = {
-      PreToolUse: [{
-        matcher: 'AskUserQuestion',
-        hooks: [askUserQuestionHook as any],
-      }],
+      PreToolUse: [
+        {
+          matcher: 'AskUserQuestion',
+          hooks: [askUserQuestionHook as any],
+        },
+      ],
       TaskCreated: [{ hooks: [teamObserverHook('task_created') as any] }],
       TaskCompleted: [{ hooks: [teamObserverHook('task_completed') as any] }],
       TeammateIdle: [{ hooks: [teamObserverHook('teammate_idle') as any] }],

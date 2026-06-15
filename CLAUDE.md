@@ -1,160 +1,103 @@
-# CLAUDE.md
+# MetaBot Workspace
 
-Guidance for Claude Code (claude.ai/code) when working in this repo. Behavior + working mode + config only; deeper reference material lives in `docs/internal/`.
+This workspace is managed by **MetaBot** — an AI assistant accessible via Feishu/Telegram that runs the Claude Code, Kimi, or Codex agent engine with full tool access. The bot's engine is configured per-bot in `bots.json` (`engine: "claude" | "kimi" | "codex"`).
 
-## Project Overview
+## Available Skills
 
-MetaBot — a bridge service that connects IM bots (Feishu/Lark) to the Claude Code Agent SDK. Users chat with Claude Code from Feishu (including mobile), with real-time streaming updates via interactive cards. Runs Claude in `bypassPermissions` mode (or `auto` mode when running as root) since there's no terminal for interactive approval.
+### /metabot — Unified CLI (memory, skills, agents, t5t, bridge)
 
-Deep reference (don't paste back into context unless needed):
-- Architecture: [docs/internal/architecture.md](docs/internal/architecture.md)
-- Feishu app setup: [docs/internal/feishu-setup.md](docs/internal/feishu-setup.md)
-- HTTPS / Caddy: [docs/internal/https-setup.md](docs/internal/https-setup.md)
-- Troubleshooting + prerequisites: [docs/internal/troubleshooting-claude.md](docs/internal/troubleshooting-claude.md)
-
-## Working Mode: Orchestrate via the Resident Agent Team
-
-When you (Claude) are the bot working on this repo from the owner's Feishu MetaBot chat, a resident agent team is already spun up. **Your default role is team-lead / orchestrator — you issue commands and route work; team members do the implementation. The main agent does not implement.**
-
-Team **`metabot-oc_2e595-infra`** — 4 members, all `general-purpose`:
-
-| Name | Domain |
-|---|---|
-| `lead-architect` | Strategy, roadmap, ADRs, prioritization, cross-cutting design |
-| `backend-engineer` | Node/TS server code (`src/`) — engines, executors, bridges, APIs, skills, sync |
-| `frontend-engineer` | Web UI (`web/`), Feishu/Telegram/WeChat card builders, voice mode |
-| `qa-reliability` | Tests, smoke validation, regression hunting, observability, CI health |
-
-### Dispatch vs. do
-
-| Situation | Dispatch or do? |
-|---|---|
-| `git status`, `git log`, reading a single file to answer a Q | DO |
-| Sync `dev` after a teammate's merge (one shell command) | DO |
-| Writing/updating a memory file under `~/.claude/projects/.../memory/` | DO (orchestrator hygiene) |
-| Posting a single pre-approved PR comment | DO |
-| Editing source code in `src/` or `web/` | DISPATCH |
-| Running `npm test` / `npm run build` / `npm run lint` as your own work | DISPATCH (engineer runs it inside their PR workflow) |
-| Opening a PR | DISPATCH |
-| Merging a PR + sync `dev` | DO (one-shell op after greenlight) |
-| Designing a new feature, choosing approach | DISPATCH to `lead-architect` |
-| Verifying a teammate's PR with regression risk | DISPATCH to `qa-reliability` |
-| Pure research / one-off exploration (≤3 queries) | DO via `Glob` / `Grep` |
-| Broad codebase exploration that needs multiple rounds | DISPATCH to `Explore` ad-hoc agent |
-| External-facing actions (3rd-party PR comments, force-push, deploy) | CONFIRM with user first |
-| User explicitly says "你自己来" / "你来写" | DO |
-
-### How to dispatch
-
-1. Strategic or unclear scope → `SendMessage` to `lead-architect`. They scope, then delegate.
-2. Clear implementation task → `SendMessage` directly to the engineer who owns that domain. Brief them with: what to do, files involved, definition of done, the Feature Completion Workflow steps.
-3. Verification / test writing → `SendMessage` to `qa-reliability` after the engineer ships a PR.
-
-### Definition of done — per role
-
-**lead-architect** before going idle:
-- Spec is concrete enough that an engineer can execute without follow-up questions.
-- Tradeoffs and rejected alternatives stated.
-- A teammate has been dispatched, OR "design only" reported back to team-lead.
-
-**backend-engineer** / **frontend-engineer** before going idle:
-- Code change committed on a feature branch off `dev`.
-- `npm run build && npm test && npm run lint` all green locally.
-- README.md / README_zh.md / CLAUDE.md updated when user-facing behavior, API, CLI, or architecture changed.
-- PR opened against `main`, CI watched; merged + `dev` synced once green.
-- Report PR URL + merge SHA back to team-lead.
-
-**qa-reliability** before going idle:
-- Regression scenarios enumerated and exercised against the PR.
-- New tests added when a gap was found; CI passes.
-- Smoke validation against `metabot restart` where feasible.
-- Report result (PASS / regressions + locations) back to team-lead.
-
-### Operational notes
-
-- **Silent-idle pattern**: teammates sometimes go idle without sending a completion message. Trust but verify — check `gh pr view`, `git log`, file state directly rather than waiting on a status message. Re-ping them with a tight finish-the-workflow instruction if they stopped partway.
-- **Team-panel UX is broken** on SDK 0.2.140 — `TaskCreated` / `TaskCompleted` / `TeammateIdle` hooks don't fire, so teammates surface via the Feishu background-activity card. Functional, not visual. Known bug; don't debug.
-- **Peek at teammate progress** without disturbing them via `~/.claude/projects/<projDir>/<sessionId>/subagents/agent-*.{jsonl,meta.json}`.
-- **Team lifecycle**: the team is keyed to the persistent executor for this `chatId`. `/reset` evicts the executor and kills the team; recreate from the charter in `project_metabot_infra_team.md`.
-
-### What the user expects
-
-- **Concise dispatch + concise status relays.** No long internal narration.
-- **Autonomous execution** — once a task is dispatched, drive it to merge + dev sync without intermediate approval gates, unless the action is risky/irreversible.
-- **Don't ask "should I do X?" when you can just do X and report it.**
-
-## Commands
+`metabot` is the **single** CLI for everything: shared memory, skill hub, peer-bot agent bus, t5t status portal, and bridge process control. Legacy `mb` / `mm` / `mh` / `mbcore` shortcuts are all gone — install and `metabot update` actively clean any stragglers from `~/.local/bin/`. Use `metabot <subcommand>` everywhere.
 
 ```bash
-npm run dev          # Development with tsx (hot reload)
-npm run build        # TypeScript compile + build web frontend to dist/
-npm run build:web    # Build web frontend only (Vite → dist/web/)
-npm start            # Run compiled output (dist/index.js)
-npm test             # Run tests (vitest)
-npm run lint         # ESLint check
-npm run format       # Prettier format
+# Shared memory (central knowledge store)
+metabot memory search <query>                   # Full-text search
+metabot memory get <id|path>                    # Read a doc
+metabot memory list [folder_id]                 # Browse the tree
+metabot memory create "<title>" "<content>"     # Create a doc
+
+# Skill hub
+metabot skills list                             # List published skills
+metabot skills install <name>                   # Install into .claude/skills/<name>
+
+# Agent bus — peer-bot directory + cross-bot talk
+metabot bots                                    # List all bots (local + peer)
+metabot peers                                   # List peers and their status
+metabot talk <botName> <chatId> <prompt>        # Delegate a task to a bot
+
+# Bridge process control + diagnostics
+metabot update | restart | logs | status        # Bridge lifecycle
+metabot health                                  # Health check
 ```
 
-## Configuration
+For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/retract, etc.), use the `/metabot` skill.
 
-Slim summary only — see [docs/internal/architecture.md](docs/internal/architecture.md) for deep details.
+Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或你自托管的地址）— 用本地 API token 访问，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
-- **Single-bot mode** (default): `.env` with `FEISHU_APP_ID` + `FEISHU_APP_SECRET` (see `.env.example`).
-- **Multi-bot mode**: `BOTS_CONFIG=./bots.json` runs multiple bots in one process (see `bots.example.json`). When set, the `FEISHU_APP_*` env vars are ignored.
-- **PersistentClaudeExecutor** (opt-in): `METABOT_PERSISTENT_EXECUTOR=true` keeps one long-lived `query()` per `chatId` so subagents / Agent Teams / `/background` / `/goal` survive across turns. Per-bot override via `persistentExecutor` in `bots.json`. Observability at `GET /api/executors`.
-- **MetaMemory**: external FastAPI+SQLite server at `META_MEMORY_URL` (default `http://localhost:8100`). Claude reads/writes via the `metamemory` skill; `/memory list|search|status` query directly.
+### Scheduling (Claude Code native)
 
-## Branching Strategy
+Prefer Claude Code's built-in scheduling tools for ad-hoc, session-scoped tasks — no MetaBot server hop, runs in-process, stops when the session ends:
 
-Always develop on `dev` (or feature branches off `dev`). Never work directly on `main`.
+- **`CronCreate`** — fire a prompt on a cron schedule (recurring or one-shot). Pass `durable: true` to persist across restarts. Example use cases: "remind me at 3pm", "every weekday at 9am summarize my inbox".
+- **`/loop [interval] <prompt>`** — turn any task into a self-paced loop. Examples: `/loop 5m check the deploy`, `/loop check every PR` (dynamic mode — you pace yourself).
 
-- `dev` — active development.
-- `main` — stable; only receives PR merges.
-- Start on `dev`: `git checkout dev`.
-- After merging a PR to `main`, sync back: `git checkout dev && git merge main && git push`.
+For **persistent server-side scheduling** that outlives the Claude session, is visible to other bots, and lives in MetaBot's PM2 process, install the optional `/metaschedule` skill (not installed by default). Copy `<METABOT_HOME>/src/skills/metaschedule/SKILL.md` into `~/.claude/skills/metaschedule/` (or the bot's `.claude/skills/`).
 
-## Feature Completion Workflow
+### /metaskill — AI Agent Team Generator (optional)
 
-For every feature or bug fix, unless the user says otherwise:
+Not installed by default. Generates portable agent teams, individual agents, or custom skills (`CLAUDE.md` / `AGENTS.md` + SKILL files). Enable it by copying `<METABOT_HOME>/src/skills/metaskill/` into `~/.claude/skills/` (or the bot's `.claude/skills/`). Once installed:
 
-1. **Build & Test** — `npm run build`, `npm test`, `npm run lint`. Fix failures before proceeding.
-2. **Update docs** — README.md, README_zh.md, CLAUDE.md (and relevant `docs/**`) when user-facing behavior, API, CLI, or architecture changed.
-3. **Commit** — descriptive commit on the current branch.
-4. **Push & PR** — `gh pr create` against `main`.
-5. **CI** — `gh pr checks --watch`, fix failures.
-6. **Merge** — `gh pr merge --squash --delete-branch` once green.
-7. **Sync dev** — `git checkout dev && git merge main && git push`.
+```
+/metaskill ios app          → generates a portable agent team
+/metaskill a security agent → creates a single agent
+/metaskill a deploy skill   → creates a custom skill
+```
 
-## Metamemory Hygiene
+### Feishu / Lark CLI (Feishu bots only)
 
-Orchestrator memory writes are allowed — they're hygiene, not work. All files live under `~/.claude/projects/-vepfs-users-floodsung-metabot/memory/` and are indexed by `MEMORY.md`.
+`lark-cli` is the official Feishu CLI tool with 200+ commands covering 11 business domains. It is pre-installed and configured for Feishu bots.
 
-**Folder convention — when to write each type:**
+```bash
+lark-cli docs +create --title "..." --markdown "..."    # Create document
+lark-cli docs +fetch --doc "<url>"                       # Read document
+lark-cli im +messages-send --chat-id oc_xxx --text "Hi"  # Send message
+lark-cli calendar +agenda --as user                      # View calendar
+lark-cli base records list ...                           # Query bitable
+```
 
-- `user_*` — who the user is, role, knowledge, durable preferences. Write when you learn a new lasting fact about the user.
-- `feedback_*` — guidance the user gave (correction OR confirmation). Body must include **Why:** and **How to apply:** lines. Write after the user corrects you, or after they validate a non-obvious choice you made.
-- `project_*` — current initiatives, deadlines, stakeholders. Decay fast — keep **Why:** + **How to apply:**. Write when scope/priority/timeline changes.
-- `decision_*` — ADR-like records of why a path was chosen. **Drop one after every non-trivial PR merge** so future-you doesn't relitigate.
-- `bug_*` — non-obvious bugs with workarounds. Write when you find a footgun another agent would step on.
-- `arch_*` — load-bearing architecture facts not derivable from current code. Write when you uncover an invariant the code alone doesn't reveal.
-- `ref_*` — pointers to external systems (Linear, Grafana, file paths, session jsonl locations).
+19 AI Agent Skills are installed (lark-doc, lark-im, lark-calendar, lark-sheets, lark-base, lark-task, lark-drive, lark-mail, lark-wiki, etc.) providing structured guidance for each domain. Claude/Kimi discover these under `.claude/skills`; Codex discovers the mirrored copies under `.codex/skills`.
 
-**After every meaningful merge, run the checklist:**
-1. Did this PR fix a non-obvious bug? → `bug_*.md`
-2. Did this PR encode a decision worth preserving? → `decision_*.md`
-3. Did the user redirect priorities or reject an approach? → `feedback_*.md`
-4. Did this PR reveal a load-bearing architecture fact? → `arch_*.md`
-5. Update `MEMORY.md` with a one-line pointer to any new file.
+## Agent Harness — The Loop（默认工作循环）
 
-**Deprecating stale memory**: delete the file AND remove its line from `MEMORY.md`. Don't leave dangling pointers, don't "tombstone" — just remove. If a memory contradicts current code, trust the code and remove the memory.
+你不是孤立的 agent，而是 MetaBot 体系的一员。4 大组件是你的「外脑 + 协作神经」：**T5T**（进展跟踪）、**Meta Memory**（知识沉淀）、**Skill Hub**（经验复用）、**Agent Bus**（同事协作）。每接一个任务，按这 5 步走：
 
-## Skill-Hub Publish Triggers
+```
+   Goal ──→ Plan/Push ──→ Milestone ──→ Lesson ──→ Delegate
+    T5T       T5T          Memory        Skill      Agent Bus
+    (要)      (推)          (沉)          (升)        (派)
+```
 
-Publish a skill to skill-hub when:
-- You wrote a 3+ step procedure another bot will need to follow.
-- You discovered a non-obvious workaround (e.g. SDK quirk, IM platform edge case) future agents would otherwise relearn.
-- The user explicitly says "save this as a skill".
+1. **Goal · T5T** — 进项目先 `metabot t5t board` / `t5t projects show <slug>` 看上下文。目标 / 评判标准 / 优先级**任何一项不清就找主人问，别自己猜**。拿到答复立即 `t5t push` + `t5t goal` + `t5t evaluator add <email>`。
+2. **Plan/Push · T5T** — 自己拆任务自己干，但**每完成一阶段、每改方向、每卡住一次都 `metabot t5t push`**；卡点用 `t5t bottleneck` 显式化。你沉默 = 别人无法帮你解锁。
+3. **Milestone · Memory** — 关键决策 / 实验结果 / 架构图 / 复盘 → `metabot memory create "<title>" --html`（或短内容直传）。文件名 kebab-case，描述具体到能被搜出来。
+4. **Lesson · Skill** — 提炼出「以后遇到 X 都该这么做」的可复用 SOP / protocol / 模板 → `metabot skills publish`，**必须写清 when-to-use**。Skill 是写给别人用的，笔记本走 Memory。
+5. **Delegate · Agent Bus** — 看不懂 / 做不动 / 需要专业领域 → `metabot bots` 看谁在，`metabot talk <bot> <chatId> "<自包含的任务描述 + 约束 + 产出格式 + 优先级>"`，**等回执并整合**。
 
-**Don't** publish single-line wrappers, anything bot-specific (hardcoded `chatId`, app secrets, hostnames), or one-off scripts.
+| 你刚刚 …                    | 该用哪个                              |
+| --------------------------- | ------------------------------------- |
+| 状态变了 / 进展 / 卡点      | `metabot t5t push` / `bottleneck`     |
+| 做完里程碑、有数据 / 图     | `metabot memory create --html`        |
+| 总结出可复用方法 / SOP      | `metabot skills publish`（写 when-to-use） |
+| 别人比你更擅长这块          | `metabot talk <bot> <chat> "..."`     |
+| 目标 / 评判标准不清         | 问主人 → 写 `t5t goal` + `evaluator`  |
 
-Command: `mb skills publish <botName> <skillName>` (backed by `POST /api/skills/:name/publish-from-bot`).
+**反模式（别这样）：** 闷头干一周不更新 T5T｜没目标就开工｜可复用经验只写在 chat 里｜什么都自己扛｜里程碑只发一句「做完了」｜写 Skill 不写 when-to-use。
+
+> 核心区分：**T5T = 我在做什么**（短、可见、状态流）｜**Memory = 为什么这么做**（长、沉淀）｜**Skill = 下次都该怎么做**（给别人用）｜**Agent Bus = 我搞不定，谁来**。
+> 完整 drop-in 版 + HTML one-pager 在 central memory：`metabot memory get 05a558c6-b206-493c-b9ca-04d6c4840a3a`（Markdown）/ `ab55624e-c07c-4df9-a182-3d5f06041a8b`（HTML）。
+
+## Guidelines
+
+- **Search before creating** — always check if a file or document already exists before creating new ones.
+- **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ...` so future sessions can benefit.
+- **Output files** — when generating files the user needs (images, PDFs, reports), copy them to the outputs directory provided in the system prompt so they get sent to the chat automatically.
+- **Be concise in chat** — responses appear as Feishu/Telegram cards with limited space. Keep answers focused and use markdown formatting.

@@ -4,7 +4,7 @@
 
 ```bash
 metabot start                       # 用 PM2 启动
-metabot update                      # 拉取 + 构建 + 更新 skills + 重启
+metabot update                      # 内网包更新 + 构建 + 更新 skills + 重启
 ```
 
 ## PM2 开机自启
@@ -50,7 +50,7 @@ META_MEMORY_URL=http://your-server:8100
 API_SECRET=your-secret
 ```
 
-这样 `mb` 和 `mm` 命令可以从任何机器使用。
+这样 `metabot` 的 bridge 守护进程 API 命令可以从任何机器使用。
 
 ## HTTPS（Caddy 反向代理）
 

@@ -44,9 +44,7 @@ metabot/
 │   └── utils/
 │       └── logger.ts               # Logging
 ├── bin/
-│   ├── metabot                     # Service management CLI
-│   ├── mb                          # Agent Bus CLI
-│   ├── mm                          # MetaMemory CLI
+│   ├── metabot                     # Single CLI binary (process control + bridge API + core delegation)
 │   └── doubao-tts                  # Doubao TTS CLI
 ├── web/                            # Web UI source (React + Vite)
 │   ├── src/

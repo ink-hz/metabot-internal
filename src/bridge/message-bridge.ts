@@ -1,9 +1,8 @@
 import * as fs from 'node:fs';
-import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
-import type { IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
+import type { BackgroundEvent, IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import type { DocSync } from '../sync/doc-sync.js';
 import type {
@@ -14,10 +13,18 @@ import type {
   TeamEvent,
   ApiContext,
 } from '../engines/index.js';
-import { createEngine, resolveEngineName, StreamProcessor, SessionManager } from '../engines/index.js';
+import {
+  createEngine,
+  DEFAULT_CODEX_GOAL_MAX_ITERATIONS,
+  resolveEngineName,
+  StreamProcessor,
+  SessionManager,
+} from '../engines/index.js';
+import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
+import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import { CommandHandler } from './command-handler.js';
@@ -25,9 +32,51 @@ import { OutputHandler } from './output-handler.js';
 import { CostTracker } from '../utils/cost-tracker.js';
 import { metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import {
+  BATCH_DEBOUNCE_MS,
+  IDLE_TIMEOUT_MS,
+  IDLE_TIMEOUT_MESSAGE,
+  MAX_QUEUE_SIZE,
+  SPONTANEOUS_COALESCE_MS,
+  TASK_TIMEOUT_MESSAGE,
+} from './bridge-constants.js';
+import { CodexCommandController } from './codex-command-controller.js';
+import { buildCodexGoalPrompt } from './codex-goal-policy.js';
+import { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
+import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
+import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
+import { sendCompletionNotice } from './notification-policy.js';
+import { normalizePromptForEngine } from './prompt-normalizer.js';
+import { SlashPickerController } from './slash-picker-controller.js';
+import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
+import type { AgentTeamStore } from '../agent-teams/team-store.js';
+import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
+
+export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
+export { normalizePromptForEngine } from './prompt-normalizer.js';
+export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+/**
+ * Window during which a freshly-resolved between-turn question card is reused
+ * (updated in place) for the next sub-question of the same AskUserQuestion
+ * call. The PTY backend renders one question tab at a time, so a multi-question
+ * call surfaces each sub-question as its own between-turn-question event a few
+ * hundred ms apart.
+ */
+const QUESTION_CARD_REUSE_MS = 30 * 1000;
+
+/**
+ * Safety-net cleanup for per-chat between-turn bookkeeping that is normally
+ * freed on the `executor-removed` event. A periodic sweep evicts entries
+ * older than {@link CHATID_ENTRY_TTL_MS} so that, even if an executor-removed
+ * event is ever missed (or a chat only ever uses the legacy non-persistent
+ * path), the {@link MessageBridge.recentQuestionCard} map cannot grow without
+ * bound over a long-running process.
+ */
+const CHATID_CLEANUP_INTERVAL_MS = 60 * 60 * 1000; // sweep hourly
+const CHATID_ENTRY_TTL_MS = 24 * 60 * 60 * 1000; // evict entries unused for 24h
 
 /**
  * Default for the persistent-executor pool when no per-bot `persistentExecutor.enabled`
@@ -41,128 +90,6 @@ const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
 export function resolvePersistentExecutorEnvDefault(envVal: string | undefined): boolean {
   if (envVal === 'false' || envVal === '0') return false;
   return true;
-}
-const MAX_QUEUE_SIZE = 5; // max queued messages per chat
-const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour idle → abort
-/**
- * Stage 3 — coalesce window for spontaneous Feishu cards. When teammates
- * (or /goal evaluators, or background tasks) emit messages while no user
- * turn is active, we batch them into a single card every COALESCE_MS to
- * avoid spamming the chat.
- */
-const SPONTANEOUS_COALESCE_MS = 30 * 1000;
-/**
- * Per-snippet character cap. One runaway block (e.g. a giant code dump from
- * an autonomous teammate) shouldn't eat the whole card budget by itself, but
- * 400 was so tight it cut off ordinary multi-paragraph replies mid-sentence —
- * which was the main "agent activity 显示不全" complaint. 4000 covers almost
- * every real-world assistant text block while still bounding worst case.
- */
-const SPONTANEOUS_SNIPPET_MAX_CHARS = 4000;
-/**
- * Total body cap for the coalesced agent-activity card body. Sits well below
- * card-builder-v2's 28000-char hard limit so we leave room for header rows
- * and the team-state panel without triggering the middle-truncation safety
- * net (which produces an ugly `... (content truncated) ...` marker).
- */
-const SPONTANEOUS_BODY_MAX_CHARS = 12000;
-const FINAL_CARD_RETRIES = 3;
-const FINAL_CARD_BASE_DELAY_MS = 2000;
-const TASK_TIMEOUT_MESSAGE = 'Task timed out (24 hour limit)';
-const IDLE_TIMEOUT_MESSAGE = 'Task aborted: no activity for 1 hour';
-const BATCH_DEBOUNCE_MS = 2000; // 2s window to collect multiple images/files
-const DEFAULT_IMAGE_TEXT = '请分析这张图片';
-const DEFAULT_FILE_TEXT = '请分析这个文件';
-
-/**
- * Extract a one-line summary from an SDK stream message for the spontaneous
- * activity card. Returns null if the message has nothing user-readable.
- *
- * Intentionally only handles `assistant` *text* blocks — same UX bet we made
- * for the main card in PR #268: the user only cares about the agent's
- * conclusion, not the per-tool play-by-play. `🔧 <ToolName>` lines used to
- * be included for tool_use blocks but that's the exact intermediate noise
- * we just hid from the live card; surfacing it on the spontaneous card
- * would just re-introduce the same complaint between turns.
- *
- * Result-type messages are also ignored — SDK's `result.result` is a
- * verbatim echo of the last assistant text block, so including them caused
- * the same content to show up twice in the card.
- */
-export function extractSpontaneousSnippet(msg: unknown): string | null {
-  const m = msg as { type?: string; message?: { content?: Array<{ type?: string; text?: string; name?: string }> } };
-  if (m?.type !== 'assistant' || !m.message?.content) return null;
-  for (const blk of m.message.content) {
-    if (blk.type === 'text' && blk.text) {
-      const trimmed = String(blk.text).trim();
-      if (!trimmed) continue;
-      if (trimmed.length <= SPONTANEOUS_SNIPPET_MAX_CHARS) return trimmed;
-      // Soft cap with an ellipsis marker. The total-body cap in
-      // formatSpontaneousCardBody enforces the card-level budget — this
-      // per-snippet cap only guards against one runaway block eating the
-      // whole card.
-      return trimmed.slice(0, SPONTANEOUS_SNIPPET_MAX_CHARS) + '…';
-    }
-    // tool_use blocks intentionally fall through — see docstring above.
-  }
-  return null;
-}
-
-/**
- * Build the markdown body of a spontaneous activity card from collected
- * snippets. Renders ALL snippets in chronological order, separated by a
- * horizontal rule so the reader can tell discrete bursts apart.
- *
- * Earlier versions showed ONLY the latest snippet (the "agent's conclusion"
- * — same UX bet as the main card's single-line tool indicator from PR #268),
- * but that turned out to drop most of the useful content: teammate pings,
- * /loop iterations, and cron tasks each emit their own snippet and the user
- * needs to see all of them, not just the final one. The "经常显示不全" bug.
- *
- * Total length is capped at SPONTANEOUS_BODY_MAX_CHARS; if the burst would
- * exceed that we keep the most recent snippets (latest are most relevant)
- * and prepend a one-line "N earlier events omitted" notice. The card
- * builder's own 28000-char safety net still applies as a last resort.
- *
- * No header line in the body — earlier versions prepended an italic
- * "Agent activity between turns (…)" caption, but users found it long
- * and visually noisy. The card itself is rendered with the
- * `agent_activity` status (blue header, "Agent activity" title), which
- * is enough to tell it apart from a regular "complete" reply card.
- * Don't re-add a body header without verifying the card-header signal
- * is no longer sufficient.
- */
-export function formatSpontaneousCardBody(snippets: string[]): string {
-  if (snippets.length === 0) return '';
-  if (snippets.length === 1) return snippets[0];
-
-  const sep = '\n\n---\n\n';
-  // Walk newest → oldest, keeping snippets until the next one would push us
-  // over the body budget. Anything older is summarized in a single header.
-  const kept: string[] = [];
-  let total = 0;
-  let droppedCount = 0;
-  for (let i = snippets.length - 1; i >= 0; i--) {
-    const next = snippets[i];
-    const cost = next.length + (kept.length > 0 ? sep.length : 0);
-    if (total + cost > SPONTANEOUS_BODY_MAX_CHARS) {
-      droppedCount = i + 1;
-      break;
-    }
-    kept.unshift(next);
-    total += cost;
-  }
-  const body = kept.join(sep);
-  if (droppedCount > 0) {
-    const noun = droppedCount === 1 ? 'event' : 'events';
-    return `_(${droppedCount} earlier ${noun} omitted; ${kept.length} shown)_\n\n` + body;
-  }
-  return body;
-}
-
-interface PendingBatch {
-  messages: IncomingMessage[];
-  timerId: ReturnType<typeof setTimeout>;
 }
 
 interface RunningTask {
@@ -200,6 +127,8 @@ export interface ApiTaskOptions {
   maxTurns?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
   model?: string;
+  /** Override engine for this API task without changing the chat's IM session default. */
+  engine?: EngineName;
   /** Override allowed tools for this task (empty array = no tools). */
   allowedTools?: string[];
   /** Called on every card state update (streaming). `final` is true on the last update. */
@@ -245,6 +174,8 @@ export class MessageBridge {
   private outputsManager: OutputsManager;
   private audit: AuditLogger;
   private commandHandler: CommandHandler;
+  private codexCommands: CodexCommandController;
+  private slashPickers: SlashPickerController;
   private outputHandler: OutputHandler;
   readonly costTracker: CostTracker;
   private sessionRegistry?: SessionRegistry;
@@ -294,23 +225,46 @@ export class MessageBridge {
    * user turn — which then blocks for 6 minutes on the still-hanging hook.
    *
    * Single in-flight slot per chatId. If a second between-turn question
-   * fires while one is still pending, the later one wins — the older
-   * resolver hangs until its 6-minute timeout (rare in practice).
+   * fires while one is still pending, the later one wins and the older card
+   * is finalized so the user's next reply cannot answer stale UI.
    */
   private pendingBetweenTurnQuestions = new Map<string, {
     toolUseId: string;
     questions: PendingQuestion['questions'];
     cardMessageId: string;
+    currentQuestionIndex: number;
+    collectedAnswers: Record<string, string>;
+    timeoutId?: ReturnType<typeof setTimeout>;
   }>();
+  /**
+   * Most recently surfaced/resolved between-turn question card per chat. Lets a
+   * multi-question AskUserQuestion reuse one card across its sub-questions
+   * instead of spawning a fresh card per tab.
+   */
+  private recentQuestionCard = new Map<string, { cardMessageId: string; at: number }>();
+  /**
+   * Chats whose ExitPlanMode plan body we've already shown as a "📋 Plan" card
+   * from the approval flow. Keyed by chatId (NOT tool_use id): the screen
+   * watcher surfaces the card with a synthesized id before the real
+   * ExitPlanMode jsonl record exists, so it can't match the real id the later
+   * drainSdkHandledTools → sendPlanContent sees. One ExitPlanMode is in flight
+   * per chat, so per-chat keying is unambiguous and suppresses the dup.
+   */
+  private exitPlanCardsShown = new Set<string>();
   /** Callback for activity lifecycle events (task started/completed/failed). */
   onActivityEvent?: (event: ActivityEventData) => void;
+  private agentTeamStore?: AgentTeamStore;
+  /**
+   * Periodic sweep that evicts stale per-chat between-turn bookkeeping as a
+   * safety net behind the event-driven `executor-removed` cleanup. Cleared in
+   * {@link destroy}. Unref'd so it never keeps the process alive on its own.
+   */
+  private chatIdCleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
     private config: BotConfigBase,
     private logger: Logger,
     private sender: IMessageSender,
-    memoryServerUrl: string,
-    memorySecret?: string,
   ) {
     this.engine = createEngine(config, logger);
     this.executor = this.engine.createExecutor();
@@ -321,7 +275,7 @@ export class MessageBridge {
     this.audit = new AuditLogger(logger);
     this.costTracker = new CostTracker();
 
-    const memoryClient = new MemoryClient(memoryServerUrl, logger, memorySecret);
+    const memoryClient = new MemoryClient(logger);
 
     this.commandHandler = new CommandHandler(
       config, logger, sender, this.sessionManager, memoryClient, this.audit,
@@ -329,9 +283,67 @@ export class MessageBridge {
       (chatId) => this.stopTask(chatId),
       (chatId) => this.clearChatQueue(chatId),
       (chatId, reason) => this.releaseChatExecutor(chatId, reason),
+      (chatId) => this.listSessionsForChat(chatId),
+      (chatId, sessionId) => this.applyResume(chatId, sessionId),
     );
 
     this.outputHandler = new OutputHandler(logger, sender, this.outputsManager);
+    this.codexCommands = new CodexCommandController({
+      config,
+      logger,
+      sender,
+      sessionManager: this.sessionManager,
+      outputsManager: this.outputsManager,
+      outputHandler: this.outputHandler,
+      audit: this.audit,
+      runOneTurn: this.runOneTurn.bind(this),
+      executeQuery: this.executeQuery.bind(this),
+      hasRunningTask: (chatId) => this.runningTasks.has(chatId),
+      hasQueuedMessages: (chatId) => this.messageQueues.has(chatId),
+    });
+    this.slashPickers = new SlashPickerController({
+      config,
+      logger,
+      sender,
+      sessionManager: this.sessionManager,
+      outputsManager: this.outputsManager,
+      listSessionsForChat: this.listSessionsForChat.bind(this),
+      applyResume: this.applyResume.bind(this),
+      finalizeQuestionCard: this.finalizeBetweenTurnQuestionCard.bind(this),
+      handleMessage: this.handleMessage.bind(this),
+      isBusy: (chatId) => this.runningTasks.has(chatId) || this.continuationTasks.has(chatId),
+      prepareSessionForExecution: this.prepareSessionForExecution.bind(this),
+      runOneTurn: this.runOneTurn.bind(this),
+    });
+
+    // Safety-net sweep for per-chat between-turn bookkeeping. The primary
+    // cleanup is event-driven (executor-removed); this only catches entries
+    // an event somehow missed, so an hourly sweep is plenty.
+    this.chatIdCleanupTimer = setInterval(() => {
+      this.sweepStaleChatIdEntries();
+    }, CHATID_CLEANUP_INTERVAL_MS);
+    this.chatIdCleanupTimer.unref?.();
+  }
+
+  /**
+   * Evict per-chat between-turn bookkeeping that hasn't been touched within
+   * {@link CHATID_ENTRY_TTL_MS}. Only {@link recentQuestionCard} carries a
+   * timestamp, so it's the one swept on a TTL; the other structures are freed
+   * synchronously by their own completion paths and the `executor-removed`
+   * handler. Runs on the {@link chatIdCleanupTimer} interval.
+   */
+  private sweepStaleChatIdEntries(): void {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [chatId, entry] of this.recentQuestionCard) {
+      if (now - entry.at > CHATID_ENTRY_TTL_MS) {
+        this.recentQuestionCard.delete(chatId);
+        evicted++;
+      }
+    }
+    if (evicted > 0) {
+      this.logger.info({ evicted, remaining: this.recentQuestionCard.size }, 'MessageBridge: swept stale chatId entries');
+    }
   }
 
   /** Emit an activity event if a listener is registered. */
@@ -345,9 +357,7 @@ export class MessageBridge {
    * configured engine. Executors are cached per-engine so repeated turns
    * on the same engine don't re-instantiate the SDK wrapper.
    */
-  private executorForChat(chatId: string): Executor {
-    const session = this.sessionManager.getSession(chatId);
-    const name: EngineName = session.engine ?? resolveEngineName(this.config);
+  private executorForEngine(chatId: string, name: EngineName): Executor {
     let entry = this.engineCache.get(name);
     if (!entry) {
       const engine = createEngine(this.config, this.logger, name);
@@ -390,6 +400,33 @@ export class MessageBridge {
     };
   }
 
+  private prepareSessionForApiExecution(chatId: string, overrideEngine?: EngineName) {
+    if (!overrideEngine) return this.prepareSessionForExecution(chatId);
+    const session = this.sessionManager.getSession(chatId);
+    const engineName = overrideEngine;
+
+    if (session.sessionId && session.sessionIdEngine && session.sessionIdEngine !== engineName) {
+      this.logger.info(
+        { chatId, sessionIdEngine: session.sessionIdEngine, engine: engineName },
+        'Clearing API session id from a different engine',
+      );
+      this.sessionManager.resetSession(chatId);
+    }
+
+    if (session.model && session.modelEngine && session.modelEngine !== engineName) {
+      this.logger.info(
+        { chatId, modelEngine: session.modelEngine, engine: engineName },
+        'Clearing API model override from a different engine',
+      );
+      this.sessionManager.setSessionModel(chatId, undefined);
+    }
+
+    return {
+      session: this.sessionManager.getSession(chatId),
+      engineName,
+    };
+  }
+
   /** Inject the doc sync service for /sync commands. */
   setDocSync(docSync: DocSync): void {
     this.commandHandler.setDocSync(docSync);
@@ -398,6 +435,22 @@ export class MessageBridge {
   /** Inject the session registry for cross-platform session sync. */
   setSessionRegistry(registry: SessionRegistry): void {
     this.sessionRegistry = registry;
+  }
+
+  /** Inject MetaBot Agent Teams store so cards can show team and run state. */
+  setAgentTeamStore(store: AgentTeamStore): void {
+    this.agentTeamStore = store;
+  }
+
+  /** Surface an Agent Teams between-turn activity card in a user-facing chat. */
+  async sendAgentActivityCard(chatId: string, body: string): Promise<void> {
+    const card: CardState = this.enrichWithAgentTeams({
+      status: 'agent_activity',
+      userPrompt: '(agent activity)',
+      responseText: body,
+      toolCalls: [],
+    }, chatId);
+    await this.sender.sendCard(chatId, card);
   }
 
   /** Expose session manager for cross-platform session linking. */
@@ -446,6 +499,13 @@ export class MessageBridge {
     const task = this.runningTasks.get(chatId);
     if (!task) return;
     if (task.questionTimeoutId) clearTimeout(task.questionTimeoutId);
+    this.cancelPendingBetweenTurnQuestion(chatId, {
+      status: 'error',
+      userPrompt: 'Question',
+      responseText: '_Task stopped before answer received_',
+      toolCalls: [],
+      errorMessage: 'Task was stopped',
+    });
     // Finalize any in-flight question card so the user doesn't see buttons
     // that go nowhere after the task is gone.
     if (task.questionCardMessageId) {
@@ -463,9 +523,14 @@ export class MessageBridge {
     }
     task.executionHandle.finish();
     task.abortController.abort();
-    // Don't delete from runningTasks here — the finally block in executeQuery will
-    // handle cleanup. Deleting early creates a race: if the user sends a new message
-    // before the old loop exits, the old finally block would delete the NEW task entry.
+    // Clear the busy flag immediately so a follow-up after /stop or /reset can
+    // start a fresh turn while the old stream winds down. executeQuery's
+    // finally block only deletes when the map still points at the same task,
+    // so an old task cannot remove a newer one.
+    if (this.runningTasks.get(chatId) === task) {
+      this.runningTasks.delete(chatId);
+      metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
+    }
   }
 
   /**
@@ -515,6 +580,7 @@ export class MessageBridge {
         maxConcurrent,
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
+        backend: this.config.claude.backend,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -542,16 +608,22 @@ export class MessageBridge {
         // Between-turn question whose resolver is now dead — flush the
         // question card to an error state and drop the bookkeeping so the
         // user's next message isn't intercepted as the answer.
-        const q = this.pendingBetweenTurnQuestions.get(chatId);
-        if (q) {
-          this.pendingBetweenTurnQuestions.delete(chatId);
-          void this.finalizeBetweenTurnQuestionCard(q.cardMessageId, {
+        if (this.pendingBetweenTurnQuestions.has(chatId)) {
+          this.cancelPendingBetweenTurnQuestion(chatId, {
             status: 'error',
             userPrompt: 'Question',
             responseText: '_Question canceled — agent session ended._',
             toolCalls: [],
           });
         }
+        // Drop the remaining per-chat between-turn bookkeeping. These Maps/Set
+        // are keyed by chatId but lack their own delete-on-completion path for
+        // every code branch (e.g. a superseded ExitPlanMode never reaches the
+        // drainSdkHandledTools delete), so they'd otherwise grow without bound
+        // as chats churn. The executor going away is the authoritative "this
+        // chat's between-turn state is dead" signal — clear it here.
+        this.recentQuestionCard.delete(chatId);
+        this.exitPlanCardsShown.delete(chatId);
       });
       this.logger.info(
         {
@@ -594,6 +666,7 @@ export class MessageBridge {
     exec.on('between-turn-question', (payload: {
       toolUseId: string;
       questions: PendingQuestion['questions'];
+      planText?: string;
     }) => {
       void this.handleBetweenTurnQuestion(chatId, payload);
     });
@@ -614,13 +687,28 @@ export class MessageBridge {
    */
   private async handleBetweenTurnQuestion(
     chatId: string,
-    payload: { toolUseId: string; questions: PendingQuestion['questions'] },
+    payload: { toolUseId: string; questions: PendingQuestion['questions']; planText?: string },
   ): Promise<void> {
     if (!payload.questions || payload.questions.length === 0) {
       this.logger.warn({ chatId, toolUseId: payload.toolUseId }, 'between-turn question with no parsed questions; skipping card');
       return;
     }
+
+    // ExitPlanMode carries the plan body. Show it as a green "📋 Plan" card
+    // BEFORE the approval question so the user can read what they're approving,
+    // and mark the tool id so the later jsonl-driven sendPlanContent is skipped
+    // (no duplicate). This is the screen-triggered fast path — it fires the
+    // moment the menu renders, not when the jsonl finally flushes.
+    if (payload.planText && payload.planText.trim()) {
+      this.exitPlanCardsShown.add(chatId);
+      try {
+        await this.sender.sendTextNotice(chatId, '📋 Plan', payload.planText, 'green');
+      } catch (err) {
+        this.logger.warn({ err, chatId }, 'MessageBridge: failed to send plan card for between-turn ExitPlanMode');
+      }
+    }
     const existing = this.pendingBetweenTurnQuestions.get(chatId);
+    const hadExisting = !!existing;
     if (existing) {
       this.logger.warn(
         { chatId, prevToolUseId: existing.toolUseId, newToolUseId: payload.toolUseId },
@@ -633,51 +721,75 @@ export class MessageBridge {
         toolCalls: [],
       });
       this.pendingBetweenTurnQuestions.delete(chatId);
+      if (existing.timeoutId) clearTimeout(existing.timeoutId);
     }
 
-    // Show only the first question on the card (matches runOneTurn — the
-    // bridge surfaces one sub-question at a time, advancing the card on
-    // each typed reply). Multi-question case is logged below; the existing
-    // bridge code path doesn't support advancing between-turn sub-questions
-    // yet, so we route only the first answer and short-circuit the rest.
-    if (payload.questions.length > 1) {
-      this.logger.warn(
-        { chatId, toolUseId: payload.toolUseId, total: payload.questions.length },
-        'between-turn AskUserQuestion has multiple sub-questions; only the first will be displayed and routed',
-      );
-    }
     const displayQuestion: PendingQuestion = {
       toolUseId: payload.toolUseId,
       questions: [payload.questions[0]],
     };
+    const progress = payload.questions.length > 1 ? ` (1/${payload.questions.length})` : '';
 
     const card: CardState = {
       status: 'waiting_for_input',
-      userPrompt: '(between-turn question)',
+      userPrompt: progress ? `Question${progress}` : 'Question',
       responseText: '',
       toolCalls: [],
       pendingQuestion: displayQuestion,
     };
 
-    const send = this.sender.sendQuestionCard
-      ? this.sender.sendQuestionCard.bind(this.sender)
-      : this.sender.sendCard.bind(this.sender);
+    const recent = this.recentQuestionCard.get(chatId);
+    const canReuse =
+      !payload.planText &&
+      !hadExisting &&
+      !!recent &&
+      this.sender.updateQuestionCard != null &&
+      Date.now() - recent.at < QUESTION_CARD_REUSE_MS;
+
     let cardMessageId: string | undefined;
-    try {
-      cardMessageId = await send(chatId, card);
-    } catch (err) {
-      this.logger.error({ err, chatId, toolUseId: payload.toolUseId }, 'MessageBridge: failed to send between-turn question card');
-      return;
+    if (canReuse && recent && this.sender.updateQuestionCard) {
+      const update = this.sender.updateQuestionCard.bind(this.sender);
+      let ok = false;
+      try {
+        ok = await update(recent.cardMessageId, card);
+      } catch (err) {
+        this.logger.warn({ err, chatId }, 'MessageBridge: question-card reuse update failed; sending fresh card');
+      }
+      if (ok) {
+        cardMessageId = recent.cardMessageId;
+        this.logger.info(
+          { chatId, toolUseId: payload.toolUseId, cardMessageId },
+          'MessageBridge: reused question card for next sub-question',
+        );
+      }
+    }
+
+    if (!cardMessageId) {
+      const send = this.sender.sendQuestionCard
+        ? this.sender.sendQuestionCard.bind(this.sender)
+        : this.sender.sendCard.bind(this.sender);
+      try {
+        cardMessageId = await send(chatId, card);
+      } catch (err) {
+        this.logger.error({ err, chatId, toolUseId: payload.toolUseId }, 'MessageBridge: failed to send between-turn question card');
+        return;
+      }
     }
     if (!cardMessageId) {
       this.logger.warn({ chatId, toolUseId: payload.toolUseId }, 'MessageBridge: between-turn question card returned no messageId');
       return;
     }
+    this.recentQuestionCard.set(chatId, { cardMessageId, at: Date.now() });
 
     this.pendingBetweenTurnQuestions.set(chatId, {
       toolUseId: payload.toolUseId,
       questions: payload.questions,
       cardMessageId,
+      currentQuestionIndex: 0,
+      collectedAnswers: {},
+      timeoutId: setTimeout(() => {
+        this.autoAnswerBetweenTurnQuestion(chatId);
+      }, QUESTION_TIMEOUT_MS),
     });
     this.logger.info(
       { chatId, toolUseId: payload.toolUseId, cardMessageId },
@@ -704,6 +816,68 @@ export class MessageBridge {
     }
   }
 
+  private cancelPendingBetweenTurnQuestion(chatId: string, state: CardState): void {
+    const pending = this.pendingBetweenTurnQuestions.get(chatId);
+    if (!pending) return;
+    this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
+    void this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, state);
+  }
+
+  private parseQuestionAnswer(
+    text: string,
+    question: PendingQuestion['questions'][number],
+  ): string {
+    const trimmed = text.trim();
+    if (!question.multiSelect) {
+      const num = parseInt(trimmed, 10);
+      if (Number.isFinite(num) && num >= 1 && num <= question.options.length) {
+        return question.options[num - 1].label;
+      }
+      return trimmed;
+    }
+
+    const selected = trimmed
+      .split(/[,\s，、]+/)
+      .map((part) => parseInt(part, 10))
+      .filter((num) => Number.isFinite(num) && num >= 1 && num <= question.options.length)
+      .map((num) => question.options[num - 1].label);
+    return selected.length > 0 ? Array.from(new Set(selected)).join(', ') : trimmed;
+  }
+
+  private autoAnswerBetweenTurnQuestion(chatId: string): void {
+    const pending = this.pendingBetweenTurnQuestions.get(chatId);
+    if (!pending) return;
+
+    this.logger.warn({ chatId, toolUseId: pending.toolUseId }, 'between-turn question timeout, auto-answering remaining questions');
+    this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
+
+    for (let i = pending.currentQuestionIndex; i < pending.questions.length; i++) {
+      const question = pending.questions[i];
+      if (!pending.collectedAnswers[question.question]) {
+        pending.collectedAnswers[question.question] = '用户未及时回复，请自行判断继续';
+      }
+    }
+
+    const executor = this.persistentRegistry?.peek(chatId);
+    if (executor) {
+      try {
+        executor.resolveQuestion(pending.toolUseId, pending.collectedAnswers);
+      } catch (err) {
+        this.logger.error({ err, chatId, toolUseId: pending.toolUseId }, 'MessageBridge: timeout resolveQuestion threw');
+      }
+    }
+
+    void this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+      status: 'error',
+      userPrompt: 'Question',
+      responseText: '_用户未及时回复，已自动跳过_',
+      toolCalls: [],
+      errorMessage: 'Timed out waiting for answer',
+    });
+  }
+
   /**
    * Treat the user's typed reply as the answer to a pending between-turn
    * question. Routes through {@link PersistentClaudeExecutor.resolveQuestion}
@@ -723,23 +897,36 @@ export class MessageBridge {
     }
 
     const trimmed = text.trim();
-    const firstQ = pending.questions[0];
-    let answerText: string;
-    const num = parseInt(trimmed, 10);
-    if (Number.isFinite(num) && num >= 1 && num <= firstQ.options.length) {
-      answerText = firstQ.options[num - 1].label;
-    } else {
-      answerText = trimmed;
-    }
+    const currentQ = pending.questions[pending.currentQuestionIndex];
+    if (!currentQ) return true;
+    const answerText = this.parseQuestionAnswer(trimmed, currentQ);
 
     // Key by `question` text (NOT header) — required by the SDK's
     // AskUserQuestionOutput schema. See handleAnswer for the long-form
     // comment on the same gotcha.
-    const answers: Record<string, string> = { [firstQ.question]: answerText };
-    // For multi-sub-question between-turn calls (rare; logged on arrival),
-    // synthesize empty answers for the rest so the hook still resolves.
-    for (let i = 1; i < pending.questions.length; i++) {
-      answers[pending.questions[i].question] = '';
+    pending.collectedAnswers[currentQ.question] = answerText;
+
+    if (pending.currentQuestionIndex + 1 < pending.questions.length) {
+      pending.currentQuestionIndex++;
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+      pending.timeoutId = setTimeout(() => {
+        this.autoAnswerBetweenTurnQuestion(chatId);
+      }, QUESTION_TIMEOUT_MS);
+
+      const nextQ = pending.questions[pending.currentQuestionIndex];
+      const displayQuestion: PendingQuestion = {
+        toolUseId: pending.toolUseId,
+        questions: [nextQ],
+      };
+      const progress = ` (${pending.currentQuestionIndex + 1}/${pending.questions.length})`;
+      await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
+        status: 'waiting_for_input',
+        userPrompt: `Question${progress}`,
+        responseText: `> **Reply:** ${answerText}`,
+        toolCalls: [],
+        pendingQuestion: displayQuestion,
+      });
+      return true;
     }
 
     const executor = this.persistentRegistry?.peek(chatId);
@@ -759,8 +946,9 @@ export class MessageBridge {
     }
 
     this.pendingBetweenTurnQuestions.delete(chatId);
+    if (pending.timeoutId) clearTimeout(pending.timeoutId);
     try {
-      executor.resolveQuestion(pending.toolUseId, answers);
+      executor.resolveQuestion(pending.toolUseId, pending.collectedAnswers);
     } catch (err) {
       this.logger.error({ err, chatId, toolUseId: pending.toolUseId }, 'MessageBridge: resolveQuestion threw');
     }
@@ -772,9 +960,10 @@ export class MessageBridge {
     await this.finalizeBetweenTurnQuestionCard(pending.cardMessageId, {
       status: 'complete',
       userPrompt: 'Question',
-      responseText: `> **Reply:** ${answerText}`,
+      responseText: `> **Reply:** ${Object.values(pending.collectedAnswers).join(', ')}`,
       toolCalls: [],
     });
+    this.recentQuestionCard.set(chatId, { cardMessageId: pending.cardMessageId, at: Date.now() });
     return true;
   }
 
@@ -960,7 +1149,13 @@ export class MessageBridge {
         // which unblocks the hook and the continuation stream continues.
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
           const q = state.pendingQuestion;
-          if (!surfacedQuestionIds.has(q.toolUseId)) {
+          // PTY backend: AskUserQuestion blocks before flushing its jsonl
+          // record, so it's surfaced from the SCREEN by the executor's
+          // interactive-tool watcher the moment the menu renders. The record
+          // only reaches THIS stream AFTER the user already answered (the
+          // flush), so surfacing here would be a post-answer duplicate card.
+          // Skip it (the synthetic-id watcher path owns AUQ on PTY).
+          if (this.config.claude.backend !== 'pty' && !surfacedQuestionIds.has(q.toolUseId)) {
             surfacedQuestionIds.add(q.toolUseId);
             await rateLimiter.flush();
             // Main card pointer note, mirroring runOneTurn's runtime hint.
@@ -991,7 +1186,7 @@ export class MessageBridge {
         if (state.status === 'complete' || state.status === 'error') break;
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId, state);
+            this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
           }
         });
       }
@@ -1065,12 +1260,45 @@ export class MessageBridge {
   }
 
   /**
+   * List the recent Claude sessions for a chat's working directory, newest
+   * first. Read-only — does not touch session state. Used by the `/resume`
+   * picker and the direct `/resume <id>` form.
+   */
+  listSessionsForChat(chatId: string): SessionSummary[] {
+    const session = this.sessionManager.getSession(chatId);
+    return listClaudeSessions({
+      workingDirectory: session.workingDirectory,
+      currentSessionId: session.sessionId,
+    });
+  }
+
+  /**
+   * Switch a chat into a previous Claude session. Single source of truth for
+   * the `/resume` swap (both the picker and the direct form route here):
+   *   1. point the chat's sessionId at the chosen transcript,
+   *   2. zero the cumulative usage counters (they belonged to the old session),
+   *   3. release the persistent executor so the next turn re-acquires with
+   *      `claude --resume <sessionId>` (see runOneTurn:1318).
+   * The actual `--resume` happens lazily on the user's next message.
+   */
+  async applyResume(chatId: string, sessionId: string): Promise<void> {
+    this.sessionManager.setSessionId(chatId, sessionId, 'claude');
+    this.sessionManager.resetUsage(chatId);
+    try {
+      await this.releaseChatExecutor(chatId, 'resume-command');
+    } catch (err) {
+      this.logger.warn({ err, chatId }, 'applyResume: failed to release persistent executor');
+    }
+    this.logger.info({ chatId, sessionId: sessionId.slice(0, 8) }, 'MessageBridge: resumed session');
+  }
+
+  /**
    * Start one Claude turn for a chat, honouring the persistent-executor flag.
    *
    * This is the **single chokepoint** for spawning a turn — initial-turn paths
    * AND every retry path (stale-session / context-overflow / catch) must call
    * this method. Previously, the 5 retry sites bypassed
-   * {@link getOrCreateRegistry} and went straight to {@link executorForChat}
+   * {@link getOrCreateRegistry} and went straight to the chat executor
    * even in persistent mode. The result: the persistent process kept running
    * with its stale resume-sessionId mapping while the user's new turn happened
    * in a separate one-off subprocess. Teammates / /goal / /background that
@@ -1095,6 +1323,7 @@ export class MessageBridge {
       outputsDir: string;
       apiContext?: ApiContext;
       model?: string;
+      reasoningEffort?: import('../config.js').CodexReasoningEffort;
       onTeamEvent?: (event: TeamEvent) => void;
       maxTurns?: number;
       allowedTools?: string[];
@@ -1133,7 +1362,7 @@ export class MessageBridge {
       return exec.nextTurn(opts.prompt) as unknown as ExecutionHandle;
     }
 
-    return this.executorForChat(chatId).startExecution({
+    return this.executorForEngine(chatId, engineName).startExecution({
       prompt: opts.prompt,
       cwd: opts.cwd,
       sessionId: opts.freshSession ? undefined : session.sessionId,
@@ -1141,6 +1370,7 @@ export class MessageBridge {
       outputsDir: opts.outputsDir,
       apiContext: opts.apiContext,
       model: opts.model,
+      reasoningEffort: engineName === 'codex' ? opts.reasoningEffort ?? session.reasoningEffort : undefined,
       onTeamEvent: opts.onTeamEvent,
       maxTurns: opts.maxTurns,
       allowedTools: opts.allowedTools,
@@ -1205,6 +1435,20 @@ export class MessageBridge {
     return true;
   }
 
+  private enrichWithAgentTeams(state: CardState, chatId?: string): CardState {
+    if (!this.agentTeamStore) return state;
+    const team = chatId ? this.agentTeamStore.findTeamForChat(chatId) : undefined;
+    if (!team) return state;
+    const snapshot = this.agentTeamStore.status(team.name);
+    if (!snapshot) return state;
+    const mapped = buildAgentTeamCardSnapshot(snapshot);
+    return {
+      ...state,
+      teamState: hasTeamState(state.teamState) ? state.teamState : mapped.teamState,
+      backgroundEvents: mergeBackgroundEvents(state.backgroundEvents, mapped.backgroundEvents),
+    };
+  }
+
   /**
    * Mirror Claude /goal state into our SessionManager so the Feishu card
    * can display a persistent "🎯 Goal" badge across turns. The actual goal
@@ -1217,19 +1461,6 @@ export class MessageBridge {
    *   /goal clear|stop|off|reset|none|cancel
    *                                    → clear goal (per Claude docs aliases)
    */
-  private mirrorGoalCommand(chatId: string, text: string): void {
-    const trimmed = text.trim();
-    if (!/^\/goal(\s|$)/i.test(trimmed)) return;
-    const rest = trimmed.replace(/^\/goal\s*/i, '').trim();
-    if (!rest) return; // status query — leave existing goal alone
-    const lowered = rest.toLowerCase();
-    if (['clear', 'stop', 'off', 'reset', 'none', 'cancel'].includes(lowered)) {
-      this.sessionManager.setGoal(chatId, undefined);
-      return;
-    }
-    this.sessionManager.setGoal(chatId, rest);
-  }
-
   private processQueue(chatId: string): void {
     const queue = this.messageQueues.get(chatId);
     if (!queue || queue.length === 0) {
@@ -1294,14 +1525,30 @@ export class MessageBridge {
   async handleMessage(msg: IncomingMessage): Promise<void> {
     const { chatId, text } = msg;
 
+    // Feishu users often type command names without the leading slash. Treat
+    // an exact bare "reset" as /reset so it can abort a running PTY turn and
+    // clear the session instead of being queued behind the old task.
+    if (text.trim().toLowerCase() === 'reset') {
+      await this.commandHandler.handle({ ...msg, text: '/reset' });
+      return;
+    }
+
     // Handle commands (always allowed, even during pending questions)
     if (text.startsWith('/')) {
+      // Bare client-side slash commands (no argument) that we surface as a
+      // selectable Feishu picker card instead of passing the argless command
+      // through to the TUI (which would just open an autocomplete menu).
+      if (await this.slashPickers.tryOpen(msg)) return;
+
+      const activeEngine = this.sessionManager.getSession(chatId).engine ?? resolveEngineName(this.config);
+      if (activeEngine === 'codex' && await this.codexCommands.tryHandleBridgeCommand(msg)) return;
+
       const handled = await this.commandHandler.handle(msg);
       if (handled) return;
 
       // Mirror /goal state locally so the card can show a persistent badge
       // across turns. The actual goal mechanism still runs inside Claude Code.
-      this.mirrorGoalCommand(chatId, text);
+      this.codexCommands.mirrorGoalCommand(chatId, text);
 
       // Unrecognized /xxx command — pass through to Claude
       if (this.runningTasks.has(chatId)) {
@@ -1325,6 +1572,13 @@ export class MessageBridge {
     // the still-hanging hook for 6 minutes. See:
     // [[bug_feishu_v2_mobile_action_buttons]] history and
     // PersistentClaudeExecutor.askUserQuestionHook.
+    // Reply to a client-side slash-command picker (e.g. the /effort card).
+    // Must run before the between-turn reply check (same rationale: no
+    // runningTasks entry exists) — it re-injects `<command> <choice>`.
+    if (await this.slashPickers.tryHandleReply(msg)) {
+      return;
+    }
+
     if (await this.tryHandleBetweenTurnQuestionReply(msg)) {
       return;
     }
@@ -1340,12 +1594,12 @@ export class MessageBridge {
     if (this.runningTasks.has(chatId)) {
       // If there's a pending batch and this is a text message, merge batch into the queued text
       const batch = this.pendingBatches.get(chatId);
-      if (batch && !this.isDefaultMediaText(msg)) {
+      if (batch && !isDefaultMediaText(msg)) {
         clearTimeout(batch.timerId);
         this.pendingBatches.delete(chatId);
-        const merged = this.mergeBatchWithText(batch.messages, msg);
+        const merged = mergeBatchWithText(batch.messages, msg);
         msg = merged;
-      } else if (batch && this.isDefaultMediaText(msg)) {
+      } else if (batch && isDefaultMediaText(msg)) {
         // Another media message while task is running — just add to batch
         batch.messages.push(msg);
         clearTimeout(batch.timerId);
@@ -1376,7 +1630,7 @@ export class MessageBridge {
     }
 
     // Smart debounce: batch media-only messages, execute text immediately
-    const isMediaOnly = this.isDefaultMediaText(msg);
+    const isMediaOnly = isDefaultMediaText(msg);
     const batch = this.pendingBatches.get(chatId);
 
     if (isMediaOnly) {
@@ -1397,7 +1651,7 @@ export class MessageBridge {
     if (batch) {
       clearTimeout(batch.timerId);
       this.pendingBatches.delete(chatId);
-      const merged = this.mergeBatchWithText(batch.messages, msg);
+      const merged = mergeBatchWithText(batch.messages, msg);
       this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch with text message');
       await this.executeQuery(merged);
       return;
@@ -1606,19 +1860,13 @@ export class MessageBridge {
     task.executionHandle.resolveQuestion(pending.toolUseId, collectedAnswers);
   }
 
-  /** Check if message is a media message with default (auto-generated) text. */
-  private isDefaultMediaText(msg: IncomingMessage): boolean {
-    return (!!msg.imageKey && msg.text === DEFAULT_IMAGE_TEXT)
-        || (!!msg.fileKey && msg.text === DEFAULT_FILE_TEXT);
-  }
-
   /** Timer expired: merge batched media messages and execute. */
   private flushBatch(chatId: string): void {
     const batch = this.pendingBatches.get(chatId);
     if (!batch) return;
     this.pendingBatches.delete(chatId);
 
-    const merged = this.mergeBatchMessages(batch.messages);
+    const merged = mergeBatchMessages(batch.messages);
     this.logger.info({ chatId, batchSize: batch.messages.length }, 'Flushing media batch (timeout)');
 
     // If a task started running during the debounce window, queue instead
@@ -1636,42 +1884,6 @@ export class MessageBridge {
     this.executeQuery(merged).catch(err => {
       this.logger.error({ err, chatId }, 'Error executing batched messages');
     });
-  }
-
-  /** Merge multiple media-only messages into one (no user text). */
-  private mergeBatchMessages(messages: IncomingMessage[]): IncomingMessage {
-    const first = messages[0];
-    if (messages.length === 1) return first;
-
-    const imageCount = messages.filter(m => m.imageKey).length;
-    const fileCount = messages.filter(m => m.fileKey).length;
-    const parts: string[] = [];
-    if (imageCount > 0) parts.push(`${imageCount}张图片`);
-    if (fileCount > 0) parts.push(`${fileCount}个文件`);
-
-    return {
-      ...first,
-      text: `请分析这些${parts.join('和')}`,
-      extraMedia: messages.slice(1).map(m => ({
-        messageId: m.messageId,
-        imageKey: m.imageKey,
-        fileKey: m.fileKey,
-        fileName: m.fileName,
-      })),
-    };
-  }
-
-  /** Merge batched media messages with a user text message. */
-  private mergeBatchWithText(batchMsgs: IncomingMessage[], textMsg: IncomingMessage): IncomingMessage {
-    return {
-      ...textMsg,
-      extraMedia: batchMsgs.map(m => ({
-        messageId: m.messageId,
-        imageKey: m.imageKey,
-        fileKey: m.fileKey,
-        fileName: m.fileName,
-      })),
-    };
   }
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
@@ -1783,15 +1995,40 @@ export class MessageBridge {
       if (changed && !abortController.signal.aborted) {
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId, {
+            this.sender.updateCard(messageId, this.enrichWithAgentTeams({
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
-            });
+            }, chatId));
           }
         });
       }
     };
+
+    // One-shot restart reminder: if the bridge was just restarted (breadcrumb
+    // from `metabot restart/update`), prepend a system-reminder to this chat's
+    // first turn so the resumed agent knows the restart already completed and
+    // doesn't loop on restarting. Fires at most once per chat per restart.
+    if (shouldRemindRestart(chatId)) {
+      const secs = restartSecondsAgo();
+      prompt =
+        `<system-reminder>\n` +
+        `MetaBot bridge 已于约 ${secs} 秒前被重启过（很可能是上一轮你自己执行了 metabot restart/update —— 进程已重生、会话已恢复）。` +
+        `重启已经完成，请勿再次执行 metabot restart 或 metabot update。` +
+        `若用户说「继续」，请接着完成之前未完成的任务，而不是重启。\n` +
+        `</system-reminder>\n\n` +
+        prompt;
+      markReminded(chatId);
+      this.logger.info({ chatId, secondsAgo: secs }, 'injected post-restart reminder into first turn');
+    }
+
+    let codexGoalIteration = 0;
+    let codexGoalMaxIterations = 0;
+    if (engineName === 'codex' && activeGoal) {
+      codexGoalIteration = this.sessionManager.incrementGoalIteration(chatId);
+      codexGoalMaxIterations = this.sessionManager.getSession(chatId).goalMaxIterations ?? DEFAULT_CODEX_GOAL_MAX_ITERATIONS;
+      prompt = buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
+    }
 
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries
@@ -1836,7 +2073,9 @@ export class MessageBridge {
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
-    // Idle detection: reset timer on every stream message
+    // Idle detection: reset timer on every stream message. Background tasks can
+    // legitimately stay silent for a long time, so we only abort after the hard
+    // idle timeout and do not send short "stalled" warnings.
     let idleTimerId: ReturnType<typeof setTimeout> | undefined;
     const resetIdleTimer = () => {
       if (idleTimerId) clearTimeout(idleTimerId);
@@ -1869,6 +2108,17 @@ export class MessageBridge {
 
         // Check if we hit a waiting_for_input state
         if (state.status === 'waiting_for_input' && state.pendingQuestion) {
+          // PTY backend: the AskUserQuestion menu blocks before flushing its
+          // jsonl record, so it's surfaced from the SCREEN by the executor's
+          // interactive-tool watcher the moment the menu renders. The tool_use
+          // record only reaches THIS stream AFTER the user already answered (the
+          // flush), so surfacing it here would be a post-answer DUPLICATE card.
+          // The synthetic-id watcher path owns AUQ on PTY — just clear and skip.
+          // (Mirrors the continuation-stream guard above.)
+          if (this.config.claude.backend === 'pty') {
+            processor.clearPendingQuestion();
+            continue;
+          }
           // Only initialize tracking when we see a NEW question call (different toolUseId).
           // Multi-question calls (same toolUseId, advance currentQuestionIndex) reuse the
           // already-sent question card via updateQuestionCard below.
@@ -1966,7 +2216,12 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'Detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode') {
-            await this.sendPlanContent(chatId, processor, state);
+            // Skip if the approval flow already showed this plan up-front.
+            if (this.exitPlanCardsShown.delete(chatId)) {
+              this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
+            } else {
+              await this.sendPlanContent(chatId, processor, state);
+            }
           }
         }
 
@@ -1985,7 +2240,7 @@ export class MessageBridge {
         if (!abortController.signal.aborted) {
           rateLimiter.schedule(() => {
             if (!abortController.signal.aborted) {
-              this.sender.updateCard(messageId, state);
+              this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
             }
           });
         }
@@ -2037,7 +2292,7 @@ export class MessageBridge {
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
-          rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+          rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
         }
         await rateLimiter.cancelAndWait();
       }
@@ -2064,7 +2319,7 @@ export class MessageBridge {
           const newSid = processor.getSessionId();
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
-          rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+          rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
         }
         await rateLimiter.cancelAndWait();
       }
@@ -2099,10 +2354,24 @@ export class MessageBridge {
       this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
 
       // Send completion notification for long-running tasks (>10s) so user gets a Feishu push
-      await this.sendCompletionNotice(chatId, lastState, durationMs);
+      await sendCompletionNotice({
+        sender: this.sender,
+        config: this.config,
+        logger: this.logger,
+        chatId,
+        state: lastState,
+        durationMs,
+      });
 
       // Send any output files produced by Claude
       await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+      this.codexCommands.maybeScheduleGoalContinuation(
+        msg,
+        lastState,
+        engineName,
+        codexGoalIteration,
+        codexGoalMaxIterations,
+      );
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'Claude execution error');
 
@@ -2131,7 +2400,7 @@ export class MessageBridge {
             const newSid = processor.getSessionId();
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
-            rateLimiter.schedule(() => { this.sender.updateCard(messageId, state); });
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
           }
           await rateLimiter.cancelAndWait();
           await this.sendFinalCard(messageId, lastState, chatId);
@@ -2154,7 +2423,14 @@ export class MessageBridge {
           metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
 
           this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
-          await this.sendCompletionNotice(chatId, lastState, durationMs);
+          await sendCompletionNotice({
+            sender: this.sender,
+            config: this.config,
+            logger: this.logger,
+            chatId,
+            state: lastState,
+            durationMs,
+          });
           await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
           return; // skip the normal error handling below
         } catch (retryErr: any) {
@@ -2218,7 +2494,7 @@ export class MessageBridge {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
     }
 
-    const { session, engineName } = this.prepareSessionForExecution(chatId);
+    const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
 
@@ -2259,11 +2535,11 @@ export class MessageBridge {
       if (changed && sendCards && messageId && !abortController.signal.aborted) {
         rateLimiter.schedule(() => {
           if (!abortController.signal.aborted) {
-            this.sender.updateCard(messageId!, {
+            this.sender.updateCard(messageId!, this.enrichWithAgentTeams({
               ...processor.getCurrentState(),
               goalCondition: activeGoal,
               teamState: runningTask.teamState,
-            });
+            }, chatId));
           }
         });
       }
@@ -2379,7 +2655,11 @@ export class MessageBridge {
         for (const tool of sdkTools) {
           this.logger.info({ chatId, toolName: tool.name, toolUseId: tool.toolUseId }, 'API task: detected SDK-handled tool');
           if (tool.name === 'ExitPlanMode' && sendCards) {
-            await this.sendPlanContent(chatId, processor, state);
+            if (this.exitPlanCardsShown.delete(chatId)) {
+              this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
+            } else {
+              await this.sendPlanContent(chatId, processor, state);
+            }
           }
         }
 
@@ -2389,7 +2669,7 @@ export class MessageBridge {
 
         if (sendCards && messageId) {
           rateLimiter.schedule(() => {
-            this.sender.updateCard(messageId!, state);
+            this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId));
           });
         }
         options.onUpdate?.(state, effectiveMessageId, false);
@@ -2440,7 +2720,7 @@ export class MessageBridge {
           if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
           if (state.status === 'complete' || state.status === 'error') break;
           if (sendCards && messageId) {
-            rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+            rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
           }
           options.onUpdate?.(state, effectiveMessageId, false);
         }
@@ -2485,7 +2765,7 @@ export class MessageBridge {
         responseText: lastState.responseText,
         sessionId: processor.getSessionId(),
         costUsd: lastState.costUsd,
-        durationMs: lastState.durationMs,
+        durationMs,
         error: lastState.errorMessage,
       };
     } catch (err: any) {
@@ -2520,7 +2800,7 @@ export class MessageBridge {
             if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
             if (state.status === 'complete' || state.status === 'error') break;
             if (sendCards && messageId) {
-              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, state); });
+              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
             }
             options.onUpdate?.(state, effectiveMessageId, false);
           }
@@ -2543,7 +2823,7 @@ export class MessageBridge {
             responseText: lastState.responseText,
             sessionId: processor.getSessionId(),
             costUsd: lastState.costUsd,
-            durationMs: lastState.durationMs,
+            durationMs: Date.now() - startTime,
             error: lastState.errorMessage,
           };
         } catch (retryErr: any) {
@@ -2600,47 +2880,22 @@ export class MessageBridge {
    * sends a plain text fallback so the user at least sees the result.
    */
   private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<void> {
-    // Accumulate usage into session and inject cumulative cost for display
-    if (chatId && (state.status === 'complete' || state.status === 'error')) {
-      this.sessionManager.addUsage(chatId, state.totalTokens ?? 0, state.costUsd ?? 0, state.durationMs ?? 0);
-      const session = this.sessionManager.getSession(chatId);
-      state.sessionCostUsd = session.cumulativeCostUsd;
-    }
-    for (let attempt = 0; attempt < FINAL_CARD_RETRIES; attempt++) {
-      const ok = await this.sender.updateCard(messageId, state);
-      if (ok) return;
-      const delay = FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt);
-      this.logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
-      await new Promise((r) => setTimeout(r, delay));
-    }
-    if (chatId) {
-      this.logger.error({ messageId, chatId }, 'All final card retries failed, sending text fallback');
-      const statusEmoji = state.status === 'complete' ? '✅' : '❌';
-      const summary = state.responseText
-        ? state.responseText.slice(0, 2000)
-        : state.errorMessage || 'Task finished';
-      try {
-        await this.sender.sendText(chatId, `${statusEmoji} ${summary}`);
-      } catch { /* last resort failed */ }
-    }
+    await sendFinalCardWithRetry({
+      sender: this.sender,
+      config: this.config,
+      logger: this.logger,
+      sessionManager: this.sessionManager,
+      messageId,
+      state: this.enrichWithAgentTeams(state, chatId),
+      chatId,
+    });
   }
 
   /**
    * Read and send plan file content to the user when ExitPlanMode is triggered.
    */
   private async sendPlanContent(chatId: string, processor: StreamProcessor, _currentState: CardState): Promise<void> {
-    const planPath = processor.getPlanFilePath();
-    if (!planPath) return;
-
-    try {
-      const planContent = await fsPromises.readFile(planPath, 'utf-8');
-      if (!planContent.trim()) return;
-
-      this.logger.info({ chatId, planPath }, 'Sending plan content to user');
-      await this.sender.sendTextNotice(chatId, '📋 Plan', planContent, 'green');
-    } catch (err) {
-      this.logger.warn({ err, planPath, chatId }, 'Failed to read plan file for display');
-    }
+    await sendPlanContent({ sender: this.sender, logger: this.logger, chatId, processor });
   }
 
   /**
@@ -2668,41 +2923,12 @@ export class MessageBridge {
   }
 
   /**
-   * Send a separate text message after the card update so the user gets a
-   * mobile push notification when a long task finishes. Card edits don't
-   * trigger Feishu push, but text messages do.
-   *
-   * Body is intentionally a single emoji + word (`✅ Done` / `❌ Failed`)
-   * — duration, cost, model, and context-usage all live in the card's grey
-   * footer already, so repeating them here just made the push banner
-   * harder to read at a glance. Don't re-add stats without first
-   * confirming the card footer is unreachable on the surface this push
-   * lands on.
-   *
-   * Skipped for:
-   *   - durations under 10s (the user is almost certainly still looking
-   *     at the screen and doesn't need a push for those)
-   *   - senders that route the final response as its own message
-   *     already (WeChat — `skipCompletionNotice`)
-   *   - continuation turns (between-turn agent activity); see the
-   *     handleContinuationTurn call site for the rationale.
+   * Synchronous teardown of timers / buffers / in-flight tasks, returning the
+   * promise for the inherently-async part (persistent executor release). Both
+   * {@link destroy} (fire-and-forget) and {@link destroyAsync} (awaited) share
+   * this so the cleanup body lives in one place.
    */
-  private async sendCompletionNotice(chatId: string, state: CardState, durationMs: number): Promise<void> {
-    if (this.sender.skipCompletionNotice) return;
-    if (durationMs < 10_000) return;
-
-    const statusEmoji = state.status === 'complete' ? '✅' : '❌';
-    const statusWord  = state.status === 'complete' ? 'Done' : 'Failed';
-    const message     = `${statusEmoji} ${statusWord}`;
-
-    try {
-      await this.sender.sendText(chatId, message);
-    } catch (err) {
-      this.logger.warn({ err, chatId }, 'Failed to send completion notice');
-    }
-  }
-
-  destroy(): void {
+  private teardownSync(): Promise<void> {
     for (const [, batch] of this.pendingBatches) {
       clearTimeout(batch.timerId);
     }
@@ -2723,31 +2949,70 @@ export class MessageBridge {
       this.logger.info({ chatId }, 'Aborted continuation task during shutdown');
     }
     this.continuationTasks.clear();
-    this.sessionManager.destroy();
-    // Tear down persistent executors (Stage 2). Fire-and-forget so destroy()
-    // stays sync — registry.shutdownAll waits for clean SDK process exit
-    // internally and is idempotent.
-    if (this.persistentRegistry) {
-      void this.persistentRegistry.shutdownAll('bridge-destroy');
+    // Stop the periodic chatId cleanup sweep.
+    if (this.chatIdCleanupTimer) {
+      clearInterval(this.chatIdCleanupTimer);
+      this.chatIdCleanupTimer = undefined;
     }
+    // Clear pending spontaneous-activity buffers (each holds a live coalesce
+    // timer) so neither the timers nor the accumulated state leak past shutdown.
+    for (const [, buf] of this.spontaneousBuffers) {
+      clearTimeout(buf.timer);
+    }
+    this.spontaneousBuffers.clear();
+    this.spontaneousSubscribed.clear();
+    // Clear any in-flight between-turn question timers + the per-chat card
+    // bookkeeping maps that are otherwise only freed on executor-removed.
+    for (const [, pending] of this.pendingBetweenTurnQuestions) {
+      if (pending.timeoutId) clearTimeout(pending.timeoutId);
+    }
+    this.pendingBetweenTurnQuestions.clear();
+    this.recentQuestionCard.clear();
+    this.exitPlanCardsShown.clear();
+    this.messageQueues.clear();
+    this.sessionManager.destroy();
+    // Tear down persistent executors (Stage 2). This is the one inherently
+    // async step: registry.shutdownAll awaits clean SDK/PTY process exit and
+    // flushes per-executor buffers. Return its promise so an awaiting caller
+    // (destroyAsync) can let in-flight teardown finish before the process
+    // exits; the legacy sync destroy() fire-and-forgets it.
+    if (this.persistentRegistry) {
+      return this.persistentRegistry.shutdownAll('bridge-destroy');
+    }
+    return Promise.resolve();
+  }
+
+  /**
+   * Synchronous destroy (legacy). Clears all timers/buffers/tasks immediately
+   * and kicks off persistent-executor shutdown without awaiting it. Prefer
+   * {@link destroyAsync} on the real shutdown path so in-flight executor
+   * teardown isn't dropped by a fast process.exit().
+   */
+  destroy(): void {
+    void this.teardownSync();
+  }
+
+  /**
+   * Async destroy. Runs the same synchronous teardown, then awaits the
+   * inherently-async persistent-executor release so callers can guarantee
+   * in-flight work is flushed before exiting the process. Idempotent and safe
+   * to call in place of {@link destroy}.
+   */
+  async destroyAsync(): Promise<void> {
+    await this.teardownSync();
   }
 }
 
-export function isStaleSessionError(errorMessage?: string): boolean {
-  if (!errorMessage) return false;
-  return /no conversation found|conversation not found|session id|invalid session|thread\/resume.*failed|no rollout found|multiple.*tool_result.*blocks|each tool_use must have a single result/i.test(errorMessage);
+function hasTeamState(teamState: TeamState | undefined): boolean {
+  return !!teamState && (teamState.teammates.length > 0 || teamState.tasks.length > 0);
 }
 
-export function normalizePromptForEngine(text: string, engine: EngineName): string {
-  if (engine !== 'codex') return text;
-  const match = text.match(/^\/([A-Za-z0-9][A-Za-z0-9_-]*)([\s\S]*)$/);
-  if (!match) return text;
-  const suffix = match[2] ?? '';
-  if (suffix && !/^\s/.test(suffix)) return text;
-  return `$${match[1]}${suffix}`;
-}
-
-export function isContextOverflowError(errorMessage?: string): boolean {
-  if (!errorMessage) return false;
-  return /context.window.exceeds.limit|context.length.exceeded|context.too.long|max.context.length|token.limit.exceeded|maximum.context/i.test(errorMessage);
+function mergeBackgroundEvents(
+  existing: BackgroundEvent[] | undefined,
+  extra: BackgroundEvent[] | undefined,
+): BackgroundEvent[] | undefined {
+  if (!extra || extra.length === 0) return existing;
+  if (!existing || existing.length === 0) return extra;
+  const seen = new Set(existing.map((event) => event.taskId));
+  return [...existing, ...extra.filter((event) => !seen.has(event.taskId))];
 }

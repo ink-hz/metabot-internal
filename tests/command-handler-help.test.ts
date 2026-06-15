@@ -22,6 +22,14 @@ interface RecordedNotice {
 
 function buildHandler() {
   const notices: RecordedNotice[] = [];
+  const session = {
+    sessionId: undefined,
+    workingDirectory: '/tmp',
+    lastUsed: Date.now(),
+    cumulativeTokens: 0,
+    cumulativeCostUsd: 0,
+    cumulativeDurationMs: 0,
+  };
   const sender = {
     sendCard:        async () => undefined,
     updateCard:      async () => true,
@@ -36,16 +44,26 @@ function buildHandler() {
   };
   const audit = { log: () => {} } as any;
   const handler = new CommandHandler(
-    { name: 'test-bot' } as any,
+    {
+      name: 'test-bot',
+      engine: 'claude',
+      claude: { model: 'claude-fable-5' },
+    } as any,
     { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any,
     sender as any,
-    {} as any, // sessionManager — not touched by /help
+    {
+      getSession: () => session,
+      setSessionEngine: () => {},
+      setSessionModel: (_chatId: string, model: string | undefined) => { session.model = model; },
+    } as any,
     {} as any, // memoryClient — not touched
     audit,
     () => undefined, // getRunningTask
     () => {},        // stopTask
     () => 0,         // clearQueue — /help doesn't touch the queue
     async () => {},  // releaseExecutor
+    () => [],        // listSessions
+    async () => {},  // applyResume
   );
   return { handler, notices };
 }
@@ -75,7 +93,7 @@ describe('CommandHandler /help', () => {
     const { handler, notices } = buildHandler();
     await handler.handle(helpMessage());
     const body = notices[0].content;
-    for (const cmd of ['/reset', '/stop', '/status', '/model', '/memory', '/sync', '/help']) {
+    for (const cmd of ['/reset', '/stop', '/status', '/model', '/resume', '/memory', '/sync', '/help']) {
       expect(body, `help body missing ${cmd}`).toContain(cmd);
     }
   });
@@ -96,5 +114,14 @@ describe('CommandHandler /help', () => {
     const { handler } = buildHandler();
     const handled = await handler.handle({ ...helpMessage(), text: 'hello' });
     expect(handled).toBe(false);
+  });
+
+  it('lists Fable 5 as the default Claude model option', async () => {
+    const { handler, notices } = buildHandler();
+    await handler.handle({ ...helpMessage(), text: '/model list' });
+    const body = notices[0].content;
+    expect(body).toContain('claude-fable-5');
+    expect(body).toContain('Fable 5');
+    expect(body).toContain('native 1M context');
   });
 });

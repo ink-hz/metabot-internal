@@ -1,3 +1,4 @@
+import * as https from 'node:https';
 import * as path from 'node:path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadAppConfig, type BotConfig } from './config.js';
@@ -6,6 +7,7 @@ import { createEventDispatcher } from './feishu/event-handler.js';
 import { MessageSender } from './feishu/message-sender.js';
 import { FeishuSenderAdapter } from './feishu/feishu-sender-adapter.js';
 import { MessageBridge } from './bridge/message-bridge.js';
+import { loadRestartBreadcrumb } from './bridge/restart-notice.js';
 import type { IMessageSender } from './bridge/message-sender.interface.js';
 import type { BotConfigBase } from './config.js';
 import { startTelegramBot } from './telegram/telegram-bot.js';
@@ -15,7 +17,6 @@ import { NullSender } from './web/null-sender.js';
 import { PeerManager } from './api/peer-manager.js';
 import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
-import { startMemoryServer } from './memory/memory-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
 
@@ -30,7 +31,41 @@ interface FeishuBotHandle {
   feishuClient: lark.Client;
 }
 
-async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServerUrl: string, memorySecret?: string): Promise<FeishuBotHandle> {
+/**
+ * METABOT_LOCAL_ADDRESS=<source-ip> pins the source address of every Feishu
+ * socket (REST + the wss long-connection), so the OS routes them out the
+ * interface owning that IP instead of the default route. Workaround for VPN
+ * clients with smart split-tunneling (e.g. some corporate VPNs) that capture *.feishu.cn
+ * into a tunnel that is actually down while still claiming connected: live
+ * sockets held by an old process keep working, but the next restart can't
+ * reconnect and every bot goes silent — looking like the upgrade broke it.
+ *
+ * REST coverage works by setting the agent on the lark SDK's shared
+ * `defaultHttpInstance`, which every `lark.Client` here uses (bot clients,
+ * the Feishu service client, DocSync). Mutating it — rather than passing a
+ * custom `httpInstance` — keeps the SDK's own interceptors intact; a custom
+ * axios instance must re-implement the response-unwrap interceptor or the
+ * SDK's internal tenant-token fetch destructures `code` from the wrapped
+ * body and silently breaks ("code: undefined"). The returned agent must
+ * additionally be passed to each `lark.WSClient`, whose `agent` option goes
+ * straight to the underlying wss socket.
+ *
+ * Native-fetch traffic is deliberately NOT touched (no undici global
+ * dispatcher): nothing in this codebase calls Feishu via fetch, and a global
+ * dispatcher would also re-route peer/metabot-core traffic out of scope.
+ *
+ * Unset (the default) → returns undefined and nothing is constructed.
+ */
+function setupFeishuLocalAddress(logger: Logger): https.Agent | undefined {
+  const localAddress = process.env.METABOT_LOCAL_ADDRESS?.trim();
+  if (!localAddress) return undefined;
+  const agent = new https.Agent({ keepAlive: true, localAddress });
+  lark.defaultHttpInstance.defaults.httpsAgent = agent;
+  logger.info({ localAddress }, 'Feishu sockets bound to local address (METABOT_LOCAL_ADDRESS)');
+  return agent;
+}
+
+async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?: https.Agent): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
   botLogger.info('Starting Feishu bot...');
@@ -59,7 +94,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServer
   // Create sender and bridge (FeishuSenderAdapter wraps the Feishu-specific MessageSender)
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
-  const bridge = new MessageBridge(botConfig, botLogger, sender, memoryServerUrl, memorySecret);
+  const bridge = new MessageBridge(botConfig, botLogger, sender);
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -84,6 +119,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServer
     appId: botConfig.feishu.appId,
     appSecret: botConfig.feishu.appSecret,
     loggerLevel: lark.LoggerLevel.info,
+    agent: localAgent,
   });
 
   // Start WebSocket connection with event dispatcher
@@ -99,29 +135,82 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, memoryServer
   return { name: botConfig.name, bridge, wsClient, config: botConfig, sender, feishuClient: client };
 }
 
+/**
+ * Filter the loaded bot set by env so a SECOND metabot instance can run just
+ * one bot (e.g. to dogfood the PTY backend) without disturbing production:
+ *   - METABOT_ONLY_BOTS=<a,b>    keep only these bot names (whitelist)
+ *   - METABOT_EXCLUDE_BOTS=<a,b> drop these bot names (blacklist)
+ * Both are comma-separated and applied across every platform array. The
+ * production instance EXCLUDES the test bot; the test instance runs ONLY it
+ * (on a different API_PORT). This avoids two processes fighting over one
+ * bot's Feishu long-connection.
+ */
+function applyBotFilter(appConfig: ReturnType<typeof loadAppConfig>, logger: Logger): void {
+  const parse = (v?: string) =>
+    new Set((v ?? '').split(',').map((s) => s.trim()).filter(Boolean));
+  const only = parse(process.env.METABOT_ONLY_BOTS);
+  const exclude = parse(process.env.METABOT_EXCLUDE_BOTS);
+  if (only.size === 0 && exclude.size === 0) return;
+
+  const keep = (name: string): boolean => {
+    if (only.size > 0 && !only.has(name)) return false;
+    if (exclude.has(name)) return false;
+    return true;
+  };
+  const before = {
+    feishu: appConfig.feishuBots.length,
+    telegram: appConfig.telegramBots.length,
+    web: appConfig.webBots.length,
+    wechat: appConfig.wechatBots.length,
+  };
+  appConfig.feishuBots = appConfig.feishuBots.filter((b) => keep(b.name));
+  appConfig.telegramBots = appConfig.telegramBots.filter((b) => keep(b.name));
+  appConfig.webBots = appConfig.webBots.filter((b) => keep(b.name));
+  appConfig.wechatBots = appConfig.wechatBots.filter((b) => keep(b.name));
+  logger.info(
+    {
+      only: [...only],
+      exclude: [...exclude],
+      before,
+      after: {
+        feishu: appConfig.feishuBots.length,
+        telegram: appConfig.telegramBots.length,
+        web: appConfig.webBots.length,
+        wechat: appConfig.wechatBots.length,
+      },
+    },
+    'Bot filter applied (METABOT_ONLY_BOTS / METABOT_EXCLUDE_BOTS)',
+  );
+}
+
 async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
+  applyBotFilter(appConfig, logger);
 
-  // Ensure MEMORY_SECRET env var is available for Claude subprocesses (used by metamemory skill)
-  if (appConfig.memory.secret && !process.env.MEMORY_SECRET) {
-    process.env.MEMORY_SECRET = appConfig.memory.secret;
-  }
+  // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
+  // so the first turn in each chat after a restart can be reminded not to
+  // restart again. Must run before any message can be handled.
+  loadRestartBreadcrumb();
 
   const feishuCount = appConfig.feishuBots.length;
   const telegramCount = appConfig.telegramBots.length;
   const wechatCount = appConfig.wechatBots.length;
-  logger.info({ feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount, memoryServerUrl: appConfig.memoryServerUrl }, 'Starting MetaBot bridge...');
+  logger.info({ feishuBots: feishuCount, telegramBots: telegramCount, wechatBots: wechatCount }, 'Starting MetaBot bridge...');
 
   // Create bot registry
   const registry = new BotRegistry();
+
+  // Must run before ANY lark.Client makes a request (token fetches included)
+  // so no Feishu socket ever goes out the default route.
+  const feishuLocalAgent = setupFeishuLocalAddress(logger);
 
   // Start bots independently so a single platform/API timeout does not
   // take down the whole MetaBot process.
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startFeishuBot(bot, logger, feishuLocalAgent),
       logger,
       'feishu',
     )
@@ -130,7 +219,7 @@ async function main() {
   const telegramHandles = telegramCount > 0
     ? await startBotsSafely(
       appConfig.telegramBots,
-      (bot) => startTelegramBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startTelegramBot(bot, logger),
       logger,
       'telegram',
     )
@@ -139,7 +228,7 @@ async function main() {
   const wechatHandles = wechatCount > 0
     ? await startBotsSafely(
       appConfig.wechatBots,
-      (bot) => startWechatBot(bot, logger, appConfig.memoryServerUrl, appConfig.memory.secret || undefined),
+      (bot) => startWechatBot(bot, logger),
       logger,
       'wechat',
     )
@@ -171,7 +260,7 @@ async function main() {
   for (const webConfig of appConfig.webBots) {
     const botLogger = logger.child({ bot: webConfig.name });
     const sender = new NullSender();
-    const bridge = new MessageBridge(webConfig, botLogger, sender, appConfig.memoryServerUrl, appConfig.memory.secret || undefined);
+    const bridge = new MessageBridge(webConfig, botLogger, sender);
     registry.register({ name: webConfig.name, platform: 'web', config: webConfig, bridge, sender });
   }
 
@@ -196,27 +285,30 @@ async function main() {
   // Create task scheduler
   const scheduler = new TaskScheduler(registry, logger);
 
-  // Initialize peer manager for cross-instance bot discovery
+  // Initialize peer manager for cross-instance bot discovery.
+  // Registry mode (env METABOT_CORE_AGENT_BUS_URL or METABOT_CORE_URL — the
+  // central server URL) lets the bridge boot peerManager even with zero
+  // static peers — it discovers them via the central /api/agents endpoint
+  // on the first poll tick. The local bot list is the full set of bots
+  // configured in bots.json; visibility (per bot) is passed through to the
+  // bulk-register call so `visible:false` rows are hidden in the registry.
+  const localBotsForRegistry = [
+    ...appConfig.feishuBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.telegramBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.webBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+    ...appConfig.wechatBots.map((b) => ({ name: b.name, visible: b.visible, memoryPublic: b.memoryPublic })),
+  ];
   let peerManager: PeerManager | undefined;
-  if (appConfig.peers.length > 0) {
-    peerManager = new PeerManager(appConfig.peers, logger);
+  if (
+    appConfig.peers.length > 0 ||
+    process.env.METABOT_CORE_AGENT_BUS_URL?.trim() ||
+    process.env.METABOT_CORE_URL?.trim()
+  ) {
+    peerManager = new PeerManager(appConfig.peers, localBotsForRegistry, logger);
     await peerManager.refreshAll();
     const statuses = peerManager.getPeerStatuses();
     const healthyCount = statuses.filter((s) => s.healthy).length;
     logger.info({ peerCount: statuses.length, healthyPeers: healthyCount }, 'Peer manager initialized');
-  }
-
-  // Start embedded MetaMemory server
-  let memoryServer: ReturnType<typeof startMemoryServer> | undefined;
-  if (appConfig.memory.enabled) {
-    memoryServer = startMemoryServer({
-      port: appConfig.memory.port,
-      databaseDir: appConfig.memory.databaseDir,
-      secret: appConfig.memory.secret || undefined,
-      adminToken: appConfig.memory.adminToken,
-      readerToken: appConfig.memory.readerToken,
-      logger,
-    });
   }
 
   // Create a dedicated Feishu service client for wiki sync & doc reader
@@ -233,12 +325,15 @@ async function main() {
   // Initialize wiki sync service (uses dedicated service app credentials)
   let docSync: DocSync | undefined;
   if (appConfig.feishuService && process.env.WIKI_SYNC_ENABLED !== 'false') {
-    const syncMemoryClient = new MemoryClient(appConfig.memoryServerUrl, logger, appConfig.memory.secret || undefined);
+    const syncMemoryClient = new MemoryClient(logger);
+    const syncStateDir = process.env.WIKI_SYNC_STATE_DIR
+      ? path.resolve(process.env.WIKI_SYNC_STATE_DIR)
+      : path.join(process.cwd(), 'data');
     docSync = new DocSync(
       {
         feishuAppId: appConfig.feishuService.appId,
         feishuAppSecret: appConfig.feishuService.appSecret,
-        databaseDir: appConfig.memory.databaseDir,
+        databaseDir: syncStateDir,
         wikiSpaceName: process.env.WIKI_SPACE_NAME || 'MetaMemory',
         wikiSpaceId: process.env.WIKI_SPACE_ID || undefined,
         throttleMs: process.env.WIKI_SYNC_THROTTLE_MS ? parseInt(process.env.WIKI_SYNC_THROTTLE_MS, 10) : undefined,
@@ -250,14 +345,7 @@ async function main() {
     for (const handle of feishuHandles) {
       handle.bridge.setDocSync(docSync);
     }
-    // Enable auto wiki sync on MetaMemory changes (debounced)
-    if (process.env.WIKI_AUTO_SYNC !== 'false') {
-      const debounceMs = process.env.WIKI_AUTO_SYNC_DEBOUNCE_MS
-        ? parseInt(process.env.WIKI_AUTO_SYNC_DEBOUNCE_MS, 10)
-        : 5000;
-      docSync.startAutoSync(debounceMs);
-    }
-    logger.info('Wiki sync service initialized (auto-sync enabled, /sync for manual trigger)');
+    logger.info('Wiki sync service initialized (manual trigger via /sync — metabot-core writes do not auto-push)');
   }
 
   // Initialize cross-platform session registry
@@ -284,13 +372,12 @@ async function main() {
     docSync,
     feishuServiceClient,
     peerManager,
-    memoryServerUrl: appConfig.memoryServerUrl,
-    memoryAuthToken: appConfig.memory.adminToken || appConfig.memory.readerToken || appConfig.memory.secret || undefined,
     sessionRegistry,
+    agentTeams: appConfig.agentTeams,
   });
 
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     logger.info('Shutting down...');
     scheduler.destroy();
     if (peerManager) {
@@ -301,21 +388,23 @@ async function main() {
       docSync.destroy();
     }
     sessionRegistry.close();
-    if (memoryServer) {
-      memoryServer.server.close();
-      memoryServer.storage.close();
-    }
+    const teardowns: Promise<void>[] = [];
     for (const handle of feishuHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
     }
     for (const handle of telegramHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
       handle.bot.stop();
     }
     for (const handle of wechatHandles) {
-      handle.bridge.destroy();
+      teardowns.push(handle.bridge.destroyAsync());
       handle.stop();
     }
+    // Cap teardown wait so a hung executor can't block exit indefinitely
+    await Promise.race([
+      Promise.allSettled(teardowns),
+      new Promise((resolve) => setTimeout(resolve, 15_000)),
+    ]);
     process.exit(0);
   };
 

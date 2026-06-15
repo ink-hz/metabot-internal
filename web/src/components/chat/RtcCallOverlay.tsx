@@ -35,6 +35,11 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
+type VERTCRuntime = {
+  RoomProfileType?: { chat?: number };
+  MediaType?: { AUDIO?: number };
+};
+
 /** Incoming call info pushed from server via WebSocket */
 export interface IncomingVoiceCall {
   sessionId: string;
@@ -239,6 +244,7 @@ export function useRtcCallMode({ activeBotName, activeSessionId, token, messages
     try {
       const sdk = await loadRtcSdk();
       const VERTC = sdk.default;
+      const rtcRuntime = VERTC as typeof VERTC & VERTCRuntime;
 
       const info: RtcSessionInfo = {
         sessionId: incoming.sessionId,
@@ -275,12 +281,12 @@ export function useRtcCallMode({ activeBotName, activeSessionId, token, messages
           isAutoPublish: true,
           isAutoSubscribeAudio: true,
           isAutoSubscribeVideo: false,
-          roomProfileType: VERTC.RoomProfileType?.chat ?? 0,
+          roomProfileType: rtcRuntime.RoomProfileType?.chat ?? 0,
         },
       );
       await engine.startAudioCapture();
       // Explicitly publish audio as belt-and-suspenders (official demo does this)
-      await engine.publishStream(VERTC.MediaType?.AUDIO ?? 1);
+      await engine.publishStream(rtcRuntime.MediaType?.AUDIO ?? 1);
 
       setCallPhase('connected');
       setCallStartTime(Date.now());
@@ -309,6 +315,7 @@ export function useRtcCallMode({ activeBotName, activeSessionId, token, messages
     try {
       const sdk = await loadRtcSdk();
       const VERTC = sdk.default;
+      const rtcRuntime = VERTC as typeof VERTC & VERTCRuntime;
 
       // Call server to create RTC room + AI agent
       const params: Record<string, string> = {};
@@ -364,12 +371,12 @@ export function useRtcCallMode({ activeBotName, activeSessionId, token, messages
           isAutoPublish: true,
           isAutoSubscribeAudio: true,
           isAutoSubscribeVideo: false,
-          roomProfileType: VERTC.RoomProfileType?.chat ?? 0,
+          roomProfileType: rtcRuntime.RoomProfileType?.chat ?? 0,
         },
       );
       await engine.startAudioCapture();
       // Explicitly publish audio as belt-and-suspenders (official demo does this)
-      await engine.publishStream(VERTC.MediaType?.AUDIO ?? 1);
+      await engine.publishStream(rtcRuntime.MediaType?.AUDIO ?? 1);
 
       setCallPhase('connected');
       setCallStartTime(Date.now());

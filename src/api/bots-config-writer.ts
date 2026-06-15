@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { BotsJsonNewFormat, FeishuBotJsonEntry, TelegramBotJsonEntry, WebBotJsonEntry, WechatBotJsonEntry } from '../config.js';
+import type { BotsJsonNewFormat, FeishuBotJsonEntry, PeerJsonEntry, TelegramBotJsonEntry, WebBotJsonEntry, WechatBotJsonEntry } from '../config.js';
 
 export function readBotsConfig(configPath: string): BotsJsonNewFormat {
   const raw = fs.readFileSync(configPath, 'utf-8');
@@ -142,6 +142,39 @@ export function updateBot(configPath: string, name: string, updates: Record<stri
     }
   }
   return false;
+}
+
+/**
+ * Add (or update by name) a static peer in the bots.json `peers[]` array so it
+ * survives a bridge restart. Idempotent — re-adding an existing name updates
+ * its url/secret rather than duplicating.
+ */
+export function addPeer(configPath: string, entry: PeerJsonEntry): void {
+  const config = readBotsConfig(configPath);
+  if (!config.peers) config.peers = [];
+  const idx = config.peers.findIndex((p) => p.name === entry.name);
+  const normalized: PeerJsonEntry = {
+    name: entry.name,
+    url: entry.url.replace(/\/+$/, ''),
+    ...(entry.secret ? { secret: entry.secret } : {}),
+  };
+  if (idx !== -1) {
+    config.peers[idx] = normalized;
+  } else {
+    config.peers.push(normalized);
+  }
+  writeBotsConfig(configPath, config);
+}
+
+/** Remove a peer from bots.json `peers[]` by name. Returns true if removed. */
+export function removePeer(configPath: string, name: string): boolean {
+  const config = readBotsConfig(configPath);
+  if (!config.peers) return false;
+  const idx = config.peers.findIndex((p) => p.name === name);
+  if (idx === -1) return false;
+  config.peers.splice(idx, 1);
+  writeBotsConfig(configPath, config);
+  return true;
 }
 
 export function getBotEntry(

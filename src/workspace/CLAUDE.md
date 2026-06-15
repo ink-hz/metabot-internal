@@ -4,30 +4,35 @@ This workspace is managed by **MetaBot** — an AI assistant accessible via Feis
 
 ## Available Skills
 
-### /metamemory — Shared Knowledge Store
-Read and write persistent memory documents across sessions. Use the `mm` shell shortcut for quick operations:
+### /metabot — Unified CLI (memory, skills, agents, t5t, bridge)
+
+`metabot` is the **single** CLI for everything: shared memory, skill hub, peer-bot agent bus, t5t status portal, and bridge process control. Legacy `mb` / `mm` / `mh` / `mbcore` shortcuts are all gone — install and `metabot update` actively clean any stragglers from `~/.local/bin/`. Use `metabot <subcommand>` everywhere.
 
 ```bash
-mm search <query>       # Search documents
-mm get <doc_id>         # Get document by ID
-mm list [folder_id]     # List documents
-mm folders              # Browse folder tree
+# Shared memory (central knowledge store)
+metabot memory search <query>                   # Full-text search
+metabot memory get <id|path>                    # Read a doc
+metabot memory list [folder_id]                 # Browse the tree
+metabot memory create "<title>" "<content>" --share --tags team,sop
+metabot memory share <doc_id> on                # Make an existing doc visible
+
+# Skill hub
+metabot skills list                             # List published skills
+metabot skills install <name>                   # Install into .claude/skills/<name>
+
+# Agent bus — peer-bot directory + cross-bot talk
+metabot bots                                    # List all bots (local + peer)
+metabot peers                                   # List peers and their status
+metabot talk <botName> <chatId> <prompt>        # Delegate a task to a bot
+
+# Bridge process control + diagnostics
+metabot update | restart | logs | status        # Bridge lifecycle
+metabot health                                  # Health check
 ```
 
-For full API (create with tags, update, delete), use the `/metamemory` skill.
+For the full API (create bots, sendCards, Skill Hub publish, t5t push/feedback/retract, etc.), use the `/metabot` skill.
 
-### /metabot — Agent Bus & Bot Management
-Use the `mb` shell shortcut for quick operations:
-
-```bash
-mb bots                                    # List all bots (local + peer)
-mb talk <botName> <chatId> <prompt>        # Delegate task to a bot
-mb peers                                   # List peers and their status
-mb skills                                  # Shared skills (Skill Hub)
-mb health                                  # Health check
-```
-
-For full API (create bots, sendCards, Skill Hub publish/install), use the `/metabot` skill.
+Web 控制台：metabot-core 服务自带（默认 `http://localhost:9200`，或你自托管的地址）— 用本地 API token 访问，覆盖 Agents / Memory / Skills / T5T 四个标签页。
 
 ### Scheduling (Claude Code native)
 
@@ -65,6 +70,6 @@ lark-cli base records list ...                           # Query bitable
 ## Guidelines
 
 - **Search before creating** — always check if a file or document already exists before creating new ones.
-- **Use metamemory** — when you discover important knowledge, project patterns, or user preferences, save them to memory so future sessions can benefit.
+- **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ... --share --tags ...` so future sessions can benefit. Meta Memory read visibility is document-level: use `--share` on create/update, or `metabot memory share <doc_id> on` for an existing doc. Tags are for discovery and should describe audience/topic such as `team`, `sop`, `metabot`, or `public`.
 - **Output files** — when generating files the user needs (images, PDFs, reports), copy them to the outputs directory provided in the system prompt so they get sent to the chat automatically.
 - **Be concise in chat** — responses appear as Feishu/Telegram cards with limited space. Keep answers focused and use markdown formatting.

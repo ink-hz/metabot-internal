@@ -51,12 +51,14 @@ function createMockMemoryClient(docs: FullDocument[] = [], tree?: FolderTreeNode
     document_count: docs.length,
   };
   return {
-    baseUrl: 'http://localhost:8100',
-    secret: 'test-secret',
+    baseUrl: 'https://metabot.xvirobotics.com/core',
+    token: 'test-token',
+    secret: 'test-token',
     listFolderTree: vi.fn().mockResolvedValue(tree || defaultTree),
     listDocuments: vi.fn().mockResolvedValue(
       docs.map((d) => ({ id: d.id, title: d.title, path: d.path, folder_id: d.folder_id, tags: d.tags, created_at: d.created_at, updated_at: d.updated_at })),
     ),
+    getDocument: vi.fn().mockImplementation(async (docId: string) => docs.find((d) => d.id === docId) || null),
   } as any;
 }
 

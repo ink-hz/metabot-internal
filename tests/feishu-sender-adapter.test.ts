@@ -29,10 +29,11 @@ describe('FeishuSenderAdapter.sendQuestionCard / updateQuestionCard', () => {
       sendText: vi.fn(),
       sendImageFile: vi.fn(),
       sendLocalFile: vi.fn(),
+      sendAudioFile: vi.fn(),
       downloadImage: vi.fn(),
       downloadFile: vi.fn(),
     } as any;
-    return { adapter: new FeishuSenderAdapter(fakeSender), sendCard, updateCard };
+    return { adapter: new FeishuSenderAdapter(fakeSender), sendCard, updateCard, fakeSender };
   }
 
   const questionState: CardState = {
@@ -107,5 +108,12 @@ describe('FeishuSenderAdapter.sendQuestionCard / updateQuestionCard', () => {
     sendCard.mockResolvedValueOnce('msg_specific');
     const id = await adapter.sendQuestionCard('oc_test', questionState);
     expect(id).toBe('msg_specific');
+  });
+
+  it('sendAudioFile forwards native audio sends to the Feishu sender', async () => {
+    const { adapter, fakeSender } = makeAdapter();
+    fakeSender.sendAudioFile.mockResolvedValueOnce(true);
+    await expect(adapter.sendAudioFile('oc_test', '/tmp/reply.opus')).resolves.toBe(true);
+    expect(fakeSender.sendAudioFile).toHaveBeenCalledWith('oc_test', '/tmp/reply.opus', 'reply.opus');
   });
 });

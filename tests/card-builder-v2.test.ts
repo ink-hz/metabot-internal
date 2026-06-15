@@ -88,6 +88,27 @@ describe('buildCardV2', () => {
     expect(team.content).toContain('Arch review');
   });
 
+  it('renders pending Agent Team tasks', () => {
+    const state: CardState = {
+      status:       'running',
+      userPrompt:   'x',
+      responseText: '',
+      toolCalls:    [],
+      teamState: {
+        name: 'demo',
+        teammates: [{ name: 'lead', status: 'idle' }],
+        tasks: [{ taskId: '1', subject: 'Plan work', status: 'pending', teammate: 'lead' }],
+      },
+    };
+    const elements = findElements(JSON.parse(buildCardV2(state)));
+    const team = elements.find(
+      (e) => e.tag === 'markdown' && typeof e.content === 'string' && /Team/.test(e.content),
+    );
+    expect(team).toBeDefined();
+    expect(team?.content).toContain('1 pending');
+    expect(team?.content).toContain('Plan work');
+  });
+
   it('omits Team panel when teamState has no teammates and no tasks', () => {
     const state: CardState = {
       status:       'running',

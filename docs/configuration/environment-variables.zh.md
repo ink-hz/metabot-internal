@@ -12,6 +12,7 @@
 | `API_PORT` | `9100` | HTTP API 端口 |
 | `API_SECRET` | — | Bearer Token 认证 |
 | `LOG_LEVEL` | `info` | 日志级别（debug, info, warn, error） |
+| `METABOT_LOCAL_ADDRESS` | — | 所有飞书 socket（REST + wss 长连接）绑定到该本机源 IP，触发 source-based routing 绕过 VPN 智能分流（如某些企业 VPN 把 `*.feishu.cn` 劫持进失效隧道）。不设则走默认路由 |
 
 ## Claude Code
 
@@ -22,6 +23,18 @@
 | `CLAUDE_MAX_BUDGET_USD` | 不限 | 每次请求费用上限（美元） |
 | `CLAUDE_MODEL` | SDK 默认 | Claude 模型 |
 | `CLAUDE_EXECUTABLE_PATH` | 自动检测 | `claude` 二进制路径 |
+
+## Codex CLI
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CODEX_MODEL` | Codex 默认 | Codex 模型 |
+| `CODEX_API_KEY` | — | Codex 的 OpenAI 兼容 API Key。子进程里会标准化成 `OPENAI_API_KEY` |
+| `CODEX_BASE_URL` | Codex 默认 | OpenAI 兼容 API Base URL。会传给 Codex：`-c openai_base_url="..."` |
+| `CODEX_PROFILE` | — | Codex 配置 profile |
+| `CODEX_APPROVAL_POLICY` | `never` | 审批策略（`untrusted`、`on-failure`、`on-request`、`never`） |
+| `CODEX_SANDBOX` | `danger-full-access` | 沙箱模式（`read-only`、`workspace-write`、`danger-full-access`） |
+| `CODEX_EXECUTABLE_PATH` | 自动检测 | `codex` 二进制路径 |
 
 ## MetaMemory
 
@@ -62,6 +75,7 @@
 | `METABOT_PEER_SECRETS` | — | 逗号分隔的 peer secret（位置对应） |
 | `METABOT_PEER_NAMES` | 自动 | 逗号分隔的 peer 名称 |
 | `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | peer 拉取间隔 |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | 可选的逗号/空格分隔 IPv4 CIDR 白名单。设置后，任务转发仅允许目标 peer 的字面 IPv4 地址落在指定范围内。基于主机名的 peer 仍受已知 peer 白名单约束，但不受 CIDR 过滤。不设置 = 无 CIDR 约束。示例：`10.0.0.0/8,192.168.0.0/16` |
 
 ## 远程访问
 

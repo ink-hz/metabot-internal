@@ -4,7 +4,7 @@
 
 ```bash
 metabot start                       # start with PM2
-metabot update                      # pull + rebuild + update skills + restart
+metabot update                      # package refresh + rebuild + update skills + restart
 ```
 
 ## PM2 Auto-Start
@@ -58,7 +58,7 @@ META_MEMORY_URL=https://memory.yourdomain.com
 API_SECRET=your-secret
 ```
 
-This allows `mb` and `mm` commands to work from any machine while keeping TLS termination at the proxy. If your servers are reachable only over a private network such as Tailscale or WireGuard, use those private addresses instead.
+This allows the `metabot` bridge daemon API commands to work from any machine while keeping TLS termination at the proxy. If your servers are reachable only over a private network such as Tailscale or WireGuard, use those private addresses instead.
 
 ## HTTPS with Caddy
 

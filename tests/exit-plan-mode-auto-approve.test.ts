@@ -7,16 +7,13 @@ import { PersistentClaudeExecutor } from '../src/engines/claude/persistent-execu
  * checkPermissions returns `{behavior: "ask", message: "Exit plan mode?"}`
  * even under `permissionMode: 'bypassPermissions'`. The SDK routes that
  * "ask" through the can_use_tool control_request, NOT through PreToolUse
- * hooks ("PreToolUse hook denies bypass canUseTool" — sdk.d.ts) — so a
- * PreToolUse-based fix would log "auto-approving" but never actually
- * unblock the gate; the bridge gets back an is_error tool_result and the
- * agent stays in plan mode.
+ * hooks ("PreToolUse hook denies bypass canUseTool" — sdk.d.ts) — so the
+ * earlier PreToolUse-based fix logged "auto-approving" but never actually
+ * unblocked the gate; the bridge got back an is_error tool_result and the
+ * agent stayed in plan mode.
  *
  * The fix: wire `canUseTool` on the SDK query options, which IS the
- * channel the "ask" lands on. The `allow` branch MUST include
- * `updatedInput: Record<string, unknown>` — the SDK's Zod schema for
- * PermissionResult rejects `{behavior: 'allow'}` without it
- * (ZodError: invalid_type expected record, received undefined at updatedInput).
+ * channel the "ask" lands on.
  */
 
 const collected: { level: string; obj: unknown; msg?: string }[] = [];

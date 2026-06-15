@@ -1,12 +1,86 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  MessageBridge,
   isStaleSessionError,
   normalizePromptForEngine,
   extractSpontaneousSnippet,
   formatSpontaneousCardBody,
   resolvePersistentExecutorEnvDefault,
 } from '../src/bridge/message-bridge.js';
+import { CodexCommandController } from '../src/bridge/codex-command-controller.js';
+import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS } from '../src/engines/index.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
+import type { BotConfigBase } from '../src/config.js';
+import type { CardState } from '../src/types.js';
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+const mockLogger = {
+  debug: () => {}, info: () => {}, warn: () => {}, error: () => {},
+  child: () => mockLogger,
+} as any;
+
+function makeConfig(): BotConfigBase {
+  return {
+    name: 'test-bot',
+    engine: 'claude',
+    claude: {
+      defaultWorkingDirectory: '/tmp',
+      maxTurns: undefined,
+      maxBudgetUsd: undefined,
+      model: undefined,
+      apiKey: undefined,
+      outputsBaseDir: '/tmp/metabot-test-outputs',
+      downloadsDir: '/tmp/metabot-test-downloads',
+      backend: 'pty',
+    },
+    persistentExecutor: { enabled: true },
+  };
+}
+
+function makeCodexConfig(): BotConfigBase {
+  return {
+    ...makeConfig(),
+    engine: 'codex',
+    codex: {
+      model: 'gpt-5.5-codex',
+    },
+  } as BotConfigBase;
+}
+
+function makeSender() {
+  const sent: Array<{ chatId: string; state: CardState }> = [];
+  const updated: Array<{ messageId: string; state: CardState }> = [];
+  const sender = {
+    sent,
+    updated,
+    async sendCard(chatId: string, state: CardState) {
+      sent.push({ chatId, state });
+      return `msg-${sent.length}`;
+    },
+    async updateCard(messageId: string, state: CardState) {
+      updated.push({ messageId, state });
+      return true;
+    },
+    async sendQuestionCard(chatId: string, state: CardState) {
+      sent.push({ chatId, state });
+      return `qmsg-${sent.length}`;
+    },
+    async updateQuestionCard(messageId: string, state: CardState) {
+      updated.push({ messageId, state });
+      return true;
+    },
+    async sendTextNotice() {},
+    async sendText() {},
+    async sendImageFile() { return true; },
+    async sendLocalFile() { return true; },
+    async downloadImage() { return false; },
+    async downloadFile() { return false; },
+  };
+  return sender;
+}
 
 describe('isStaleSessionError', () => {
   it('matches the GitHub issue error text', () => {
@@ -51,11 +125,259 @@ describe('normalizePromptForEngine', () => {
     expect(normalizePromptForEngine('/skill-name', 'codex')).toBe('$skill-name');
   });
 
+  it('leaves Codex bridge-managed slash commands untouched', () => {
+    expect(normalizePromptForEngine('/goal ship it', 'codex')).toBe('/goal ship it');
+    expect(normalizePromptForEngine('/background run tests', 'codex')).toBe('/background run tests');
+    expect(normalizePromptForEngine('/bg run tests', 'codex')).toBe('/bg run tests');
+  });
+
   it('leaves non-Codex and non-skill prompts unchanged', () => {
     expect(normalizePromptForEngine('/metaskill ios app', 'claude')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('/metaskill ios app', 'kimi')).toBe('/metaskill ios app');
     expect(normalizePromptForEngine('hello /metaskill', 'codex')).toBe('hello /metaskill');
     expect(normalizePromptForEngine('/bad/path', 'codex')).toBe('/bad/path');
+  });
+});
+
+describe('MessageBridge between-turn questions', () => {
+  it('handles Codex /goal in the bridge instead of sending it to Codex', async () => {
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const bridge = new MessageBridge(makeCodexConfig(), mockLogger, sender as any);
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/goal ship Codex support',
+    });
+
+    expect(notices.at(-1)?.title).toContain('Goal Set');
+    expect(notices.at(-1)?.content).toContain('ship Codex support');
+    expect(bridge.getSessionManager().getSession('chat-1').activeGoal).toBe('ship Codex support');
+  });
+
+  it('starts the first Codex goal turn after setting a goal', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const session: any = {
+      sessionId: undefined,
+      workingDirectory: '/tmp',
+      lastUsed: Date.now(),
+      cumulativeTokens: 0,
+      cumulativeCostUsd: 0,
+      cumulativeDurationMs: 0,
+    };
+    const executeQuery = vi.fn(async () => {});
+    const controller = new CodexCommandController({
+      config: makeCodexConfig(),
+      logger: mockLogger,
+      sender,
+      sessionManager: {
+        getSession: () => session,
+        setGoal: (_chatId: string, condition: string | undefined) => {
+          session.activeGoal = condition;
+          session.goalIterations = condition ? 0 : undefined;
+          session.goalMaxIterations = condition ? DEFAULT_CODEX_GOAL_MAX_ITERATIONS : undefined;
+        },
+      } as any,
+      outputsManager: {} as any,
+      outputHandler: {} as any,
+      audit: {} as any,
+      runOneTurn: vi.fn() as any,
+      executeQuery,
+      hasRunningTask: () => false,
+      hasQueuedMessages: () => false,
+    });
+
+    const handled = await controller.tryHandleBridgeCommand({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/goal ship Codex support',
+    });
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(handled).toBe(true);
+    expect(notices.at(-1)?.content).toContain(`reaches ${DEFAULT_CODEX_GOAL_MAX_ITERATIONS} iterations`);
+    expect(executeQuery).toHaveBeenCalledOnce();
+    expect(executeQuery.mock.calls[0][0]).toMatchObject({
+      chatId: 'chat-1',
+      text: 'Start working toward the active goal: ship Codex support',
+    });
+  });
+
+  it('handles Codex /background list without starting a model turn', async () => {
+    const sender = makeSender() as any;
+    const notices: Array<{ title: string; content: string; color?: string }> = [];
+    sender.sendTextNotice = async (_chatId: string, title: string, content: string, color?: string) => {
+      notices.push({ title, content, color });
+    };
+    const bridge = new MessageBridge(makeCodexConfig(), mockLogger, sender as any);
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '/background list',
+    });
+
+    expect(notices.at(-1)?.title).toContain('Background');
+    expect(notices.at(-1)?.content).toContain('No Codex background tasks');
+    expect(sender.sent).toHaveLength(0);
+  });
+
+  it('treats a bare reset message as /reset instead of queueing it', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const handledTexts: string[] = [];
+    bridge.commandHandler = {
+      handle: async (msg: { text: string }) => {
+        handledTexts.push(msg.text);
+        return true;
+      },
+    };
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'reset',
+    });
+
+    expect(handledTexts).toEqual(['/reset']);
+  });
+
+  it('advances multi-question cards and resolves only after the last answer', async () => {
+    vi.useFakeTimers();
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const resolved: Array<{ toolUseId: string; answers: Record<string, string> }> = [];
+    bridge.persistentRegistry = {
+      peek: () => ({
+        resolveQuestion: (toolUseId: string, answers: Record<string, string>) => {
+          resolved.push({ toolUseId, answers });
+        },
+      }),
+    };
+
+    await bridge.handleBetweenTurnQuestion('chat-1', {
+      toolUseId: 'toolu_multi',
+      questions: [
+        {
+          question: 'Pick a color',
+          header: 'Color',
+          options: [{ label: 'Red', description: '' }, { label: 'Blue', description: '' }],
+          multiSelect: false,
+        },
+        {
+          question: 'Why?',
+          header: 'Reason',
+          options: [],
+          multiSelect: false,
+        },
+      ],
+    });
+
+    expect(sender.sent[0].state.userPrompt).toBe('Question (1/2)');
+    expect(sender.sent[0].state.pendingQuestion?.questions[0].question).toBe('Pick a color');
+
+    await bridge.handleMessage({
+      messageId: 'm1',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: '1',
+    });
+
+    expect(resolved).toEqual([]);
+    expect(sender.updated.at(-1)?.state.userPrompt).toBe('Question (2/2)');
+    expect(sender.updated.at(-1)?.state.responseText).toBe('> **Reply:** Red');
+    expect(sender.updated.at(-1)?.state.pendingQuestion?.questions[0].question).toBe('Why?');
+
+    await bridge.handleMessage({
+      messageId: 'm2',
+      chatId: 'chat-1',
+      chatType: 'private',
+      userId: 'u1',
+      text: 'Because it is visible',
+    });
+
+    expect(resolved).toEqual([
+      {
+        toolUseId: 'toolu_multi',
+        answers: {
+          'Pick a color': 'Red',
+          'Why?': 'Because it is visible',
+        },
+      },
+    ]);
+    expect(sender.updated.at(-1)?.state.status).toBe('complete');
+    expect(sender.updated.at(-1)?.state.responseText).toBe('> **Reply:** Red, Because it is visible');
+  });
+});
+
+describe('MessageBridge chatId cleanup (memory leak guard)', () => {
+  it('sweepStaleChatIdEntries evicts only entries older than the TTL', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+    const now = Date.now();
+    const TTL = 24 * 60 * 60 * 1000;
+
+    bridge.recentQuestionCard.set('stale', { cardMessageId: 'old', at: now - TTL - 1000 });
+    bridge.recentQuestionCard.set('fresh', { cardMessageId: 'new', at: now });
+
+    bridge.sweepStaleChatIdEntries();
+
+    expect(bridge.recentQuestionCard.has('stale')).toBe(false);
+    expect(bridge.recentQuestionCard.has('fresh')).toBe(true);
+
+    bridge.destroy();
+  });
+
+  it('destroy() clears all per-chat bookkeeping and the cleanup timer', () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    bridge.recentQuestionCard.set('chat-1', { cardMessageId: 'm', at: Date.now() });
+    bridge.exitPlanCardsShown.add('chat-1');
+    bridge.spontaneousSubscribed.add('chat-1');
+    bridge.messageQueues.set('chat-1', []);
+    const clearedTimers: Array<ReturnType<typeof setTimeout>> = [];
+    const bufTimer = setTimeout(() => {}, 60_000);
+    bridge.spontaneousBuffers.set('chat-1', { teamState: { teammates: [], tasks: [] }, snippets: [], timer: bufTimer });
+    const qTimer = setTimeout(() => {}, 60_000);
+    bridge.pendingBetweenTurnQuestions.set('chat-1', {
+      toolUseId: 't', questions: [], cardMessageId: 'm', currentQuestionIndex: 0,
+      collectedAnswers: {}, timeoutId: qTimer,
+    });
+
+    expect(bridge.chatIdCleanupTimer).toBeDefined();
+
+    bridge.destroy();
+
+    expect(bridge.recentQuestionCard.size).toBe(0);
+    expect(bridge.exitPlanCardsShown.size).toBe(0);
+    expect(bridge.spontaneousSubscribed.size).toBe(0);
+    expect(bridge.spontaneousBuffers.size).toBe(0);
+    expect(bridge.pendingBetweenTurnQuestions.size).toBe(0);
+    expect(bridge.messageQueues.size).toBe(0);
+    expect(bridge.chatIdCleanupTimer).toBeUndefined();
+
+    clearTimeout(bufTimer);
+    clearTimeout(qTimer);
+    void clearedTimers;
   });
 });
 

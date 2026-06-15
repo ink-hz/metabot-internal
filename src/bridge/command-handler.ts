@@ -1,9 +1,10 @@
-import type { BotConfigBase } from '../config.js';
+import type { BotConfigBase, CodexReasoningEffort } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { IncomingMessage } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { resolveEngineName, SessionManager } from '../engines/index.js';
 import type { EngineName } from '../engines/index.js';
+import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
 import type { DocSync } from '../sync/doc-sync.js';
@@ -35,6 +36,17 @@ export class CommandHandler {
      * tied to the old session are torn down with the conversation.
      */
     private releaseExecutor: (chatId: string, reason: string) => Promise<void>,
+    /**
+     * List the recent Claude sessions for this chat's working directory
+     * (newest first). Backs the direct `/resume <id>` form. Read-only.
+     */
+    private listSessions: (chatId: string) => SessionSummary[],
+    /**
+     * Swap the chat into a previous Claude session: re-point the sessionId,
+     * reset usage counters, release the persistent executor so the next turn
+     * resumes via `claude --resume`. Backs both `/resume` forms.
+     */
+    private applyResume: (chatId: string, sessionId: string) => Promise<void>,
   ) {}
 
   /** Set the doc sync service (optional, only available for Feishu bots). */
@@ -62,12 +74,17 @@ export class CommandHandler {
           '`/model` - Show current engine/model; `/model list` - Available options',
           '`/model claude`, `/model kimi`, or `/model codex` - Switch engine (resets session)',
           '`/model <name>` - Set model for current engine',
+          '`/effort low|medium|high|xhigh` - Set Codex reasoning effort for this chat',
+          '`/resume` - List & switch to a previous Claude session (Claude only)',
+          '`/resume <id>` - Resume a session directly by id prefix',
           '`/memory` - Memory document commands',
           '`/help` - Show this help message',
           '',
-          '**Agent Commands** (pass through to the agent — Claude only):',
-          '`/goal <description>` - Set a goal the agent keeps pursuing across turns',
-          '`/background <prompt>` - Run a task in the background while you continue chatting',
+          '**Agent Commands:**',
+          '`/goal <description>` - Set a goal the agent keeps pursuing across turns (Claude native, Codex bridge-managed)',
+          '`/goal status|clear` - Show or clear the current goal',
+          '`/background <prompt>` - Run a task in the background while you continue chatting (Claude native, Codex bridge-managed)',
+          '`/background list|logs <id>|stop <id>` - Manage Codex background tasks',
           '',
           '**Usage:**',
           'Send any text message to start a conversation with the configured agent engine.',
@@ -85,6 +102,29 @@ export class CommandHandler {
         return true;
 
       case '/reset':
+        {
+          const task = this.getRunningTask(chatId);
+          const cleared = this.clearQueue(chatId);
+          if (task) {
+            this.audit.log({
+              event: 'task_stopped',
+              botName: this.config.name,
+              chatId,
+              userId,
+              durationMs: Date.now() - task.startTime,
+              meta: { reason: 'reset', clearedQueue: cleared },
+            });
+            this.stopTask(chatId);
+          } else if (cleared > 0) {
+            this.audit.log({
+              event: 'queue_cleared',
+              botName: this.config.name,
+              chatId,
+              userId,
+              meta: { reason: 'reset', clearedQueue: cleared },
+            });
+          }
+        }
         this.sessionManager.resetSession(chatId);
         // Tear down the persistent Claude process for this chat (Stage 3b).
         // Otherwise the old long-lived executor would keep running with its
@@ -139,6 +179,7 @@ export class CommandHandler {
           `**Working Directory:** \`${session.workingDirectory}\``,
           `**Session:** ${session.sessionId ? `\`${session.sessionId.slice(0, 8)}...\`` : '_None_'}`,
           `**Model:** \`${activeModel}\`${session.model ? ' (session override)' : ''}`,
+          `**Effort:** \`${session.reasoningEffort || this.config.codex?.reasoningEffort || 'codex default'}\`${session.reasoningEffort ? ' (session override)' : ''}`,
           `**Running:** ${isRunning ? 'Yes ⏳' : 'No'}`,
         ].join('\n'));
         return true;
@@ -159,6 +200,18 @@ export class CommandHandler {
       case '/model': {
         const args = text.slice('/model'.length).trim();
         await this.handleModelCommand(chatId, args);
+        return true;
+      }
+
+      case '/effort': {
+        const args = text.slice('/effort'.length).trim();
+        await this.handleEffortCommand(chatId, args);
+        return true;
+      }
+
+      case '/resume': {
+        const arg = text.slice('/resume'.length).trim();
+        await this.handleResumeCommand(msg, arg);
         return true;
       }
 
@@ -336,7 +389,10 @@ export class CommandHandler {
     if (normalized === 'list' || normalized === 'ls') {
       const active = session.model || botDefault;
       const claudeModels = [
-        { id: 'claude-opus-4-7', label: 'Opus 4.7', note: 'Most capable · 200k context' },
+        { id: 'claude-fable-5', label: 'Fable 5', note: 'Latest Claude Code model · 1M context · 128k max output · adaptive thinking' },
+        { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'High-capability legacy default · 200k context · 128k max output' },
+        { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', note: '1M context window' },
+        { id: 'claude-opus-4-7', label: 'Opus 4.7', note: '200k context' },
         { id: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)', note: '1M context window' },
         { id: 'claude-opus-4-6', label: 'Opus 4.6', note: '200k context' },
         { id: 'claude-opus-4-6[1m]', label: 'Opus 4.6 (1M)', note: '1M context window' },
@@ -349,8 +405,8 @@ export class CommandHandler {
         { id: 'kimi-k2', label: 'Kimi K2', note: 'Legacy coding model' },
       ];
       const codexModels = [
-        { id: 'gpt-5.4-codex', label: 'GPT-5.4 Codex', note: 'Recommended Codex coding model' },
-        { id: 'gpt-5.4', label: 'GPT-5.4', note: 'General flagship model' },
+        { id: 'gpt-5.5', label: 'GPT 5.5', note: 'Recommended Codex model for ChatGPT subscription users' },
+        { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Codex coding model, when available in your Codex account' },
         { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
       const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : claudeModels;
@@ -373,7 +429,7 @@ export class CommandHandler {
       }
       lines.push('');
       if (activeEngine === 'claude') {
-        lines.push('_Tip: append `[1m]` to a model name to enable the 1M context window. Only Opus 4.7/4.6 and Sonnet 4.6 support it._');
+        lines.push('_Tip: Fable 5 uses its native 1M context. For Opus/Sonnet, append `[1m]` to enable the 1M context window._');
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
       } else {
@@ -388,6 +444,7 @@ export class CommandHandler {
     if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') {
       this.sessionManager.setSessionModel(chatId, undefined);
       this.sessionManager.setSessionEngine(chatId, undefined);
+      this.sessionManager.setReasoningEffort(chatId, undefined);
       const fallback = botDefault || '_default_';
       await this.sender.sendTextNotice(
         chatId,
@@ -409,6 +466,158 @@ export class CommandHandler {
     );
   }
 
+  private async handleEffortCommand(chatId: string, args: string): Promise<void> {
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    const normalized = normalizeCodexEffort(args);
+
+    if (!args) {
+      const current = session.reasoningEffort || this.config.codex?.reasoningEffort || '_codex default_';
+      await this.sender.sendTextNotice(
+        chatId,
+        '🧠 Effort',
+        [
+          `**Engine:** \`${activeEngine}\``,
+          `**Current:** \`${current}\`${session.reasoningEffort ? ' (session override)' : ''}`,
+          '',
+          'Usage:',
+          '- `/effort low` — fastest',
+          '- `/effort medium` — balanced',
+          '- `/effort high` — deeper reasoning',
+          '- `/effort xhigh` — maximum Codex-supported effort',
+          '- `/effort reset` — clear session override',
+        ].join('\n'),
+      );
+      return;
+    }
+
+    if (activeEngine !== 'codex') {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ Codex effort only',
+        `This chat is on \`${activeEngine}\`. Switch with \`/model codex\`, then use \`/effort high\` or \`/effort xhigh\`.`,
+        'blue',
+      );
+      return;
+    }
+
+    if (normalized === 'reset') {
+      this.sessionManager.setReasoningEffort(chatId, undefined);
+      await this.sender.sendTextNotice(
+        chatId,
+        '✅ Effort Reset',
+        `Codex reasoning effort override cleared. Using \`${this.config.codex?.reasoningEffort || 'codex default'}\`.`,
+        'green',
+      );
+      return;
+    }
+
+    if (!normalized) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ Invalid Effort',
+        'Use one of: `low`, `medium`, `high`, `xhigh`. `max` is accepted as an alias for `xhigh`.',
+        'red',
+      );
+      return;
+    }
+
+    this.sessionManager.setReasoningEffort(chatId, normalized);
+    await this.sender.sendTextNotice(
+      chatId,
+      '✅ Effort Set',
+      `Codex reasoning effort set to \`${normalized}\`. It will take effect on the next message.`,
+      'green',
+    );
+  }
+
+  /**
+   * `/resume <id-or-prefix>` — switch the chat directly into a previous Claude
+   * session by (a prefix of) its session id. Bare `/resume` is intercepted by
+   * the bridge picker before reaching here; we keep a usage notice as a
+   * defensive fallback.
+   *
+   * Gated to the Claude engine (transcripts are claude-specific) and refused
+   * while a turn is running (the swap would race the in-flight executor).
+   */
+  private async handleResumeCommand(msg: IncomingMessage, arg: string): Promise<void> {
+    const { chatId } = msg;
+    const session = this.sessionManager.getSession(chatId);
+    const activeEngine = session.engine ?? resolveEngineName(this.config);
+    if (activeEngine !== 'claude') {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ /resume is Claude-only',
+        `This chat is on the \`${activeEngine}\` engine. Session resume is only available for the Claude engine.`,
+        'red',
+      );
+      return;
+    }
+
+    if (this.getRunningTask(chatId)) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '⏳ Task In Progress',
+        'A task is running. Use `/stop` first, then `/resume`.',
+        'orange',
+      );
+      return;
+    }
+
+    if (!arg) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '📝 Resume',
+        'Usage: `/resume <session-id-prefix>`, or send a bare `/resume` to pick from a list.',
+        'blue',
+      );
+      return;
+    }
+
+    const sessions = this.listSessions(chatId);
+    if (sessions.length === 0) {
+      await this.sender.sendTextNotice(
+        chatId,
+        'ℹ️ No Previous Sessions',
+        'No earlier Claude sessions were found for this chat\'s working directory.',
+        'blue',
+      );
+      return;
+    }
+
+    const exact = sessions.find((s) => s.sessionId === arg);
+    const matches = exact ? [exact] : sessions.filter((s) => s.sessionId.startsWith(arg));
+
+    if (matches.length === 0) {
+      await this.sender.sendTextNotice(
+        chatId,
+        '❌ No Match',
+        `No session id starts with \`${arg}\`. Send a bare \`/resume\` to see the list.`,
+        'red',
+      );
+      return;
+    }
+    if (matches.length > 1) {
+      const ids = matches.slice(0, 8).map((s) => `\`${s.sessionId.slice(0, 8)}\``).join(', ');
+      await this.sender.sendTextNotice(
+        chatId,
+        '⚠️ Ambiguous',
+        `\`${arg}\` matches ${matches.length} sessions: ${ids}. Add more characters.`,
+        'orange',
+      );
+      return;
+    }
+
+    const target = matches[0];
+    await this.applyResume(chatId, target.sessionId);
+    await this.sender.sendTextNotice(
+      chatId,
+      '✅ Session Resumed',
+      `Resumed \`${target.sessionId.slice(0, 8)}\`. Your next message continues that conversation.`,
+      'green',
+    );
+  }
+
   private defaultModelForEngine(engine: EngineName): string | undefined {
     switch (engine) {
       case 'claude':
@@ -423,11 +632,11 @@ export class CommandHandler {
   private exampleModelsForEngine(engine: EngineName): string {
     switch (engine) {
       case 'claude':
-        return '`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
+        return '`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
       case 'kimi':
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':
-        return '`gpt-5.4-codex`, `gpt-5.4`, `gpt-5.2-codex`';
+        return '`gpt-5.5`, `gpt-5.5-codex`, `gpt-5.2-codex`';
     }
   }
 
@@ -445,4 +654,12 @@ export class CommandHandler {
 
 function isEngineName(value: string): value is EngineName {
   return value === 'claude' || value === 'kimi' || value === 'codex';
+}
+
+function normalizeCodexEffort(value: string): CodexReasoningEffort | 'reset' | undefined {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'reset' || normalized === 'clear' || normalized === 'default') return 'reset';
+  if (normalized === 'max') return 'xhigh';
+  if (normalized === 'low' || normalized === 'medium' || normalized === 'high' || normalized === 'xhigh') return normalized;
+  return undefined;
 }

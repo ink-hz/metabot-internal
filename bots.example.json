@@ -42,7 +42,9 @@
       "feishuAppSecret": "secret4",
       "defaultWorkingDirectory": "/home/user/project-delta",
       "codex": {
-        "model": "gpt-5.4-codex",
+        "model": "gpt-5.5",
+        "apiKey": "sk-optional-openai-compatible-key",
+        "baseUrl": "https://api.openai.com/v1",
         "approvalPolicy": "never",
         "sandbox": "workspace-write"
       }

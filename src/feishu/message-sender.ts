@@ -168,6 +168,29 @@ export class MessageSender {
     return this.sendFile(chatId, fileKey);
   }
 
+  async sendAudio(chatId: string, fileKey: string): Promise<boolean> {
+    try {
+      await this.client.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: {
+          receive_id: chatId,
+          content: JSON.stringify({ file_key: fileKey }),
+          msg_type: 'audio',
+        },
+      });
+      return true;
+    } catch (err) {
+      this.logger.error({ err, chatId, fileKey }, 'Failed to send audio');
+      return false;
+    }
+  }
+
+  async sendAudioFile(chatId: string, filePath: string, fileName: string): Promise<boolean> {
+    const fileKey = await this.uploadFile(filePath, fileName, 'opus');
+    if (!fileKey) return false;
+    return this.sendAudio(chatId, fileKey);
+  }
+
   async getChatMemberCount(chatId: string): Promise<number | undefined> {
     try {
       const resp: any = await this.client.im.v1.chat.get({

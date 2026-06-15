@@ -1,8 +1,10 @@
 # MetaBot Installer for Windows PowerShell
 # Usage:
-#   irm https://raw.githubusercontent.com/xvirobotics/metabot/main/install.ps1 | iex
-#   .\install.ps1 -Dir C:\opt\metabot
-#   $env:METABOT_HOME = "C:\opt\metabot"; irm <url> | iex
+#   git clone https://github.com/xvirobotics/metabot.git $env:USERPROFILE\metabot
+#   cd $env:USERPROFILE\metabot
+#   .\install.ps1
+#   # Optional: .\install.ps1 -Dir C:\opt\metabot
+#   # Optional: $env:METABOT_HOME = "C:\opt\metabot"; .\install.ps1
 #Requires -Version 5.1
 
 [CmdletBinding()]
@@ -20,8 +22,9 @@ if ($Help) {
 MetaBot Installer (Windows)
 
 Usage:
+  git clone https://github.com/xvirobotics/metabot.git
+  cd metabot
   .\install.ps1 [-Dir <path>]
-  irm <url> | iex                        # uses default ($env:USERPROFILE\metabot) or $env:METABOT_HOME
 
 Parameters:
   -Dir, -d <path>     Install MetaBot to <path>.
@@ -32,7 +35,7 @@ Parameters:
 Examples:
   .\install.ps1
   .\install.ps1 -Dir C:\opt\metabot
-  `$env:METABOT_HOME = "C:\opt\metabot"; irm <url> | iex
+  `$env:METABOT_HOME = "C:\opt\metabot"; .\install.ps1
 "@ | Write-Host
     exit 0
 }
@@ -698,7 +701,7 @@ New-Item -ItemType Directory -Path $LocalBin -Force | Out-Null
 
 $HasBash = Test-Command "bash"
 
-$cliTools = @("mm", "mb", "metabot")
+$cliTools = @("metabot")
 if ($HasFeishu) { $cliTools += "fd" }
 
 if ($HasBash) {
@@ -713,13 +716,18 @@ if ($HasBash) {
             if ($ApiSecret) {
                 (Get-Content $scriptPath -Raw) -replace 'changeme', $ApiSecret | Set-Content $scriptPath -NoNewline
             }
-            if ($ApiPort -and $cli -eq "mb") {
-                (Get-Content $scriptPath -Raw) -replace '9100', $ApiPort | Set-Content $scriptPath -NoNewline
-            }
 
-            # Create .cmd wrapper: @bash "%~dp0mm" %*
+            # Create .cmd wrapper: @bash "%~dp0metabot" %*
             $cmdContent = "@bash `"%~dp0$cli`" %*"
             $cmdContent | Out-File -FilePath (Join-Path $LocalBin "$cli.cmd") -Encoding ascii -NoNewline
+        }
+    }
+
+    # Clean up legacy CLIs (mb deprecation shim + Phase 4 consolidation).
+    foreach ($legacy in @("mb", "mb.cmd", "mm", "mm.cmd", "mh", "mh.cmd", "mbcore", "mbcore.cmd")) {
+        $legacyPath = Join-Path $LocalBin $legacy
+        if (Test-Path $legacyPath) {
+            Remove-Item -Force $legacyPath
         }
     }
 
@@ -732,18 +740,18 @@ if ($HasBash) {
     }
 
     if ($HasFeishu) {
-        Write-Success "mm/mb/metabot/fd CLI tools installed to $LocalBin (with .cmd wrappers)"
+        Write-Success "metabot/fd CLI tools installed to $LocalBin (with .cmd wrappers)"
     } else {
-        Write-Success "mm/mb/metabot CLI tools installed to $LocalBin (with .cmd wrappers)"
+        Write-Success "metabot CLI installed to $LocalBin (with .cmd wrapper)"
     }
 } else {
-    Write-Warn "Git Bash not found. CLI tools (mm, mb, metabot) require bash."
+    Write-Warn "Git Bash not found. The metabot CLI requires bash."
     Write-Warn "Install Git for Windows (https://git-scm.com) to enable CLI tools."
 }
 
-# Persist METABOT_HOME for non-default install paths so the CLI tools
-# (mm/mb/metabot) can find the install in new shell sessions. The CLIs all
-# fall back to ~/metabot, so we only need to persist when it differs.
+# Persist METABOT_HOME for non-default install paths so the CLI tool
+# (metabot) can find the install in new shell sessions. The CLI falls
+# back to ~/metabot, so we only need to persist when it differs.
 if ($MetabotHome -ne $DefaultMetabotHome) {
     [System.Environment]::SetEnvironmentVariable("METABOT_HOME", $MetabotHome, "User")
     $env:METABOT_HOME = $MetabotHome
@@ -854,10 +862,8 @@ Write-Host "  Commands:" -ForegroundColor White
 Write-Host "    pm2 logs metabot          # View MetaBot logs"
 Write-Host "    pm2 restart metabot       # Restart MetaBot"
 Write-Host "    pm2 stop metabot          # Stop MetaBot"
-if ($MetamemoryInstalled) {
-    Write-Host "    mm search <query>         # Search MetaMemory"
-    Write-Host "    mm folders                # Browse knowledge tree"
-}
+Write-Host "    metabot memory search ... # Search MetaMemory (via metabot-core)"
+Write-Host "    metabot memory visibility # Per-bot default: /shared (public) vs /users (private); flip with 'visibility private|public'"
 
 Write-Host ""
 if (-not $SkipConfig) {

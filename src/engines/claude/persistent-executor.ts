@@ -37,6 +37,13 @@ import { AsyncQueue } from '../../utils/async-queue.js';
 import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { apply1MContextSettings } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import { ptyQuery } from './pty/pty-query.js';
+import type {
+  PtyQueryOptions,
+  PtyPromptSource,
+  PtyInteractiveTool,
+  PtyInteractiveResponse,
+} from './pty/contract.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -59,6 +66,7 @@ const CLAUDE_ENV_PASSTHROUGH = new Set([
   'CLAUDE_CODE_SIMPLE',
   'CLAUDE_CODE_DISABLE_AUTO_MEMORY',
   'CLAUDE_CODE_DISABLE_1M_CONTEXT',
+  'CLAUDE_CODE_AUTO_COMPACT_WINDOW',
 ]);
 const AUTH_ENV_VARS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 
@@ -147,8 +155,22 @@ export interface PersistentExecutorOptions {
   maxRestartAttempts?: number;
   /** Spontaneous-message ring buffer cap. Older entries dropped. Default 1000. */
   spontaneousBufferLimit?: number;
+  /**
+   * Max time abort() waits for the backend to emit the interrupted turn's
+   * terminal `result` before force-clearing activeTurn. The backend should
+   * always produce one (SDK natively; PTY synthesizes it in interrupt()); this
+   * is the safety net that keeps a missing result from wedging all future
+   * turns. Default 8000ms.
+   */
+  abortDrainTimeoutMs?: number;
   /** Called on every Agent Teams hook fire (TaskCreated/TaskCompleted/TeammateIdle). */
   onTeamEvent?: (event: TeamEvent) => void;
+  /**
+   * Turn backend: 'pty' (default, drive a real interactive `claude` over a PTY
+   * + reconstruct SDKMessages from the session jsonl) or 'sdk' (legacy Agent SDK
+   * query()). 'pty' keeps Claude Code subscription billing post-June-2026.
+   */
+  backend?: 'sdk' | 'pty';
 }
 
 export type ExecutorState =
@@ -297,6 +319,51 @@ export function parseAskUserQuestionInput(input: unknown): Array<{
 export interface BetweenTurnQuestionEvent {
   toolUseId: string;
   questions: ReturnType<typeof parseAskUserQuestionInput>;
+  /** ExitPlanMode only: the plan markdown, shown as a card before the prompt. */
+  planText?: string;
+}
+
+/** Pull the plan markdown out of an ExitPlanMode tool input. */
+export function extractPlanText(input: unknown): string {
+  const plan = (input as { plan?: unknown } | undefined)?.plan;
+  return typeof plan === 'string' ? plan : '';
+}
+
+/**
+ * The question we surface when the agent calls ExitPlanMode under the PTY
+ * backend. Instead of silently auto-approving the plan, we render it as a
+ * normal approval card (reusing the AskUserQuestion machinery) so the user
+ * gets a real choice — Proceed, or keep refining the plan.
+ */
+export const PLAN_APPROVAL_QUESTION_TEXT = 'Proceed with this plan?';
+export const PLAN_APPROVAL_QUESTION: BetweenTurnQuestionEvent['questions'] = [
+  {
+    question: PLAN_APPROVAL_QUESTION_TEXT,
+    header: 'Plan',
+    options: [
+      { label: 'Proceed', description: 'Approve the plan and start implementing' },
+      { label: 'Keep planning', description: "Hold off — then send feedback to refine the plan" },
+    ],
+    multiSelect: false,
+  },
+];
+
+/**
+ * Interpret the user's answer to {@link PLAN_APPROVAL_QUESTION}.
+ *
+ * - empty (the 6-min resolver timeout fired) → proceed, preserving the old
+ *   auto-approve behaviour so an unattended plan never wedges the session.
+ * - an explicit proceed/yes/approve → proceed.
+ * - "Keep planning", "no", or ANY other free text → stay in plan mode (the
+ *   user can then send their feedback as the next message).
+ *
+ * Exported for unit tests.
+ */
+export function isKeepPlanning(choice: string): boolean {
+  const c = choice.trim().toLowerCase();
+  if (!c) return false;
+  if (/^(proceed|yes|y|approve|approved|go|ok|okay|sure|do it)$/.test(c)) return false;
+  return true;
 }
 
 export class PersistentClaudeExecutor extends EventEmitter {
@@ -381,11 +448,11 @@ export class PersistentClaudeExecutor extends EventEmitter {
         const others = ctx.groupMembers.filter((m) => m !== ctx.botName);
         if (ctx.groupId) {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat (group: ${ctx.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`mb talk <botName> grouptalk-${ctx.groupId}-<botName> "message"\`\nExample: \`mb talk ${others[0]} grouptalk-${ctx.groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${ctx.groupId}-<botName> chatId pattern when talking to other bots in this group.`,
+            `## Group Chat\nYou are in a group chat (group: ${ctx.groupId}) with these bots: ${others.join(', ')}.\nTo talk to another bot, use: \`metabot talk <botName> grouptalk-${ctx.groupId}-<botName> "message"\`\nExample: \`metabot talk ${others[0]} grouptalk-${ctx.groupId}-${others[0]} "hello"\`\nIMPORTANT: Always use the grouptalk-${ctx.groupId}-<botName> chatId pattern when talking to other bots in this group.`,
           );
         } else {
           appendSections.push(
-            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`mb talk <botName> <chatId> "message"\` to communicate with other bots in the group.`,
+            `## Group Chat\nYou are in a group chat with these bots: ${others.join(', ')}.\nUse \`metabot talk <botName> <chatId> "message"\` to communicate with other bots in the group.`,
           );
         }
       }
@@ -424,12 +491,38 @@ export class PersistentClaudeExecutor extends EventEmitter {
     // separate card (StreamProcessor + sendPlanContent).
     queryOptions.canUseTool = makeCanUseTool(this.options.logger);
 
-    const stream = query({
-      prompt: this.inputQueue,
-      options: queryOptions as any,
-    });
-    this.queryHandle = stream;
-    this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    const backend = this.options.backend ?? 'pty';
+    if (backend === 'pty') {
+      // PTY backend: drive a real interactive `claude` over a PTY and
+      // reconstruct SDKMessages from the session jsonl. Keeps Claude Code
+      // subscription billing (via TeamClaude) past the June-2026 SDK cutoff.
+      const append =
+        queryOptions.systemPrompt && typeof queryOptions.systemPrompt === 'object'
+          ? (queryOptions.systemPrompt as { append?: string }).append
+          : undefined;
+      const ptyOptions: PtyQueryOptions = {
+        cwd: this.options.cwd,
+        resume,
+        model: this.options.model,
+        systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
+        logger: this.options.logger,
+        pathToClaudeExecutable: CLAUDE_EXECUTABLE,
+        onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
+      };
+      const stream = ptyQuery({
+        prompt: this.inputQueue as unknown as PtyPromptSource,
+        options: ptyOptions,
+      });
+      this.queryHandle = stream as unknown as Query;
+      this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    } else {
+      const stream = query({
+        prompt: this.inputQueue,
+        options: queryOptions as any,
+      });
+      this.queryHandle = stream;
+      this.rawStream = stream as unknown as AsyncGenerator<SDKMessage>;
+    }
 
     this.consumePromise = this.consumeLoop();
     this.transition('ready');
@@ -514,7 +607,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       } catch (err) {
         this.options.logger.warn({ err, turnId }, 'PersistentExecutor: interrupt() threw');
       }
-      await turn.drainPromise;
+      await this.drainWithTimeout(turn);
       this.options.logger.debug({ turnId }, 'PersistentExecutor: turn aborted (drained)');
       this.emit('turn-aborted', turnId);
     };
@@ -574,7 +667,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       } catch (err) {
         this.options.logger.warn({ err, turnId }, 'PersistentExecutor: interrupt() threw (continuation)');
       }
-      await turn.drainPromise;
+      await this.drainWithTimeout(turn);
       this.options.logger.debug({ turnId }, 'PersistentExecutor: continuation turn aborted');
       this.emit('turn-aborted', turnId);
     };
@@ -592,6 +685,42 @@ export class PersistentClaudeExecutor extends EventEmitter {
       },
       finish: () => { void abort(); },
     };
+  }
+
+  /**
+   * Await a detached turn's drainPromise, but never hang forever. The drain
+   * resolves when consumeLoop observes the turn's terminal `result`. Every
+   * backend is *supposed* to produce one after interrupt() (SDK does natively;
+   * PTY synthesizes it in ptyQuery.interrupt()), but if any path fails to, the
+   * old unbounded `await turn.drainPromise` would leave activeTurn pinned and
+   * wedge ALL future turns with "turn <id> is in flight" (blank Feishu replies).
+   * On timeout we force-clear activeTurn so the chat self-heals — the next user
+   * message starts a fresh turn instead of being rejected.
+   */
+  private async drainWithTimeout(turn: ActiveTurn, ms = this.options.abortDrainTimeoutMs ?? 8_000): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timer = setTimeout(() => resolve('timeout'), ms);
+      if (typeof (timer as any).unref === 'function') (timer as any).unref();
+    });
+    try {
+      const outcome = await Promise.race([
+        (turn.drainPromise ?? Promise.resolve()).then(() => 'drained' as const),
+        timeout,
+      ]);
+      if (outcome === 'timeout') {
+        this.options.logger.warn(
+          { turnId: turn.id },
+          'PersistentExecutor: drain timed out after interrupt — force-clearing activeTurn',
+        );
+        turn.completed = true;
+        turn.drainResolve?.();
+        if (this.activeTurn === turn) this.activeTurn = null;
+        this.armIdleTimer();
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Drain spontaneous messages that arrived between turns. */
@@ -750,10 +879,12 @@ export class PersistentClaudeExecutor extends EventEmitter {
     };
 
     return {
-      PreToolUse: [{
-        matcher: 'AskUserQuestion',
-        hooks: [askUserQuestionHook as any],
-      }],
+      PreToolUse: [
+        {
+          matcher: 'AskUserQuestion',
+          hooks: [askUserQuestionHook as any],
+        },
+      ],
       TaskCreated: [{ hooks: [teamObserver('task_created') as any] }],
       TaskCompleted: [{ hooks: [teamObserver('task_completed') as any] }],
       TeammateIdle: [{ hooks: [teamObserver('teammate_idle') as any] }],
@@ -794,6 +925,99 @@ export class PersistentClaudeExecutor extends EventEmitter {
       session_id: this.sessionId || '',
     };
     this.inputQueue.enqueue(msg);
+  }
+
+  /**
+   * PTY-backend bridge for tools the interactive `claude` TUI renders as a
+   * blocking menu (AskUserQuestion, ExitPlanMode). In SDK mode these are
+   * resolved by the PreToolUse hook (AskUserQuestion) and `canUseTool`
+   * (ExitPlanMode); the PTY has neither, so ptyQuery detects the tool_use in
+   * the session jsonl and calls this to learn HOW to respond, then drives the
+   * native menu via keystrokes.
+   *
+   * This deliberately reuses the SAME machinery as the SDK path so the bridge
+   * needs no changes:
+   *   - AskUserQuestion → register a `pendingQuestionResolvers` entry and (when
+   *     between turns) emit `between-turn-question`, exactly like
+   *     askUserQuestionHook. The bridge renders the question card and calls
+   *     `resolveQuestion(toolUseId, answers)` as usual, resolving the await.
+   *   - ExitPlanMode → approve immediately (matches makeCanUseTool's auto-allow
+   *     under bypassPermissions). The plan body is shipped to the user by the
+   *     bridge from the ExitPlanMode tool_use it already sees in the stream.
+   */
+  private async handleInteractiveTool(
+    tool: PtyInteractiveTool,
+  ): Promise<PtyInteractiveResponse> {
+    const log = this.options.logger;
+    if (tool.name === 'ExitPlanMode') {
+      // Surface the plan as an approval question instead of auto-proceeding.
+      // Reuses the SAME resolver path as AskUserQuestion: register a resolver
+      // keyed by the tool_use id, emit `between-turn-question` so the bridge
+      // mounts a question card, and await the user's choice. The bridge ships
+      // the plan body itself as a separate "📋 Plan" card (drainSdkHandledTools
+      // → sendPlanContent), so this card only carries the Proceed / Keep
+      // planning options.
+      const id = tool.toolUseId;
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        this.pendingQuestionResolvers.set(id, resolve);
+        log.info({ toolUseId: id }, 'PersistentExecutor: PTY surfacing ExitPlanMode approval');
+        // ExitPlanMode always fires mid-turn, but the in-turn stream path treats
+        // it as an SDK-handled tool (not a question), so we always emit the
+        // between-turn card regardless of activeTurn. planText lets the bridge
+        // show the plan body up-front (the jsonl record flushes only later).
+        this.emit('between-turn-question', {
+          toolUseId: id,
+          questions: PLAN_APPROVAL_QUESTION,
+          planText: extractPlanText(tool.input),
+        });
+        setTimeout(() => {
+          if (this.pendingQuestionResolvers.delete(id)) {
+            log.warn({ toolUseId: id }, 'PersistentExecutor: ExitPlanMode approval timed out (6 min) — proceeding');
+            resolve({});
+          }
+        }, 6 * 60 * 1000);
+      });
+      const choice = answers[PLAN_APPROVAL_QUESTION_TEXT] ?? '';
+      if (isKeepPlanning(choice)) {
+        log.info({ toolUseId: id, choice }, 'PersistentExecutor: user chose to keep planning');
+        return { kind: 'cancel' };
+      }
+      log.info({ toolUseId: id, choice: choice || '(timeout/proceed)' }, 'PersistentExecutor: user approved plan');
+      return { kind: 'approve' };
+    }
+    if (tool.name === 'AskUserQuestion') {
+      const questions = parseAskUserQuestionInput(tool.input);
+      const id = tool.toolUseId;
+      const answers = await new Promise<Record<string, string>>((resolve) => {
+        this.pendingQuestionResolvers.set(id, resolve);
+        // Emit UNCONDITIONALLY (like ExitPlanMode). On the PTY backend this is
+        // driven by the screen watcher the moment the AskUserQuestion menu
+        // renders — always mid-turn (activeTurn set) — and the in-stream
+        // surfacing is suppressed for PTY, so this is the ONLY card. The old
+        // `!activeTurn` gate meant the card never appeared mid-turn (it only
+        // showed after /stop cleared the turn).
+        log.info({ toolUseId: id, questionCount: questions.length }, 'PersistentExecutor: PTY AskUserQuestion — surfacing question card');
+        this.emit('between-turn-question', { toolUseId: id, questions });
+        setTimeout(() => {
+          if (this.pendingQuestionResolvers.delete(id)) {
+            log.warn({ toolUseId: id }, 'PersistentExecutor: PTY AskUserQuestion timed out (6 min)');
+            resolve({});
+          }
+        }, 6 * 60 * 1000);
+      });
+      return {
+        kind: 'answers',
+        answers,
+        questions: questions.map((q) => ({
+          header: q.header,
+          question: q.question,
+          options: q.options.map((o) => o.label),
+          multiSelect: q.multiSelect,
+        })),
+      };
+    }
+    log.warn({ tool: tool.name }, 'PersistentExecutor: unknown interactive tool');
+    return { kind: 'cancel' };
   }
 
   private pushSpontaneous(msg: SDKMessage): void {

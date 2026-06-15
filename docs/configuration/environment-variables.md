@@ -12,6 +12,8 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `API_PORT` | `9100` | HTTP API port |
 | `API_SECRET` | — | Bearer token auth for API and MetaMemory. Generate one with `openssl rand -hex 32` |
 | `LOG_LEVEL` | `info` | Log level (debug, info, warn, error) |
+| `METABOT_LOCAL_ADDRESS` | — | Bind all Feishu sockets (REST + wss long-connection) to this local source IP, forcing source-based routing past VPN smart split-tunneling (e.g. a corporate VPN hijacking `*.feishu.cn` into a dead tunnel). Unset = default route |
+| `METABOT_PUBLIC_DISTRIBUTION` | — | metabot-core server flag. The `/cli/*` and `/install/*` install endpoints are token-gated by default; set to `1` (or `true`) to serve them anonymously. Only enable when you intentionally self-distribute and your build embeds no secrets |
 
 ## Claude Code
 
@@ -22,6 +24,18 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `CLAUDE_MAX_BUDGET_USD` | unlimited | Max cost per request (USD) |
 | `CLAUDE_MODEL` | SDK default | Claude model to use |
 | `CLAUDE_EXECUTABLE_PATH` | auto-detect | Path to `claude` binary |
+
+## Codex CLI
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CODEX_MODEL` | Codex default | Codex model to use |
+| `CODEX_API_KEY` | — | OpenAI-compatible API key for Codex. Normalized to `OPENAI_API_KEY` in the Codex child process |
+| `CODEX_BASE_URL` | Codex default | OpenAI-compatible API base URL. Passed to Codex as `-c openai_base_url="..."` |
+| `CODEX_PROFILE` | — | Codex config profile |
+| `CODEX_APPROVAL_POLICY` | `never` | Approval policy (`untrusted`, `on-failure`, `on-request`, `never`) |
+| `CODEX_SANDBOX` | `danger-full-access` | Sandbox mode (`read-only`, `workspace-write`, `danger-full-access`) |
+| `CODEX_EXECUTABLE_PATH` | auto-detect | Path to `codex` binary |
 
 ## MetaMemory
 
@@ -62,6 +76,7 @@ Falls back to the first Feishu bot's credentials if not set.
 | `METABOT_PEER_SECRETS` | — | Comma-separated peer secrets (positional match) |
 | `METABOT_PEER_NAMES` | auto | Comma-separated peer names |
 | `METABOT_PEER_POLL_INTERVAL_MS` | `30000` | Peer poll interval |
+| `METABOT_ALLOWED_PEER_CIDRS` | — | Optional comma/space-separated IPv4 CIDR allowlist. When set, task forwarding only targets peers whose literal-IPv4 host falls inside one of these ranges. Hostname-based peers are still gated by the known-peer allowlist but are not CIDR-filtered. Unset = no CIDR constraint. Example: `10.0.0.0/8,192.168.0.0/16` |
 
 ## Remote Access
 
