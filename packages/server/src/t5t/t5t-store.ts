@@ -576,6 +576,9 @@ export class T5tStore {
     if (input.wipId) {
       const prev = this.getWipById(input.wipId);
       if (!prev) throw httpErr(404, 'wip_not_found');
+      // Guard against cross-project mutation via a guessable wipId: the
+      // caller's project must match the item being transitioned.
+      if (prev.project !== input.project) throw httpErr(404, 'wip_not_found');
       // Transitions can't move columns; lock to the original.
       finalId = input.wipId;
       targetProject = prev.project;
@@ -669,6 +672,8 @@ export class T5tStore {
     if (input.itemId) {
       const prev = this.getTopFiveById(input.itemId);
       if (!prev) throw httpErr(404, 'topfive_not_found');
+      // Guard against cross-project mutation via a guessable itemId.
+      if (prev.project !== input.project) throw httpErr(404, 'topfive_not_found');
       finalId = input.itemId;
       targetProject = prev.project;
       replaces = prev.docId;

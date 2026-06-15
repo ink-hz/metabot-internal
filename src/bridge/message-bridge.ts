@@ -2765,7 +2765,7 @@ export class MessageBridge {
         responseText: lastState.responseText,
         sessionId: processor.getSessionId(),
         costUsd: lastState.costUsd,
-        durationMs: lastState.durationMs,
+        durationMs,
         error: lastState.errorMessage,
       };
     } catch (err: any) {
@@ -2823,7 +2823,7 @@ export class MessageBridge {
             responseText: lastState.responseText,
             sessionId: processor.getSessionId(),
             costUsd: lastState.costUsd,
-            durationMs: lastState.durationMs,
+            durationMs: Date.now() - startTime,
             error: lastState.errorMessage,
           };
         } catch (retryErr: any) {
