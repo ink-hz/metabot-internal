@@ -47,6 +47,11 @@ export class StreamProcessor {
   // Track per-API-call usage from stream events for accurate context window display
   private _lastInputTokens: number | undefined;
   private _lastOutputTokens: number | undefined;
+  private _runInputTokens = 0;
+  private _runOutputTokens = 0;
+  private _runCacheReadTokens = 0;
+  private _runCacheCreationTokens = 0;
+  private _currentOutputTokens = 0;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
@@ -225,13 +230,20 @@ export class StreamProcessor {
     if (event.type === 'message_start') {
       const usage = (event as any).message?.usage;
       if (usage) {
-        this._lastInputTokens = (usage.input_tokens ?? 0)
-          + (usage.cache_read_input_tokens ?? 0)
-          + (usage.cache_creation_input_tokens ?? 0);
+        const input = usage.input_tokens ?? 0;
+        const cacheRead = usage.cache_read_input_tokens ?? 0;
+        const cacheCreation = usage.cache_creation_input_tokens ?? 0;
+        this._lastInputTokens = input + cacheRead + cacheCreation;
+        this._runInputTokens += input;
+        this._runCacheReadTokens += cacheRead;
+        this._runCacheCreationTokens += cacheCreation;
+        this._currentOutputTokens = 0;
       }
     } else if (event.type === 'message_delta') {
       const usage = (event as any).usage;
       if (usage?.output_tokens != null) {
+        this._runOutputTokens += Math.max(0, usage.output_tokens - this._currentOutputTokens);
+        this._currentOutputTokens = usage.output_tokens;
         this._lastOutputTokens = usage.output_tokens;
       }
     }
@@ -281,10 +293,15 @@ export class StreamProcessor {
           this._totalTokens = this._lastInputTokens + (this._lastOutputTokens ?? 0);
         } else {
           let totalTokens = 0;
+          let inputTokens = 0;
+          let outputTokens = 0;
           for (const m of models) {
-            totalTokens += (message.modelUsage![m].inputTokens ?? 0);
-            totalTokens += (message.modelUsage![m].outputTokens ?? 0);
+            inputTokens += (message.modelUsage![m].inputTokens ?? 0);
+            outputTokens += (message.modelUsage![m].outputTokens ?? 0);
           }
+          totalTokens = inputTokens + outputTokens;
+          this._runInputTokens = inputTokens;
+          this._runOutputTokens = outputTokens;
           this._totalTokens = totalTokens;
         }
       }
@@ -439,8 +456,18 @@ export class StreamProcessor {
     return this.sessionId;
   }
 
-  getTokenUsage(): { inputTokens?: number; outputTokens?: number } {
-    return { inputTokens: this._lastInputTokens, outputTokens: this._lastOutputTokens };
+  getTokenUsage(): {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+  } {
+    return {
+      inputTokens: this._runInputTokens,
+      outputTokens: this._runOutputTokens,
+      cacheReadTokens: this._runCacheReadTokens,
+      cacheCreationTokens: this._runCacheCreationTokens,
+    };
   }
 
   getImagePaths(): string[] {

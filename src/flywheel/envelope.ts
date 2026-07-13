@@ -51,15 +51,17 @@ export interface EventEnvelopeInput {
 }
 
 export class EventEnvelopeFactory {
-  private seq = 0;
+  private readonly seqByBot = new Map<string, number>();
 
   constructor(private readonly recorderInstance = randomUUID()) {}
 
   create(input: EventEnvelopeInput): FlywheelEventEnvelope {
+    const seq = (this.seqByBot.get(input.botId) ?? 0) + 1;
+    this.seqByBot.set(input.botId, seq);
     return {
       event_id: input.eventId ?? randomUUID(),
       event_type: input.eventType,
-      seq: ++this.seq,
+      seq,
       recorder_instance: this.recorderInstance,
       occurred_at: input.occurredAt ?? new Date().toISOString(),
       bot_id: input.botId,

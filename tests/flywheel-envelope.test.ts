@@ -11,6 +11,14 @@ describe('flywheel event envelope', () => {
     expect(second.seq).toBe(2);
   });
 
+  it('tracks sequence independently per bot so gap scans do not see interleaving as loss', () => {
+    const factory = new EventEnvelopeFactory();
+    const hr1 = factory.create(baseInput('message_received'));
+    const fae1 = factory.create({ ...baseInput('message_received'), botId: 'fae-bot', businessDomain: 'fae' });
+    const hr2 = factory.create(baseInput('tool_call'));
+    expect([hr1.seq, fae1.seq, hr2.seq]).toEqual([1, 1, 2]);
+  });
+
   it.each(FLYWHEEL_EVENT_TYPES)('builds a complete %s envelope', (eventType) => {
     const envelope = new EventEnvelopeFactory().create(baseInput(eventType));
     expect(envelope).toMatchObject({

@@ -2552,6 +2552,8 @@ export class MessageBridge {
       duration_ms: durationMs,
       input_tokens: usage.inputTokens,
       output_tokens: usage.outputTokens,
+      cache_read_tokens: usage.cacheReadTokens,
+      cache_creation_tokens: usage.cacheCreationTokens,
       cost_usd: state.costUsd,
       status: state.status === 'error' && /stopp|abort/i.test(state.errorMessage ?? '') ? 'terminated' : state.status,
       error_class: state.status === 'error' ? classifyFlywheelError(state.errorMessage) : undefined,

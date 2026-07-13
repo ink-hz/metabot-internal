@@ -6,7 +6,7 @@ describe('Feishu flywheel normalization', () => {
     const content = '完整中文正文😀'.repeat(20_000);
     const result = buildFlywheelMessageRecord({
       sender: { sender_id: { union_id: 'union-1', open_id: 'open-1' } },
-      message: { parent_id: 'parent-1' },
+      message: { parent_id: 'parent-1', content: '{"file_size":1234,"mime_type":"application/pdf"}' },
     }, {
       messageId: 'message-1', chatId: 'chat-1', chatType: 'p2p', userId: 'open-1',
       text: content, fileKey: 'file-1', fileName: 'report.pdf',
@@ -19,7 +19,10 @@ describe('Feishu flywheel normalization', () => {
       platform_message_id: 'message-1',
       reply_to_platform_message_id: 'parent-1',
       content,
-      attachments: [{ kind: 'file', name: 'report.pdf', platform_ref: 'file-1' }],
+      attachments: [{
+        kind: 'file', name: 'report.pdf', platform_ref: 'file-1',
+        size_bytes: 1234, mime_type: 'application/pdf',
+      }],
     });
     expect(result.payload.content).toBe(content);
   });

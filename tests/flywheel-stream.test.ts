@@ -29,4 +29,23 @@ describe('StreamProcessor flywheel hooks', () => {
     expect(recordToolCall).toHaveBeenCalledWith(expect.objectContaining({ tool_name: 'Read', status: 'completed' }));
     expect(recordEvidence).toHaveBeenCalledTimes(2);
   });
+
+  it('accumulates input, output and cache token classes across model calls', () => {
+    const processor = new StreamProcessor('prompt');
+    processor.processMessage({ type: 'stream_event', event: {
+      type: 'message_start', message: { usage: { input_tokens: 10, cache_read_input_tokens: 20, cache_creation_input_tokens: 30 } },
+    } } as any);
+    processor.processMessage({ type: 'stream_event', event: {
+      type: 'message_delta', usage: { output_tokens: 4 },
+    } } as any);
+    processor.processMessage({ type: 'stream_event', event: {
+      type: 'message_start', message: { usage: { input_tokens: 5, cache_read_input_tokens: 6, cache_creation_input_tokens: 7 } },
+    } } as any);
+    processor.processMessage({ type: 'stream_event', event: {
+      type: 'message_delta', usage: { output_tokens: 3 },
+    } } as any);
+    expect(processor.getTokenUsage()).toEqual({
+      inputTokens: 15, outputTokens: 7, cacheReadTokens: 26, cacheCreationTokens: 37,
+    });
+  });
 });

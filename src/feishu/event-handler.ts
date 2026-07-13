@@ -313,13 +313,25 @@ export function buildFlywheelRawEventRecord(raw: unknown, message: RecordEventIn
 }
 
 export function buildFlywheelMessageRecord(
-  event: { sender?: { sender_id?: { union_id?: string; open_id?: string } }; message?: { parent_id?: string; root_id?: string } },
+  event: { sender?: { sender_id?: { union_id?: string; open_id?: string } }; message?: { parent_id?: string; root_id?: string; content?: string } },
   message: IncomingMessage,
   botId: string,
 ): RecordEventInput {
   const attachments: Array<Record<string, unknown>> = [];
+  let rawContent: Record<string, unknown> = {};
+  try {
+    rawContent = event.message?.content ? JSON.parse(event.message.content) as Record<string, unknown> : {};
+  } catch {
+    // The normal message parser already handles malformed content.
+  }
   if (message.imageKey) attachments.push({ kind: 'image', platform_ref: message.imageKey });
-  if (message.fileKey) attachments.push({ kind: 'file', name: message.fileName, platform_ref: message.fileKey });
+  if (message.fileKey) attachments.push({
+    kind: 'file',
+    name: message.fileName,
+    platform_ref: message.fileKey,
+    mime_type: rawContent.mime_type,
+    size_bytes: rawContent.file_size ?? rawContent.size,
+  });
   for (const media of message.extraMedia ?? []) {
     if (media.imageKey) attachments.push({ kind: 'image', platform_ref: media.imageKey });
     if (media.fileKey) attachments.push({ kind: 'file', name: media.fileName, platform_ref: media.fileKey });
