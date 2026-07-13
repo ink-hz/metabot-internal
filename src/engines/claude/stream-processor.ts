@@ -292,14 +292,13 @@ export class StreamProcessor {
         if (this._lastInputTokens != null) {
           this._totalTokens = this._lastInputTokens + (this._lastOutputTokens ?? 0);
         } else {
-          let totalTokens = 0;
           let inputTokens = 0;
           let outputTokens = 0;
           for (const m of models) {
             inputTokens += (message.modelUsage![m].inputTokens ?? 0);
             outputTokens += (message.modelUsage![m].outputTokens ?? 0);
           }
-          totalTokens = inputTokens + outputTokens;
+          const totalTokens = inputTokens + outputTokens;
           this._runInputTokens = inputTokens;
           this._runOutputTokens = outputTokens;
           this._totalTokens = totalTokens;
