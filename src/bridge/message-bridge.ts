@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { BotConfigBase } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import type { BackgroundEvent, IncomingMessage, CardState, PendingQuestion, TeamState, TeamMember, TeamTask } from '../types.js';
@@ -51,6 +52,8 @@ import { SlashPickerController } from './slash-picker-controller.js';
 import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
+import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
+import type { FlywheelConversation, FlywheelSender } from '../flywheel/envelope.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -116,6 +119,13 @@ interface RunningTask {
   chatId: string;
   /** Live snapshot of the active Agent Team, accumulated from team hooks. */
   teamState?: TeamState;
+}
+
+interface FlywheelTurnContext {
+  turnId: string;
+  runId?: string;
+  sender?: FlywheelSender;
+  conversation: FlywheelConversation;
 }
 
 export interface ApiTaskOptions {
@@ -265,6 +275,7 @@ export class MessageBridge {
     private config: BotConfigBase,
     private logger: Logger,
     private sender: IMessageSender,
+    private flywheel?: FlywheelRecorder,
   ) {
     this.engine = createEngine(config, logger);
     this.executor = this.engine.createExecutor();
@@ -1328,9 +1339,23 @@ export class MessageBridge {
       maxTurns?: number;
       allowedTools?: string[];
       freshSession?: boolean;
+      flywheelContext?: FlywheelTurnContext;
     },
   ): Promise<ExecutionHandle> {
     const session = this.sessionManager.getSession(chatId);
+    if (this.flywheel && opts.flywheelContext && !opts.flywheelContext.runId) {
+      opts.flywheelContext.runId = randomUUID();
+      const releaseVersion = readReleaseVersion(opts.cwd);
+      this.flywheel.recordRunStarted(this.flywheelInput(opts.flywheelContext, {
+        engine: engineName,
+        backend: engineName === 'claude' ? this.config.claude.backend : undefined,
+        model: opts.model,
+        claude_session_id: session.sessionId,
+        agent_version: readMetabotVersion(),
+        prompt_version: releaseVersion,
+        knowledge_version: releaseVersion,
+      }));
+    }
     // Persistent only applies to Claude. Options that need per-turn binding
     // (maxTurns / allowedTools) aren't plumbed through the persistent path yet,
     // so fall back to legacy spawn when they're present — matches the gating
@@ -1893,6 +1918,10 @@ export class MessageBridge {
     const abortController = new AbortController();
     const activeEngine = session.engine ?? resolveEngineName(this.config);
     const enginePromptText = normalizePromptForEngine(text, activeEngine);
+    const flywheelContext: FlywheelTurnContext | undefined =
+      msg.turnId && msg.flywheelConversation
+        ? { turnId: msg.turnId, sender: msg.flywheelSender, conversation: msg.flywheelConversation }
+        : undefined;
 
     // Prepare downloads directory (bot-isolated)
     const downloadsDir = this.config.claude.downloadsDir;
@@ -1958,7 +1987,11 @@ export class MessageBridge {
     const displayPrompt = hasMedia && mediaCount > 1
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
-    const processor = new StreamProcessor(displayPrompt);
+    const processor = new StreamProcessor(displayPrompt,
+      this.flywheel && flywheelContext ? {
+        recordToolCall: (payload) => this.flywheel?.recordToolCall(this.flywheelInput(flywheelContext, payload)),
+        recordEvidence: (payload) => this.flywheel?.recordEvidence(this.flywheelInput(flywheelContext, payload)),
+      } : undefined);
     // Capture mirrored goal once at task start. New /goal messages can't
     // arrive mid-task (handleMessage rejects them with "Task In Progress"),
     // so this stays stable for the whole run.
@@ -2041,6 +2074,7 @@ export class MessageBridge {
       apiContext,
       model: session.model,
       onTeamEvent,
+      flywheelContext,
     });
 
     // Register running task
@@ -2279,7 +2313,7 @@ export class MessageBridge {
         // instance).
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
-          onTeamEvent, freshSession: true,
+          onTeamEvent, freshSession: true, flywheelContext,
         });
         executionHandle.finish();
         runningTask.executionHandle = retryHandle;
@@ -2306,7 +2340,7 @@ export class MessageBridge {
 
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
-          onTeamEvent, freshSession: true,
+          onTeamEvent, freshSession: true, flywheelContext,
         });
         executionHandle.finish();
         runningTask.executionHandle = retryHandle;
@@ -2344,6 +2378,7 @@ export class MessageBridge {
         costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
         timestamp: Date.now(),
       });
+      this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
       this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
       metrics.incCounter('metabot_tasks_total');
       metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
@@ -2387,7 +2422,7 @@ export class MessageBridge {
         try {
           const retryHandle = await this.runOneTurn(chatId, engineName, {
             prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
-            onTeamEvent, freshSession: true,
+            onTeamEvent, freshSession: true, flywheelContext,
           });
           executionHandle.finish();
           runningTask.executionHandle = retryHandle;
@@ -2418,6 +2453,7 @@ export class MessageBridge {
             costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
             timestamp: Date.now(),
           });
+          this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
           this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
           metrics.incCounter('metabot_tasks_total');
           metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
@@ -2448,6 +2484,11 @@ export class MessageBridge {
         type: 'task_failed', botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
         errorMessage: err.message || 'Unknown error', durationMs, timestamp: Date.now(),
       });
+      this.recordFlywheelTerminal(flywheelContext, processor, {
+        ...lastState,
+        status: 'error',
+        errorMessage: err.message || 'Unknown error',
+      }, durationMs);
       this.costTracker.record({ botName: this.config.name, userId, success: false, durationMs });
       metrics.incCounter('metabot_tasks_total');
       metrics.incCounter('metabot_tasks_by_status', 'error');
@@ -2484,6 +2525,42 @@ export class MessageBridge {
         try { fs.unlinkSync(p); } catch { /* ignore */ }
       }
       try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+    }
+  }
+
+  private flywheelInput(context: FlywheelTurnContext, payload: Record<string, unknown>): RecordEventInput {
+    return {
+      botId: this.config.name,
+      turnId: context.turnId,
+      runId: context.runId ?? null,
+      sender: context.sender,
+      conversation: context.conversation,
+      payload,
+    };
+  }
+
+  private recordFlywheelTerminal(
+    context: FlywheelTurnContext | undefined,
+    processor: StreamProcessor,
+    state: CardState,
+    durationMs: number,
+  ): void {
+    if (!this.flywheel || !context?.runId) return;
+    const usage = processor.getTokenUsage();
+    const payload = {
+      content: state.responseText,
+      duration_ms: durationMs,
+      input_tokens: usage.inputTokens,
+      output_tokens: usage.outputTokens,
+      cost_usd: state.costUsd,
+      status: state.status === 'error' && /stopp|abort/i.test(state.errorMessage ?? '') ? 'terminated' : state.status,
+      error_class: state.status === 'error' ? classifyFlywheelError(state.errorMessage) : undefined,
+      error_message: state.errorMessage,
+    };
+    if (state.status === 'complete') {
+      this.flywheel.recordRunCompleted(this.flywheelInput(context, payload));
+    } else {
+      this.flywheel.recordRunFailed(this.flywheelInput(context, payload));
     }
   }
 
@@ -3015,4 +3092,39 @@ function mergeBackgroundEvents(
   if (!existing || existing.length === 0) return extra;
   const seen = new Set(existing.map((event) => event.taskId));
   return [...existing, ...extra.filter((event) => !seen.has(event.taskId))];
+}
+
+function readReleaseVersion(cwd: string): string | undefined {
+  try {
+    const raw = fs.readFileSync(path.join(cwd, 'RELEASE'), 'utf8').trim();
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw) as { git_sha?: unknown };
+      return typeof parsed.git_sha === 'string' ? parsed.git_sha : raw;
+    } catch {
+      return raw.split(/\r?\n/, 1)[0];
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+function readMetabotVersion(): string | undefined {
+  try {
+    const packageJson = JSON.parse(
+      fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'),
+    ) as { version?: unknown };
+    return typeof packageJson.version === 'string' ? packageJson.version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function classifyFlywheelError(message: string | undefined): string {
+  const value = message ?? '';
+  if (/timeout|timed out/i.test(value)) return 'timeout';
+  if (/budget|limit/i.test(value)) return 'budget';
+  if (/stopp|abort|terminat/i.test(value)) return 'stopped';
+  if (/tool/i.test(value)) return 'tool_error';
+  return 'provider_error';
 }

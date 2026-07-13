@@ -22,10 +22,16 @@ export interface DetectedTool {
   name: string;
 }
 
+export interface FlywheelStreamHooks {
+  recordToolCall(payload: Record<string, unknown>): void;
+  recordEvidence(payload: Record<string, unknown>): void;
+}
+
 export class StreamProcessor {
   private responseText = '';
   private toolCalls: ToolCall[] = [];
   private currentToolName: string | null = null;
+  private currentToolStartedAt: number | null = null;
   private sessionId: string | undefined;
   private costUsd: number | undefined;
   private durationMs: number | undefined;
@@ -44,9 +50,17 @@ export class StreamProcessor {
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
 
-  constructor(private userPrompt: string) {}
+  constructor(private userPrompt: string, private flywheel?: FlywheelStreamHooks) {}
 
   processMessage(message: SDKMessage): CardState {
+    try {
+      this.flywheel?.recordEvidence({
+        kind: hasToolContent(message) ? 'tool_io' : 'model_response',
+        raw: message as unknown as Record<string, unknown>,
+      });
+    } catch {
+      // Recording is a non-blocking side effect and must never affect the turn.
+    }
     // Capture session_id from any message
     if (message.session_id) {
       this.sessionId = message.session_id;
@@ -310,8 +324,14 @@ export class StreamProcessor {
     this.completeCurrentTool();
 
     this.currentToolName = name;
+    this.currentToolStartedAt = Date.now();
     const detail = formatToolDetail(name, input);
     this.toolCalls.push({ name, detail, status: 'running' });
+    try {
+      this.flywheel?.recordToolCall({ tool_name: name, status: 'running', duration_ms: 0 });
+    } catch {
+      // Recording is a non-blocking side effect and must never affect the turn.
+    }
 
     // Track image file paths and plan file paths from Write tool
     if (name === 'Write' && input && typeof input === 'object') {
@@ -333,7 +353,17 @@ export class StreamProcessor {
       if (tool) {
         tool.status = 'done';
       }
+      try {
+        this.flywheel?.recordToolCall({
+          tool_name: this.currentToolName,
+          status: 'completed',
+          duration_ms: this.currentToolStartedAt === null ? 0 : Date.now() - this.currentToolStartedAt,
+        });
+      } catch {
+        // Recording is a non-blocking side effect and must never affect the turn.
+      }
       this.currentToolName = null;
+      this.currentToolStartedAt = null;
     }
   }
 
@@ -409,6 +439,10 @@ export class StreamProcessor {
     return this.sessionId;
   }
 
+  getTokenUsage(): { inputTokens?: number; outputTokens?: number } {
+    return { inputTokens: this._lastInputTokens, outputTokens: this._lastOutputTokens };
+  }
+
   getImagePaths(): string[] {
     return [...this._imagePaths];
   }
@@ -421,6 +455,11 @@ export class StreamProcessor {
   getPlanContent(): string | null {
     return this._planContent;
   }
+}
+
+function hasToolContent(message: SDKMessage): boolean {
+  return Boolean(message.message?.content?.some((block) =>
+    block.type === 'tool_use' || block.type === 'tool_result'));
 }
 
 function isImagePath(filePath: string): boolean {

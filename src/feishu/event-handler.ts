@@ -2,6 +2,8 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { BotConfig } from '../config.js';
 import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
+import { randomUUID } from 'node:crypto';
+import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -78,6 +80,7 @@ export function createEventDispatcher(
   botOpenId?: string,
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
+  flywheel?: FlywheelRecorder,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -282,7 +285,15 @@ export function createEventDispatcher(
           }
         }
 
-        onMessage({ messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia });
+        const normalized: IncomingMessage = { messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia };
+        if (flywheel) {
+          const record = buildFlywheelMessageRecord(event, normalized, config.name);
+          try { flywheel.recordMessageReceived(record); } catch { /* Flywheel never controls message delivery. */ }
+          normalized.turnId = record.turnId;
+          normalized.flywheelSender = record.sender;
+          normalized.flywheelConversation = record.conversation;
+        }
+        onMessage(normalized);
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }
@@ -290,6 +301,38 @@ export function createEventDispatcher(
   });
 
   return dispatcher;
+}
+
+export function buildFlywheelMessageRecord(
+  event: { sender?: { sender_id?: { union_id?: string; open_id?: string } }; message?: { parent_id?: string; root_id?: string } },
+  message: IncomingMessage,
+  botId: string,
+): RecordEventInput {
+  const attachments: Array<Record<string, unknown>> = [];
+  if (message.imageKey) attachments.push({ kind: 'image', platform_ref: message.imageKey });
+  if (message.fileKey) attachments.push({ kind: 'file', name: message.fileName, platform_ref: message.fileKey });
+  for (const media of message.extraMedia ?? []) {
+    if (media.imageKey) attachments.push({ kind: 'image', platform_ref: media.imageKey });
+    if (media.fileKey) attachments.push({ kind: 'file', name: media.fileName, platform_ref: media.fileKey });
+  }
+  const senderId = event.sender?.sender_id;
+  return {
+    botId,
+    turnId: randomUUID(),
+    runId: null,
+    sender: { provider: 'feishu', union_id: senderId?.union_id, open_id: senderId?.open_id ?? message.userId },
+    conversation: {
+      platform: 'feishu',
+      platform_id: message.chatId,
+      type: message.chatType === 'group' ? 'group' : 'direct',
+    },
+    payload: {
+      platform_message_id: message.messageId,
+      reply_to_platform_message_id: event.message?.parent_id ?? event.message?.root_id,
+      content: message.text,
+      attachments,
+    },
+  };
 }
 
 /** Parse image/file message content, returning media fields or undefined on failure. */
@@ -406,4 +449,3 @@ function extractTextFromPost(content: Record<string, unknown>): string {
 
   return '';
 }
-

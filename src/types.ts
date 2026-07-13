@@ -98,6 +98,10 @@ export interface IncomingMessage {
   chatType: string;
   userId: string;
   text: string;
+  /** Optional write-only flywheel context, populated by the Feishu adapter. */
+  turnId?: string;
+  flywheelSender?: import('./flywheel/envelope.js').FlywheelSender;
+  flywheelConversation?: import('./flywheel/envelope.js').FlywheelConversation;
   timestamp?: number;
   imageKey?: string;
   fileKey?: string;
