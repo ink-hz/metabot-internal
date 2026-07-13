@@ -17,11 +17,11 @@
  */
 
 import {
-  mkdirSync, writeFileSync, rmSync, existsSync, watch,
+  mkdirSync, readFileSync, writeFileSync, rmSync, existsSync, watch,
   openSync, readSync, statSync, closeSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import type { FSWatcher } from 'node:fs';
 import type { PtyHookBridge } from './contract.js';
@@ -38,6 +38,20 @@ export interface HookBridgeOptions {
    * team events via JS callbacks; PTY team-event observation is deferred.
    */
   teamEvents?: boolean;
+  /** Source Claude settings to preserve in the generated PTY settings. */
+  sourceSettingsPath?: string;
+}
+
+function readUserSettings(sourceSettingsPath: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(sourceSettingsPath, 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Missing or invalid settings fall back to MetaBot hooks only.
+  }
+  return {};
 }
 
 /**
@@ -46,10 +60,12 @@ export interface HookBridgeOptions {
  */
 export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
   const enableTeamEvents = options?.teamEvents === true;
+  const sourceSettingsPath = options?.sourceSettingsPath
+    ?? join(homedir(), '.claude', 'settings.json');
 
   const bridgeId = randomUUID().slice(0, 8);
   const bridgeDir = join(tmpdir(), `metabot-pty-${bridgeId}`);
-  mkdirSync(bridgeDir, { recursive: true });
+  mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
 
   const sentinelPath = join(bridgeDir, 'stop.flag');
   const teamEventPath = join(bridgeDir, 'team-events.jsonl');
@@ -70,13 +86,22 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
     // We `cat` stdin into the sentinel file so the watcher sees it change.
     const stopCommand = `cat > ${sentinelPath}`;
 
-    const hooks: Record<string, unknown> = {
-      Stop: [
-        {
-          hooks: [{ type: 'command', command: stopCommand }],
-        },
-      ],
+    const userSettings = readUserSettings(sourceSettingsPath);
+    const userHooks = userSettings.hooks;
+    const hooks: Record<string, unknown> = userHooks && typeof userHooks === 'object' && !Array.isArray(userHooks)
+      ? { ...userHooks as Record<string, unknown> }
+      : {};
+
+    const appendHooks = (event: string, entries: unknown[]): void => {
+      const existing = Array.isArray(hooks[event]) ? hooks[event] as unknown[] : [];
+      hooks[event] = [...existing, ...entries];
     };
+
+    appendHooks('Stop', [
+      {
+        hooks: [{ type: 'command', command: stopCommand }],
+      },
+    ]);
 
     // phase 2: team-event hooks are rejected by the current claude CLI
     // settings validator. Only include them when explicitly opted in.
@@ -85,20 +110,23 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
       const taskCompletedCommand = `{ printf '{"kind":"TaskCompleted","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
       const teammateIdleCommand = `{ printf '{"kind":"TeammateIdle","payload":'; cat; printf '}\\n'; } >> ${teamEventPath}`;
 
-      hooks.TaskCreated = [
+      appendHooks('TaskCreated', [
         { hooks: [{ type: 'command', command: taskCreatedCommand }] },
-      ];
-      hooks.TaskCompleted = [
+      ]);
+      appendHooks('TaskCompleted', [
         { hooks: [{ type: 'command', command: taskCompletedCommand }] },
-      ];
-      hooks.TeammateIdle = [
+      ]);
+      appendHooks('TeammateIdle', [
         { hooks: [{ type: 'command', command: teammateIdleCommand }] },
-      ];
+      ]);
     }
 
-    const settings = { hooks };
+    const settings = { ...userSettings, hooks };
 
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf8');
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     return settingsPath;
   }
 
