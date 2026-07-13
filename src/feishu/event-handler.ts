@@ -289,6 +289,7 @@ export function createEventDispatcher(
         if (flywheel) {
           const record = buildFlywheelMessageRecord(event, normalized, config.name);
           try { flywheel.recordMessageReceived(record); } catch { /* Flywheel never controls message delivery. */ }
+          try { flywheel.recordEvidence(buildFlywheelRawEventRecord(event, record)); } catch { /* same */ }
           normalized.turnId = record.turnId;
           normalized.flywheelSender = record.sender;
           normalized.flywheelConversation = record.conversation;
@@ -301,6 +302,14 @@ export function createEventDispatcher(
   });
 
   return dispatcher;
+}
+
+export function buildFlywheelRawEventRecord(raw: unknown, message: RecordEventInput): RecordEventInput {
+  return {
+    ...message,
+    runId: null,
+    payload: { kind: 'raw_event', raw },
+  };
 }
 
 export function buildFlywheelMessageRecord(

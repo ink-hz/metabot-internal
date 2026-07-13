@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildFlywheelMessageRecord } from '../src/feishu/event-handler.js';
+import { buildFlywheelMessageRecord, buildFlywheelRawEventRecord } from '../src/feishu/event-handler.js';
 
 describe('Feishu flywheel normalization', () => {
   it('keeps global identity, reply relation, attachment metadata and full L1 content', () => {
@@ -22,5 +22,17 @@ describe('Feishu flywheel normalization', () => {
       attachments: [{ kind: 'file', name: 'report.pdf', platform_ref: 'file-1' }],
     });
     expect(result.payload.content).toBe(content);
+  });
+
+  it('builds L3 raw-event evidence at the same collection point', () => {
+    const raw = { sender: { sender_id: { union_id: 'union-1', open_id: 'open-1' } }, message: { content: '{"text":"raw"}' } };
+    const message = buildFlywheelMessageRecord(raw, {
+      messageId: 'message-1', chatId: 'chat-1', chatType: 'p2p', userId: 'open-1', text: 'raw',
+    }, 'hr-bot');
+    expect(buildFlywheelRawEventRecord(raw, message)).toMatchObject({
+      turnId: message.turnId,
+      runId: null,
+      payload: { kind: 'raw_event', raw },
+    });
   });
 });
