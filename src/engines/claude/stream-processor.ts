@@ -294,13 +294,21 @@ export class StreamProcessor {
         } else {
           let inputTokens = 0;
           let outputTokens = 0;
+          let cacheReadTokens = 0;
+          let cacheCreationTokens = 0;
           for (const m of models) {
             inputTokens += (message.modelUsage![m].inputTokens ?? 0);
             outputTokens += (message.modelUsage![m].outputTokens ?? 0);
+            cacheReadTokens += (message.modelUsage![m].cacheReadTokens ?? 0);
+            cacheCreationTokens += (message.modelUsage![m].cacheCreationTokens ?? 0);
           }
-          const totalTokens = inputTokens + outputTokens;
+          const totalTokens = mu.contextInputTokens !== undefined
+            ? mu.contextInputTokens + (mu.contextOutputTokens ?? 0)
+            : inputTokens + cacheReadTokens + cacheCreationTokens + outputTokens;
           this._runInputTokens = inputTokens;
           this._runOutputTokens = outputTokens;
+          this._runCacheReadTokens = cacheReadTokens;
+          this._runCacheCreationTokens = cacheCreationTokens;
           this._totalTokens = totalTokens;
         }
       }

@@ -34,6 +34,8 @@ interface CachedMedia {
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
+  mimeType?: string;
+  sizeBytes?: number;
   ts: number;
 }
 const pendingMediaCache = new Map<string, CachedMedia[]>(); // key: chatId:userId
@@ -180,13 +182,17 @@ export function createEventDispatcher(
         let imageKey: string | undefined;
         let fileKey: string | undefined;
         let fileName: string | undefined;
-        let postExtraImages: string[] = [];
+        let mimeType: string | undefined;
+        let sizeBytes: number | undefined;
+        let postExtraImages: Array<{ imageKey: string; mimeType?: string; sizeBytes?: number }> = [];
 
         if (msgType === 'image') {
           // Image message: extract image_key
           try {
             const content = JSON.parse(message.content);
             imageKey = content.image_key;
+            mimeType = content.mime_type;
+            sizeBytes = numericMetadata(content.file_size ?? content.size);
           } catch {
             logger.warn('Failed to parse image message content');
             return;
@@ -203,6 +209,8 @@ export function createEventDispatcher(
             const content = JSON.parse(message.content);
             fileKey = content.file_key;
             fileName = content.file_name;
+            mimeType = content.mime_type;
+            sizeBytes = numericMetadata(content.file_size ?? content.size);
           } catch {
             logger.warn('Failed to parse file message content');
             return;
@@ -221,7 +229,9 @@ export function createEventDispatcher(
             text = extractTextFromPost(content);
             const postImages = extractImagesFromPost(content);
             if (postImages.length > 0) {
-              imageKey = postImages[0];
+              imageKey = postImages[0].imageKey;
+              mimeType = postImages[0].mimeType;
+              sizeBytes = postImages[0].sizeBytes;
               postExtraImages = postImages.slice(1);
             }
             logger.debug({ extractedText: text.slice(0, 200), imageKey, postImageCount: postImages.length }, 'Extracted post content');
@@ -264,9 +274,9 @@ export function createEventDispatcher(
         // Collect extra media: post images (2nd+) and cached group media
         let extraMedia: IncomingMessage['extraMedia'];
         if (postExtraImages.length > 0) {
-          extraMedia = postExtraImages.map(key => ({
+          extraMedia = postExtraImages.map(media => ({
             messageId,
-            imageKey: key,
+            ...media,
           }));
           logger.info({ chatId, postExtraImageCount: postExtraImages.length }, 'Attached extra images from post');
         }
@@ -278,6 +288,8 @@ export function createEventDispatcher(
               imageKey: m.imageKey,
               fileKey: m.fileKey,
               fileName: m.fileName,
+              mimeType: m.mimeType,
+              sizeBytes: m.sizeBytes,
             }));
             extraMedia = extraMedia ? [...extraMedia, ...cachedMedia] : cachedMedia;
             clearCachedMedia(chatId, userId);
@@ -285,7 +297,10 @@ export function createEventDispatcher(
           }
         }
 
-        const normalized: IncomingMessage = { messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName, extraMedia };
+        const normalized: IncomingMessage = {
+          messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName,
+          mimeType, sizeBytes, extraMedia,
+        };
         if (flywheel) {
           const record = buildFlywheelMessageRecord(event, normalized, config.name);
           try { flywheel.recordMessageReceived(record); } catch { /* Flywheel never controls message delivery. */ }
@@ -324,17 +339,27 @@ export function buildFlywheelMessageRecord(
   } catch {
     // The normal message parser already handles malformed content.
   }
-  if (message.imageKey) attachments.push({ kind: 'image', platform_ref: message.imageKey });
+  if (message.imageKey) attachments.push({
+    kind: 'image', platform_ref: message.imageKey,
+    mime_type: message.mimeType ?? rawContent.mime_type,
+    size_bytes: message.sizeBytes ?? rawContent.file_size ?? rawContent.size,
+  });
   if (message.fileKey) attachments.push({
     kind: 'file',
     name: message.fileName,
     platform_ref: message.fileKey,
-    mime_type: rawContent.mime_type,
-    size_bytes: rawContent.file_size ?? rawContent.size,
+    mime_type: message.mimeType ?? rawContent.mime_type,
+    size_bytes: message.sizeBytes ?? rawContent.file_size ?? rawContent.size,
   });
   for (const media of message.extraMedia ?? []) {
-    if (media.imageKey) attachments.push({ kind: 'image', platform_ref: media.imageKey });
-    if (media.fileKey) attachments.push({ kind: 'file', name: media.fileName, platform_ref: media.fileKey });
+    if (media.imageKey) attachments.push({
+      kind: 'image', platform_ref: media.imageKey,
+      mime_type: media.mimeType, size_bytes: media.sizeBytes,
+    });
+    if (media.fileKey) attachments.push({
+      kind: 'file', name: media.fileName, platform_ref: media.fileKey,
+      mime_type: media.mimeType, size_bytes: media.sizeBytes,
+    });
   }
   const senderId = event.sender?.sender_id;
   return {
@@ -359,17 +384,25 @@ export function buildFlywheelMessageRecord(
 /** Parse image/file message content, returning media fields or undefined on failure. */
 function parseMediaMessage(
   message: any, msgType: string, logger: Logger,
-): { imageKey?: string; fileKey?: string; fileName?: string } | undefined {
+): { imageKey?: string; fileKey?: string; fileName?: string; mimeType?: string; sizeBytes?: number } | undefined {
   try {
     const content = JSON.parse(message.content);
     if (msgType === 'image') {
       const imageKey = content.image_key;
-      return imageKey ? { imageKey } : undefined;
+      return imageKey ? {
+        imageKey,
+        mimeType: content.mime_type,
+        sizeBytes: numericMetadata(content.file_size ?? content.size),
+      } : undefined;
     }
     if (msgType === 'file') {
       const fileKey = content.file_key;
       const fileName = content.file_name;
-      return (fileKey && fileName) ? { fileKey, fileName } : undefined;
+      return (fileKey && fileName) ? {
+        fileKey, fileName,
+        mimeType: content.mime_type,
+        sizeBytes: numericMetadata(content.file_size ?? content.size),
+      } : undefined;
     }
   } catch {
     logger.warn({ msgType }, 'Failed to parse media message for caching');
@@ -381,7 +414,9 @@ function parseMediaMessage(
  * Extract all image_keys from a Feishu post (rich text) message.
  * Looks for { tag: "img", image_key: "..." } elements in the post content.
  */
-function extractImagesFromPost(content: Record<string, unknown>): string[] {
+function extractImagesFromPost(
+  content: Record<string, unknown>,
+): Array<{ imageKey: string; mimeType?: string; sizeBytes?: number }> {
   const bodies: Array<Record<string, unknown>> = [];
 
   if (Array.isArray(content.content)) {
@@ -397,7 +432,7 @@ function extractImagesFromPost(content: Record<string, unknown>): string[] {
     }
   }
 
-  const keys: string[] = [];
+  const images: Array<{ imageKey: string; mimeType?: string; sizeBytes?: number }> = [];
   for (const body of bodies) {
     const paragraphs = body.content as unknown[][];
     for (const paragraph of paragraphs) {
@@ -406,13 +441,23 @@ function extractImagesFromPost(content: Record<string, unknown>): string[] {
         if (!element || typeof element !== 'object') continue;
         const el = element as Record<string, unknown>;
         if (el.tag === 'img' && typeof el.image_key === 'string') {
-          keys.push(el.image_key);
+          images.push({
+            imageKey: el.image_key,
+            mimeType: typeof el.mime_type === 'string' ? el.mime_type : undefined,
+            sizeBytes: numericMetadata(el.file_size ?? el.size),
+          });
         }
       }
     }
   }
 
-  return keys;
+  return images;
+}
+
+function numericMetadata(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value);
+  return undefined;
 }
 
 /**

@@ -106,11 +106,15 @@ export interface IncomingMessage {
   imageKey?: string;
   fileKey?: string;
   fileName?: string;
+  mimeType?: string;
+  sizeBytes?: number;
   /** Additional media from batched messages (smart debounce). */
   extraMedia?: Array<{
     messageId: string;
     imageKey?: string;
     fileKey?: string;
     fileName?: string;
+    mimeType?: string;
+    sizeBytes?: number;
   }>;
 }

@@ -38,4 +38,21 @@ describe('Feishu flywheel normalization', () => {
       payload: { kind: 'raw_event', raw },
     });
   });
+
+  it('preserves available metadata for primary, rich-post and batched media', () => {
+    const result = buildFlywheelMessageRecord({ message: { content: '{}' } }, {
+      messageId: 'message-media', chatId: 'chat-1', chatType: 'p2p', userId: 'open-1', text: 'media',
+      imageKey: 'primary-image', mimeType: 'image/png', sizeBytes: 10,
+      extraMedia: [
+        { messageId: 'rich-image', imageKey: 'rich-image', mimeType: 'image/jpeg', sizeBytes: 20 },
+        { messageId: 'batch-file', fileKey: 'batch-file', fileName: 'a.zip', mimeType: 'application/zip', sizeBytes: 30 },
+      ],
+    }, 'pc-bot');
+
+    expect(result.payload.attachments).toEqual([
+      { kind: 'image', platform_ref: 'primary-image', mime_type: 'image/png', size_bytes: 10 },
+      { kind: 'image', platform_ref: 'rich-image', mime_type: 'image/jpeg', size_bytes: 20 },
+      { kind: 'file', name: 'a.zip', platform_ref: 'batch-file', mime_type: 'application/zip', size_bytes: 30 },
+    ]);
+  });
 });
