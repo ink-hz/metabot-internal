@@ -19,6 +19,8 @@ import { TaskScheduler } from './scheduler/task-scheduler.js';
 import { startApiServer } from './api/http-server.js';
 import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
+import { createFlywheelRecorder, type FlywheelRecorder } from './flywheel/index.js';
+import { isFlywheelEnabled } from './flywheel/config.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -65,7 +67,12 @@ function setupFeishuLocalAddress(logger: Logger): https.Agent | undefined {
   return agent;
 }
 
-async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?: https.Agent): Promise<FeishuBotHandle> {
+async function startFeishuBot(
+  botConfig: BotConfig,
+  logger: Logger,
+  localAgent?: https.Agent,
+  flywheel?: FlywheelRecorder,
+): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
   botLogger.info('Starting Feishu bot...');
@@ -94,7 +101,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?:
   // Create sender and bridge (FeishuSenderAdapter wraps the Feishu-specific MessageSender)
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
-  const bridge = new MessageBridge(botConfig, botLogger, sender);
+  const bridge = new MessageBridge(botConfig, botLogger, sender, flywheel);
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -112,6 +119,7 @@ async function startFeishuBot(botConfig: BotConfig, logger: Logger, localAgent?:
         botLogger.error({ err, event }, 'Unhandled error in card action handler');
       });
     },
+    flywheel,
   );
 
   // Create WebSocket client
@@ -187,6 +195,12 @@ async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
+  const flywheel = isFlywheelEnabled()
+    ? createFlywheelRecorder({
+      logger,
+      knownSecrets: appConfig.feishuBots.map((bot) => bot.feishu.appSecret),
+    })
+    : undefined;
 
   // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
   // so the first turn in each chat after a restart can be reminded not to
@@ -210,7 +224,7 @@ async function main() {
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger, feishuLocalAgent),
+      (bot) => startFeishuBot(bot, logger, feishuLocalAgent, flywheel),
       logger,
       'feishu',
     )
@@ -388,6 +402,7 @@ async function main() {
       docSync.destroy();
     }
     sessionRegistry.close();
+    if (flywheel) await flywheel.close();
     const teardowns: Promise<void>[] = [];
     for (const handle of feishuHandles) {
       teardowns.push(handle.bridge.destroyAsync());

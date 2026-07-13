@@ -293,7 +293,16 @@ export type SDKMessage = {
   num_turns?: number;
   errors?: string[];
   // Model usage from result message (per-model breakdown)
-  modelUsage?: Record<string, { inputTokens: number; outputTokens: number; contextWindow: number; costUSD: number }>;
+  modelUsage?: Record<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    contextInputTokens?: number;
+    contextOutputTokens?: number;
+    contextWindow: number;
+    costUSD: number;
+  }>;
   // Stream event fields
   event?: {
     type: string;

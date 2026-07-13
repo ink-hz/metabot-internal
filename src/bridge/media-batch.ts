@@ -29,6 +29,8 @@ export function mergeBatchMessages(messages: IncomingMessage[]): IncomingMessage
       imageKey: m.imageKey,
       fileKey: m.fileKey,
       fileName: m.fileName,
+      mimeType: m.mimeType,
+      sizeBytes: m.sizeBytes,
     })),
   };
 }
@@ -41,6 +43,8 @@ export function mergeBatchWithText(batchMsgs: IncomingMessage[], textMsg: Incomi
       imageKey: m.imageKey,
       fileKey: m.fileKey,
       fileName: m.fileName,
+      mimeType: m.mimeType,
+      sizeBytes: m.sizeBytes,
     })),
   };
 }

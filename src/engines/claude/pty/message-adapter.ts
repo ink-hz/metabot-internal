@@ -214,6 +214,10 @@ export const synthesizeResult: SynthesizeResult = (args) => {
         [args.model || 'unknown']: {
           inputTokens: args.usage.inputTokens ?? 0,
           outputTokens: args.usage.outputTokens ?? 0,
+          cacheReadTokens: args.usage.cacheReadTokens ?? 0,
+          cacheCreationTokens: args.usage.cacheCreationTokens ?? 0,
+          contextInputTokens: args.usage.contextInputTokens,
+          contextOutputTokens: args.usage.contextOutputTokens,
           contextWindow: 200000,
           costUSD: args.usage.costUSD ?? 0,
         },

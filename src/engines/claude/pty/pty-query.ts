@@ -154,12 +154,36 @@ function extractPromptText(m: PtyUserMessage): string | null {
   return null;
 }
 
-/** Accumulated per-turn usage pulled off the latest assistant jsonl record. */
-interface UsageAccum {
+/** Per-turn totals plus the latest API call's context occupation. */
+export interface UsageAccum {
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  contextInputTokens?: number;
+  contextOutputTokens?: number;
   /** Real model name from the assistant record's `message.model`. */
   model?: string;
+}
+
+export function accumulatePtyUsage(target: UsageAccum, rec: RawJsonlRecord): void {
+  if (rec.type !== 'assistant') return;
+  const msg = rec.message as Record<string, unknown> | undefined;
+  const usage = msg?.usage as Record<string, unknown> | undefined;
+  if (!usage) return;
+  const num = (value: unknown): number => (typeof value === 'number' ? value : 0);
+  const input = num(usage.input_tokens);
+  const cacheRead = num(usage.cache_read_input_tokens);
+  const cacheCreation = num(usage.cache_creation_input_tokens);
+  const output = num(usage.output_tokens);
+  target.inputTokens = (target.inputTokens ?? 0) + input;
+  target.outputTokens = (target.outputTokens ?? 0) + output;
+  target.cacheReadTokens = (target.cacheReadTokens ?? 0) + cacheRead;
+  target.cacheCreationTokens = (target.cacheCreationTokens ?? 0) + cacheCreation;
+  target.contextInputTokens = input + cacheRead + cacheCreation;
+  target.contextOutputTokens = output;
+  const model = msg?.model;
+  if (typeof model === 'string' && model) target.model = model;
 }
 
 export const ptyQuery = (args: {
@@ -231,7 +255,7 @@ export const ptyQuery = (args: {
           synthesizeResult({
             sessionId,
             model: usage.model,
-            usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+            usage,
           }),
         );
       }, RESULT_DRAIN_MS);
@@ -317,7 +341,7 @@ export const ptyQuery = (args: {
             synthesizeResult({
               sessionId,
               model: usage.model,
-              usage: { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+              usage,
             }),
           );
         }
@@ -422,24 +446,11 @@ export const ptyQuery = (args: {
    * interactive session with prompt caching, `input_tokens` alone is just the
    * tiny uncached delta — the conversation history lives in the cache_* fields.
    * Summing only input_tokens produced the bogus "ctx: 33/200k" display.
-   * The latest assistant record reflects the most recent API call's full
-   * context, so overwriting per-record (not accumulating) is correct.
+   * The latest record supplies context occupation, while the four token
+   * classes are accumulated across every API call in the turn.
    */
   function trackUsage(rec: RawJsonlRecord): void {
-    if (rec.type !== 'assistant') return;
-    const msg = rec.message as Record<string, unknown> | undefined;
-    const usage = msg?.usage as Record<string, unknown> | undefined;
-    if (!usage) return;
-    const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
-    const totalInput =
-      num(usage.input_tokens) +
-      num(usage.cache_read_input_tokens) +
-      num(usage.cache_creation_input_tokens);
-    const outT = usage.output_tokens as number | undefined;
-    if (totalInput > 0) lastUsage.inputTokens = totalInput;
-    if (typeof outT === 'number') lastUsage.outputTokens = outT;
-    const model = msg?.model as string | undefined;
-    if (typeof model === 'string' && model) lastUsage.model = model;
+    accumulatePtyUsage(lastUsage, rec);
   }
 
   // ── Prompt loop ──────────────────────────────────────────────────────────
@@ -505,7 +516,7 @@ export const ptyQuery = (args: {
           synthesizeResult({
             sessionId,
             model: lastUsage.model,
-            usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+            usage: lastUsage,
           }),
         );
         return;
@@ -536,7 +547,7 @@ export const ptyQuery = (args: {
           isError: true,
           resultText: 'claude process exited before the turn completed',
           model: lastUsage.model,
-          usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+          usage: lastUsage,
         }),
       );
     }
@@ -574,7 +585,7 @@ export const ptyQuery = (args: {
           isError: true,
           resultText: 'turn interrupted',
           model: lastUsage.model,
-          usage: { inputTokens: lastUsage.inputTokens, outputTokens: lastUsage.outputTokens },
+          usage: lastUsage,
         }),
       );
     }

@@ -307,6 +307,10 @@ export interface SynthesizeResultArgs {
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheCreationTokens?: number;
+    contextInputTokens?: number;
+    contextOutputTokens?: number;
     costUSD?: number;
   };
 }
