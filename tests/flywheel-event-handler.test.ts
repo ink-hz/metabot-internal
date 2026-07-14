@@ -1,5 +1,9 @@
-import { describe, expect, it } from 'vitest';
-import { buildFlywheelMessageRecord, buildFlywheelRawEventRecord } from '../src/feishu/event-handler.js';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  buildFlywheelMessageRecord,
+  buildFlywheelRawEventRecord,
+  createEventDispatcher,
+} from '../src/feishu/event-handler.js';
 
 describe('Feishu flywheel normalization', () => {
   it('keeps global identity, reply relation, attachment metadata and full L1 content', () => {
@@ -54,5 +58,94 @@ describe('Feishu flywheel normalization', () => {
       { kind: 'image', platform_ref: 'rich-image', mime_type: 'image/jpeg', size_bytes: 20 },
       { kind: 'file', name: 'a.zip', platform_ref: 'batch-file', mime_type: 'application/zip', size_bytes: 30 },
     ]);
+  });
+
+  it('copies synthetic context into Recorder input without putting it in content', () => {
+    const result = buildFlywheelMessageRecord({
+      sender: { sender_id: { union_id: 'on_test', open_id: 'ou_test' } },
+      message: { content: '{"text":"probe"}' },
+    }, {
+      messageId: 'message-probe',
+      chatId: 'oc_canary',
+      chatType: 'p2p',
+      userId: 'ou_test',
+      text: 'probe',
+      syntheticProbe: {
+        isSynthetic: true,
+        probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+        attemptId: '01J2Z9M77A68K8B1T4W5F6H9P0',
+      },
+    }, 'hr-bot');
+
+    expect(result).toMatchObject({
+      isSynthetic: true,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+      payload: { content: 'probe' },
+    });
+    expect(result.payload).not.toHaveProperty('syntheticProbe');
+  });
+
+  it('classifies before Recorder and removes the control marker from Agent content', async () => {
+    const probeId = '01J2Z9K2E8F5G9M6W4Q3T7R8Y1';
+    const attemptId = '01J2Z9M77A68K8B1T4W5F6H9P0';
+    const order: string[] = [];
+    let recorded: any;
+    let delivered: any;
+    const recordMessageReceived = vi.fn((record) => {
+      order.push('record');
+      recorded = record;
+    });
+    const onMessage = vi.fn((message) => {
+      order.push('message');
+      delivered = message;
+    });
+    const dispatcher = createEventDispatcher(
+      {
+        name: 'hr-bot',
+        feishu: { appId: 'app', appSecret: 'secret' },
+        claude: {
+          defaultWorkingDirectory: '/tmp', maxTurns: undefined,
+          maxBudgetUsd: undefined, model: 'claude-opus-4-8', apiKey: undefined,
+          outputsBaseDir: '/tmp/outputs', downloadsDir: '/tmp/downloads', backend: 'pty',
+        },
+      },
+      { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      onMessage,
+      undefined,
+      undefined,
+      undefined,
+      {
+        recordMessageReceived,
+        recordEvidence: vi.fn(),
+      } as never,
+      { unionIds: new Set(['on_test']), chatIds: new Set(['oc_canary']) },
+    );
+
+    await dispatcher.invoke({
+      schema: '2.0',
+      header: { event_type: 'im.message.receive_v1' },
+      event: {
+        sender: { sender_id: { union_id: 'on_test', open_id: 'ou_test' } },
+        message: {
+          message_type: 'text',
+          message_id: 'om_probe',
+          chat_id: 'oc_canary',
+          chat_type: 'p2p',
+          content: JSON.stringify({
+            text: `[metabot-probe id=${probeId} attempt=${attemptId}] 请回复 nonce=N-123`,
+          }),
+        },
+      },
+    }, { needCheck: false });
+
+    expect(recordMessageReceived).toHaveBeenCalledOnce();
+    expect(onMessage).toHaveBeenCalledOnce();
+    expect(order).toEqual(['record', 'message']);
+    expect(recorded.payload.content).toBe('请回复 nonce=N-123');
+    expect(recorded).toMatchObject({ isSynthetic: true, probeId });
+    expect(delivered.text).toBe('请回复 nonce=N-123');
+    expect(delivered.syntheticProbe).toEqual({
+      isSynthetic: true, probeId, attemptId,
+    });
   });
 });

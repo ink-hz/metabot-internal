@@ -4,6 +4,11 @@ import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
 import { randomUUID } from 'node:crypto';
 import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
+import {
+  classifySyntheticProbe,
+  stripSyntheticControlMarker,
+  type SyntheticAllowlist,
+} from '../reliability/synthetic-context.js';
 
 // Re-export from shared types so existing imports continue to work
 export type { IncomingMessage } from '../types.js';
@@ -83,6 +88,7 @@ export function createEventDispatcher(
   messageSender?: MessageSender,
   onCardAction?: CardActionHandler,
   flywheel?: FlywheelRecorder,
+  syntheticAllowlist: SyntheticAllowlist = { unionIds: new Set(), chatIds: new Set() },
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -297,9 +303,17 @@ export function createEventDispatcher(
           }
         }
 
+        const syntheticProbe = classifySyntheticProbe({
+          unionId: sender?.sender_id?.union_id,
+          chatId,
+          text,
+          fileName,
+        }, syntheticAllowlist);
+        if (syntheticProbe) text = stripSyntheticControlMarker(text);
         const normalized: IncomingMessage = {
           messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName,
           mimeType, sizeBytes, extraMedia,
+          ...(syntheticProbe ? { syntheticProbe } : {}),
         };
         if (flywheel) {
           const record = buildFlywheelMessageRecord(event, normalized, config.name);
@@ -366,6 +380,8 @@ export function buildFlywheelMessageRecord(
     botId,
     turnId: randomUUID(),
     runId: null,
+    isSynthetic: message.syntheticProbe?.isSynthetic ?? false,
+    probeId: message.syntheticProbe?.probeId,
     sender: { provider: 'feishu', union_id: senderId?.union_id, open_id: senderId?.open_id ?? message.userId },
     conversation: {
       platform: 'feishu',

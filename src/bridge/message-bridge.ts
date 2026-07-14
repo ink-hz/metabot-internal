@@ -127,6 +127,8 @@ interface FlywheelTurnContext {
   runId?: string;
   sender?: FlywheelSender;
   conversation: FlywheelConversation;
+  isSynthetic?: boolean;
+  probeId?: string;
 }
 
 export interface ApiTaskOptions {
@@ -1926,7 +1928,13 @@ export class MessageBridge {
     const enginePromptText = normalizePromptForEngine(text, activeEngine);
     const flywheelContext: FlywheelTurnContext | undefined =
       msg.turnId && msg.flywheelConversation
-        ? { turnId: msg.turnId, sender: msg.flywheelSender, conversation: msg.flywheelConversation }
+        ? {
+          turnId: msg.turnId,
+          sender: msg.flywheelSender,
+          conversation: msg.flywheelConversation,
+          isSynthetic: msg.syntheticProbe?.isSynthetic,
+          probeId: msg.syntheticProbe?.probeId,
+        }
         : undefined;
 
     // Prepare downloads directory (bot-isolated)
@@ -2541,6 +2549,8 @@ export class MessageBridge {
       runId: context.runId ?? null,
       sender: context.sender,
       conversation: context.conversation,
+      isSynthetic: context.isSynthetic,
+      probeId: context.probeId,
       payload,
     };
   }

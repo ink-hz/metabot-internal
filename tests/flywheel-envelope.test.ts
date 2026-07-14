@@ -28,9 +28,23 @@ describe('flywheel event envelope', () => {
       turn_id: '10000000-0000-4000-8000-000000000001',
       conversation: { platform: 'feishu', platform_id: 'chat-1', type: 'direct' },
       payload: { content: '完整正文' },
+      is_synthetic: false,
+      probe_id: null,
     });
     expect(envelope.event_id).toMatch(/^[0-9a-f-]{36}$/);
     expect(envelope.occurred_at).toMatch(/T/);
+  });
+
+  it('propagates trusted synthetic identity at the top level', () => {
+    const envelope = new EventEnvelopeFactory().create({
+      ...baseInput('message_received'),
+      isSynthetic: true,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+    });
+    expect(envelope).toMatchObject({
+      is_synthetic: true,
+      probe_id: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+    });
   });
 });
 

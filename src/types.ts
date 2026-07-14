@@ -102,6 +102,8 @@ export interface IncomingMessage {
   turnId?: string;
   flywheelSender?: import('./flywheel/envelope.js').FlywheelSender;
   flywheelConversation?: import('./flywheel/envelope.js').FlywheelConversation;
+  /** Present only after controlled identity/chat and probe marker validation. */
+  syntheticProbe?: import('./reliability/probe-types.js').SyntheticProbeContext;
   timestamp?: number;
   imageKey?: string;
   fileKey?: string;

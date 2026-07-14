@@ -32,6 +32,8 @@ export interface FlywheelEventEnvelope {
   business_domain: string;
   turn_id: string;
   run_id: string | null;
+  is_synthetic: boolean;
+  probe_id: string | null;
   sender?: FlywheelSender;
   conversation: FlywheelConversation;
   payload: Record<string, unknown>;
@@ -43,6 +45,8 @@ export interface EventEnvelopeInput {
   businessDomain: string;
   turnId: string;
   runId?: string | null;
+  isSynthetic?: boolean;
+  probeId?: string;
   sender?: FlywheelSender;
   conversation: FlywheelConversation;
   payload: Record<string, unknown>;
@@ -68,6 +72,8 @@ export class EventEnvelopeFactory {
       business_domain: input.businessDomain,
       turn_id: input.turnId,
       run_id: input.runId ?? null,
+      is_synthetic: input.isSynthetic ?? false,
+      probe_id: input.probeId ?? null,
       ...(input.sender ? { sender: input.sender } : {}),
       conversation: input.conversation,
       payload: input.payload,

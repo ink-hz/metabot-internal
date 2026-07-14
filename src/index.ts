@@ -28,6 +28,10 @@ import {
   type ClaudeCompatibilityRuntime,
 } from './engines/claude/compatibility/runtime.js';
 import type { ClaudeCompatibilityProfile } from './engines/claude/compatibility/profile.js';
+import {
+  loadSyntheticAllowlist,
+  type SyntheticAllowlist,
+} from './reliability/synthetic-context.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -79,6 +83,7 @@ async function startFeishuBot(
   logger: Logger,
   localAgent?: https.Agent,
   flywheel?: FlywheelRecorder,
+  syntheticAllowlist?: SyntheticAllowlist,
 ): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
@@ -127,6 +132,7 @@ async function startFeishuBot(
       });
     },
     flywheel,
+    syntheticAllowlist,
   );
 
   // Create WebSocket client
@@ -232,6 +238,7 @@ async function main() {
       knownSecrets: appConfig.feishuBots.map((bot) => bot.feishu.appSecret),
     })
     : undefined;
+  const syntheticAllowlist = loadSyntheticAllowlist();
 
   // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
   // so the first turn in each chat after a restart can be reminded not to
@@ -255,7 +262,7 @@ async function main() {
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger, feishuLocalAgent, flywheel),
+      (bot) => startFeishuBot(bot, logger, feishuLocalAgent, flywheel, syntheticAllowlist),
       logger,
       'feishu',
     )
