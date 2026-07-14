@@ -334,8 +334,32 @@ export class CommandHandler {
   }
 
   private async handleModelCommand(chatId: string, args: string): Promise<void> {
-    const session = this.sessionManager.getSession(chatId);
     const botEngine = resolveEngineName(this.config);
+    const normalized = args.toLowerCase();
+    const compatibilityProfile = this.config.claude.compatibilityProfile;
+    const isTypedModel = !!args
+      && !isEngineName(normalized)
+      && normalized !== 'list'
+      && normalized !== 'ls'
+      && normalized !== 'reset'
+      && normalized !== 'clear'
+      && normalized !== 'default';
+
+    if (compatibilityProfile && isTypedModel) {
+      const activeEngine = this.sessionManager.peekSession(chatId)?.engine ?? botEngine;
+      if (activeEngine === 'claude') {
+        const newModel = args.split(/\s+/)[0];
+        try {
+          assertAllowedClaudeModel(compatibilityProfile, newModel);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          await this.sender.sendTextNotice(chatId, '❌ Model Not Allowed', message, 'red');
+          return;
+        }
+      }
+    }
+
+    const session = this.sessionManager.getSession(chatId);
     const activeEngine = session.engine ?? botEngine;
     const botDefault = this.defaultModelForEngine(activeEngine);
 
@@ -357,8 +381,6 @@ export class CommandHandler {
       await this.sender.sendTextNotice(chatId, '🤖 Model', lines.join('\n'));
       return;
     }
-
-    const normalized = args.toLowerCase();
 
     // Engine switch — /model claude, /model kimi, or /model codex
     if (isEngineName(normalized)) {
@@ -466,16 +488,6 @@ export class CommandHandler {
 
     // Set the model (use only the first token, ignore trailing junk)
     const newModel = args.split(/\s+/)[0];
-    const compatibilityProfile = this.config.claude.compatibilityProfile;
-    if (activeEngine === 'claude' && compatibilityProfile) {
-      try {
-        assertAllowedClaudeModel(compatibilityProfile, newModel);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        await this.sender.sendTextNotice(chatId, '❌ Model Not Allowed', message, 'red');
-        return;
-      }
-    }
     this.sessionManager.setSessionModel(chatId, newModel, activeEngine);
     await this.sender.sendTextNotice(
       chatId,

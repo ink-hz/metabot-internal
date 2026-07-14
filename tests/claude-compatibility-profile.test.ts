@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadAppConfig } from '../src/config.js';
 import {
   OPUS_PROFILE,
@@ -16,6 +16,7 @@ const originalEngine = process.env.METABOT_ENGINE;
 const tempDirs: string[] = [];
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   if (originalBotsConfig === undefined) delete process.env.BOTS_CONFIG;
   else process.env.BOTS_CONFIG = originalBotsConfig;
   if (originalProfile === undefined) delete process.env.METABOT_CLAUDE_COMPAT_PROFILE;
@@ -46,6 +47,30 @@ function useWebBotConfig(model: string, engine: 'claude' | 'codex' | null = 'cla
     }),
   );
   process.env.BOTS_CONFIG = configPath;
+}
+
+function useSingleBotEnv(platform: 'feishu' | 'telegram' | 'wechat'): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-claude-env-profile-'));
+  tempDirs.push(dir);
+  vi.stubEnv('BOTS_CONFIG', '');
+  vi.stubEnv('METABOT_CLAUDE_COMPAT_PROFILE', OPUS_PROFILE.id);
+  vi.stubEnv('METABOT_ENGINE', 'claude');
+  vi.stubEnv('CLAUDE_DEFAULT_WORKING_DIRECTORY', dir);
+  vi.stubEnv('CLAUDE_MODEL', '');
+  vi.stubEnv('FEISHU_APP_ID', '');
+  vi.stubEnv('FEISHU_APP_SECRET', '');
+  vi.stubEnv('TELEGRAM_BOT_TOKEN', '');
+  vi.stubEnv('WECHAT_BOT_TOKEN', '');
+  vi.stubEnv('WECHAT_ILINK_ENABLED', 'false');
+
+  if (platform === 'feishu') {
+    vi.stubEnv('FEISHU_APP_ID', 'app-id');
+    vi.stubEnv('FEISHU_APP_SECRET', 'app-secret');
+  } else if (platform === 'telegram') {
+    vi.stubEnv('TELEGRAM_BOT_TOKEN', 'bot-token');
+  } else {
+    vi.stubEnv('WECHAT_ILINK_ENABLED', 'true');
+  }
 }
 
 describe('Claude compatibility profile', () => {
@@ -149,4 +174,13 @@ describe('Claude compatibility profile', () => {
     expect(config.webBots[0].claude.model).toBe('claude-sonnet-4-6');
     expect(config.webBots[0].claude.compatibilityProfile).toBeUndefined();
   });
+
+  it.each(['feishu', 'telegram', 'wechat'] as const)(
+    'does not apply the old generic fallback in %s single-bot env mode',
+    (platform) => {
+      useSingleBotEnv(platform);
+
+      expect(() => loadAppConfig()).toThrow(/Claude model \(unset\) is not allowed/);
+    },
+  );
 });

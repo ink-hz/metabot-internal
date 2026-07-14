@@ -2,7 +2,7 @@
  * Tests for CommandHandler /status, /model, /memory, /sync commands,
  * plus edge cases: unknown slash commands, empty input, unicode, very long input.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { CommandHandler } from '../src/bridge/command-handler.js';
 import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import type { IncomingMessage } from '../src/types.js';
@@ -22,6 +22,8 @@ interface BuildOpts {
   memoryError?: boolean;
   docSyncConfigured?: boolean;
   compatibilityProfile?: boolean;
+  botEngine?: string;
+  sessionExists?: boolean;
 }
 
 function buildHandler(opts: BuildOpts = {}) {
@@ -43,24 +45,30 @@ function buildHandler(opts: BuildOpts = {}) {
     downloadFile: async () => true,
   };
 
-  const sessionManager = {
-    getSession: (_chatId: string) => ({
+  const sessionSnapshot = () => ({
       engine: sessionEngine,
       model: sessionModel,
       reasoningEffort,
       workingDirectory: '/workspace',
       sessionId: opts.sessionId,
-    }),
+    });
+  const getSession = vi.fn(() => sessionSnapshot());
+  const setSessionEngine = vi.fn((_chatId: string, engine: string | undefined) => {
+    sessionEngine = engine;
+  });
+  const setSessionModel = vi.fn((_chatId: string, model: string | undefined) => {
+    sessionModel = model;
+  });
+  const setReasoningEffort = vi.fn((_chatId: string, effort: string | undefined) => {
+    reasoningEffort = effort;
+  });
+  const sessionManager = {
+    getSession,
+    peekSession: () => opts.sessionExists === false ? undefined : sessionSnapshot(),
     resetSession: () => {},
-    setSessionEngine: (_chatId: string, engine: string | undefined) => {
-      sessionEngine = engine;
-    },
-    setSessionModel: (_chatId: string, model: string | undefined) => {
-      sessionModel = model;
-    },
-    setReasoningEffort: (_chatId: string, effort: string | undefined) => {
-      reasoningEffort = effort;
-    },
+    setSessionEngine,
+    setSessionModel,
+    setReasoningEffort,
   } as any;
 
   const memoryClient = {
@@ -83,6 +91,7 @@ function buildHandler(opts: BuildOpts = {}) {
   // Config has engine defaults for all supported engines.
   const config = {
     name: 'test-bot',
+    ...(opts.botEngine ? { engine: opts.botEngine } : {}),
     claude: {
       model: opts.compatibilityProfile ? 'claude-opus-4-8' : 'claude-opus-4-6',
       ...(opts.compatibilityProfile ? { compatibilityProfile: OPUS_PROFILE } : {}),
@@ -120,6 +129,10 @@ function buildHandler(opts: BuildOpts = {}) {
     getSessionEngine: () => sessionEngine,
     getSessionModel: () => sessionModel,
     getReasoningEffort: () => reasoningEffort,
+    getSession,
+    setSessionEngine,
+    setSessionModel,
+    setReasoningEffort,
   };
 }
 
@@ -276,6 +289,27 @@ describe('CommandHandler /model', () => {
     expect(getSessionModel()).toBe('claude-opus-4-8');
     expect(notices[0].color).toBe('red');
     expect(notices[0].content).toMatch(/not allowed/);
+  });
+
+  it('rejects a typed disallowed model before creating or updating a session', async () => {
+    const {
+      handler,
+      getSession,
+      setSessionEngine,
+      setSessionModel,
+      setReasoningEffort,
+    } = buildHandler({
+      botEngine: 'claude',
+      compatibilityProfile: true,
+      sessionExists: false,
+    });
+
+    await handler.handle(msg('/model claude-fable-5'));
+
+    expect(getSession).not.toHaveBeenCalled();
+    expect(setSessionEngine).not.toHaveBeenCalled();
+    expect(setSessionModel).not.toHaveBeenCalled();
+    expect(setReasoningEffort).not.toHaveBeenCalled();
   });
 
   it('clears overrides on /model reset', async () => {

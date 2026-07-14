@@ -120,6 +120,11 @@ export class SessionManager {
     return session;
   }
 
+  /** Read an existing session without creating it or updating lastUsed. */
+  peekSession(chatId: string): UserSession | undefined {
+    return this.sessions.get(chatId);
+  }
+
   private evictOldest(): void {
     let oldestKey: string | undefined;
     let oldestTime = Infinity;

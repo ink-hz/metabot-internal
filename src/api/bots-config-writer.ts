@@ -127,21 +127,32 @@ export function updateBot(configPath: string, name: string, updates: Record<stri
     if (!bots) continue;
     const idx = bots.findIndex((b: any) => b.name === name);
     if (idx !== -1) {
-      // Merge updates into existing entry (name and platform credentials are immutable)
       const entry = bots[idx] as unknown as Record<string, unknown>;
-      for (const [key, value] of Object.entries(updates)) {
-        if (key === 'name' || key === 'platform') continue; // immutable
-        if (value === undefined || value === null || value === '') {
-          delete entry[key];
-        } else {
-          entry[key] = value;
-        }
-      }
+      const merged = mergeBotEntryUpdates(entry, updates);
+      for (const key of Object.keys(entry)) delete entry[key];
+      Object.assign(entry, merged);
       writeBotsConfig(configPath, config);
       return true;
     }
   }
   return false;
+}
+
+/** Apply the same update semantics used by persistence without mutating the source entry. */
+export function mergeBotEntryUpdates<T extends Record<string, unknown>>(
+  entry: T,
+  updates: Record<string, unknown>,
+): T {
+  const merged: Record<string, unknown> = { ...entry };
+  for (const [key, value] of Object.entries(updates)) {
+    if (key === 'name' || key === 'platform') continue; // immutable
+    if (value === undefined || value === null || value === '') {
+      delete merged[key];
+    } else {
+      merged[key] = value;
+    }
+  }
+  return merged as T;
 }
 
 /**

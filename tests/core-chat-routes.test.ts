@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   buildCoreChatCapabilities,
@@ -7,7 +10,11 @@ import {
   __resetCoreChatRunsForTests,
 } from '../src/api/routes/core-chat-routes.js';
 import type { RouteContext } from '../src/api/routes/types.js';
+import { MessageBridge } from '../src/bridge/message-bridge.js';
+import type { BotConfigBase } from '../src/config.js';
+import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import type { CardState } from '../src/types.js';
+import { NullSender } from '../src/web/null-sender.js';
 
 const logger = {
   debug: vi.fn(),
@@ -163,6 +170,64 @@ describe('handleCoreChatRoutes', () => {
     expect(events[2].payload.files[0].transfer).toMatchObject({ mode: 'bridge-private' });
     expect(events[2].payload.files[0].transfer.path).toBeUndefined();
     expect(events[3].payload.result).toMatchObject({ success: true, responseText: 'done' });
+  });
+
+  it('rejects a disallowed Core Chat Claude model before starting an executor', async () => {
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-core-chat-profile-'));
+    vi.stubEnv('SESSION_STORE_DIR', storeDir);
+    const config: BotConfigBase = {
+      name: 'core-chat-profile-test',
+      engine: 'claude',
+      claude: {
+        defaultWorkingDirectory: storeDir,
+        maxTurns: undefined,
+        maxBudgetUsd: undefined,
+        model: 'claude-opus-4-8',
+        apiKey: undefined,
+        outputsBaseDir: path.join(storeDir, 'outputs'),
+        downloadsDir: path.join(storeDir, 'downloads'),
+        backend: 'pty',
+        compatibilityProfile: OPUS_PROFILE,
+      },
+      persistentExecutor: { enabled: false },
+    };
+    const bridge = new MessageBridge(config, logger, new NullSender()) as any;
+    const startExecution = vi.fn(() => ({
+      stream: (async function* () {})(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    bridge.engineCache.set('claude', {
+      engine: { name: 'claude' },
+      executor: { startExecution },
+    });
+    const res = makeRes();
+
+    try {
+      await handleCoreChatRoutes(
+        makeCtx(bridge),
+        makeReq(runBody({ engine: 'claude', model: 'claude-fable-5' })),
+        res,
+        'POST',
+        '/api/core-chat/runs',
+      );
+
+      expect(res.statusCode).toBe(202);
+      await eventually(() => {
+        const eventTypes = vi.mocked(fetch).mock.calls.map((call) => JSON.parse(call[1]?.body as string).type);
+        expect(eventTypes).toContain('error');
+      });
+      expect(startExecution).not.toHaveBeenCalled();
+      const events = vi.mocked(fetch).mock.calls.map((call) => JSON.parse(call[1]?.body as string));
+      expect(events.at(-1)).toMatchObject({
+        type: 'error',
+        payload: { error: expect.stringMatching(/claude-fable-5.*not allowed/) },
+      });
+    } finally {
+      bridge.destroy();
+      fs.rmSync(storeDir, { recursive: true, force: true });
+    }
   });
 
   it('reports bridge voice and Doubao capabilities', async () => {
