@@ -4,7 +4,7 @@
 
 **Goal:** Route all MetaBot Claude traffic through a version-locked loopback adapter that restores image `Read` semantics for `claude-opus-4-8` without regressing normal requests, cache behavior, sessions, or PDFs.
 
-**Architecture:** One conservative profile owns an authenticated in-process HTTP adapter. MetaBot injects its loopback URL into both process env and generated Claude settings because a real two-listener probe proved settings win. The adapter returns original bytes for non-target requests and uses lossless JSON only for the exact broken nested-image shape.
+**Architecture:** One conservative profile owns an authenticated in-process HTTP adapter. MetaBot injects its loopback URL into both process env and generated Claude settings because a real two-listener probe proved settings win. The adapter returns original bytes for non-target requests, including Claude Code native web-tool declarations, and uses lossless JSON only for the exact broken nested-image shape.
 
 **Tech Stack:** TypeScript 5.9, Node.js HTTP/streams, `lossless-json@4.3.0`, Claude Code `2.1.207`, Vitest 3, PM2 on macOS.
 
@@ -20,6 +20,8 @@
 - Forward non-target bytes unchanged and ambiguous image shapes unchanged.
 - Preserve PDFs, unknown fields, lossless numbers, cache controls, SSE bytes/order, sessions, and hooks.
 - Keep the temporary image fallback until the real PTY image/cache gate passes.
+- Keep Claude Code native `WebSearch` and `WebFetch` exposed; do not inject a
+  replacement search MCP, external search API, or web-provider credential.
 - Preserve unrelated worktree changes and `.tools/`; stage only task files.
 
 ---
@@ -161,6 +163,8 @@ expect(profile).toMatchObject({
   allowedModels: ['claude-opus-4-8'],
   contextWindow: 200_000,
   promoteToolResultImages: true,
+  nativeWebTools: ['WebSearch', 'WebFetch'],
+  nativeToolFailureMode: 'recoverable-turn',
 });
 expect(() => assertAllowedClaudeModel(profile!, 'claude-fable-5')).toThrow();
 expect(() => assertAllowedClaudeModel(profile!, 'claude-opus-4-8[1m]')).toThrow();
@@ -184,6 +188,8 @@ export const OPUS_PROFILE = Object.freeze({
   allowedModels: ['claude-opus-4-8'] as const,
   contextWindow: 200_000 as const,
   promoteToolResultImages: true as const,
+  nativeWebTools: ['WebSearch', 'WebFetch'] as const,
+  nativeToolFailureMode: 'recoverable-turn' as const,
 });
 
 export function assertAllowedClaudeModel(profile: typeof OPUS_PROFILE, model?: string): void {
@@ -395,7 +401,7 @@ git commit -m "feat: add loopback Anthropic adapter"
 - Modify: `src/engines/claude/pty/pty-session.ts`
 
 **Interfaces:**
-- Produces: `ClaudeCompatibilityRuntime` with profile, child/settings env, future denied-tools/MCP seams, and `close()`.
+- Produces: `ClaudeCompatibilityRuntime` with profile, child/settings env, and `close()`.
 - Consumes: upstream URL/token, loaded bots, resolved CLI path.
 
 - [ ] **Step 1: Write failing launch tests**
@@ -424,8 +430,6 @@ export interface ClaudeCompatibilityRuntime {
   profile: ClaudeCompatibilityProfile;
   childEnv: NodeJS.ProcessEnv;
   settingsEnv: Record<string, string>;
-  deniedTools: string[];
-  mcpConfigPath?: string;
   close(): Promise<void>;
 }
 ```
@@ -438,20 +442,14 @@ Close after executor registries drain.
 - [ ] **Step 4: Thread runtime through all Claude owners**
 
 Pass runtime to `MessageBridge`, registry, persistent executor, and legacy
-executor. Extend PTY options with `env`, `settingsEnv`, `deniedTools`, and
-`mcpConfigPath`. PTY calls
+executor. Extend PTY options with `env` and `settingsEnv`. PTY calls
 `createHookBridge({ settingsEnv: options.settingsEnv })`; SDK sets both
 `env: runtime.childEnv` and
 `settings: { teammateMode: 'in-process', env: runtime.settingsEnv }`.
 
-Add generic PTY CLI seams:
-
-```ts
-if (opts.deniedTools?.length) args.push('--disallowedTools', ...opts.deniedTools);
-if (opts.mcpConfigPath) args.push('--mcp-config', opts.mcpConfigPath);
-```
-
-Core leaves both empty; the Web plan supplies them.
+Add negative assertions proving neither launch path adds `WebSearch` or
+`WebFetch` to a denied-tools list and neither path injects a web MCP config.
+Generic pre-existing Skill/MCP support remains untouched.
 
 - [ ] **Step 5: Run GREEN and commit**
 
@@ -497,9 +495,12 @@ signature, and response-text markers.
 - [ ] **Step 2: Implement capability probe**
 
 Probe metadata, text stream, ordinary tool use, direct image, nested image
-before/after promotion, direct/nested PDF, cache usage, and expected built-in
-web-search rejection. Write evidence atomically with mode `0600`. Add npm
-scripts `probe:opus-gateway` and `smoke:opus-image-session`.
+before/after promotion, direct/nested PDF, cache usage, native WebSearch, and
+native WebFetch. Classify WebSearch as `available`, `upstream_unsupported`,
+`transport_error`, or `unexpected_error`; classify WebFetch independently.
+The current Bedrock rejection is baseline evidence, not the desired permanent
+result. Write evidence atomically with mode `0600`. Add npm scripts
+`probe:opus-gateway` and `smoke:opus-image-session`.
 
 - [ ] **Step 3: Implement three-turn real PTY smoke**
 
