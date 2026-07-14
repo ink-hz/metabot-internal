@@ -64,7 +64,14 @@ describe('createHookBridge settings generation', () => {
     const root = temporaryRoot();
     const sourceSettingsPath = join(root, 'settings.json');
     writeFileSync(sourceSettingsPath, JSON.stringify({
-      env: { ANTHROPIC_AUTH_TOKEN: 'keep-user-token' },
+      theme: 'dark',
+      env: {
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:43122',
+        ANTHROPIC_AUTH_TOKEN: 'keep-user-token',
+      },
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'user-start-hook' }] }],
+      },
     }));
 
     const bridge = createHookBridge({
@@ -77,6 +84,10 @@ describe('createHookBridge settings generation', () => {
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
       ANTHROPIC_AUTH_TOKEN: 'keep-user-token',
     });
+    expect(generated.theme).toBe('dark');
+    expect(generated.hooks.SessionStart).toHaveLength(1);
+    expect(generated.hooks.SessionStart[0].hooks[0].command).toBe('user-start-hook');
+    expect(generated.hooks.Stop).toHaveLength(1);
 
     await bridge.dispose();
   });
