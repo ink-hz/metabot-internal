@@ -1,4 +1,7 @@
 const path = require('path');
+const { resolveClaudeExecutable } = require('./scripts/claude-executable.cjs');
+
+const claudeExecutable = resolveClaudeExecutable();
 
 module.exports = {
   apps: [
@@ -33,6 +36,7 @@ module.exports = {
       env: {
         NODE_ENV: 'production',
         CLAUDE_MAX_TURNS: '',  // unlimited turns (override any inherited shell env)
+        ...(claudeExecutable ? { CLAUDE_EXECUTABLE_PATH: claudeExecutable } : {}),
       },
     },
   ],
