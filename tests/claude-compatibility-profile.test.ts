@@ -87,9 +87,17 @@ describe('Claude compatibility profile', () => {
       promoteToolResultImages: true,
       nativeWebTools: ['WebSearch', 'WebFetch'],
       nativeToolFailureMode: 'recoverable-turn',
+      capabilities: [
+        { name: 'claude_code', state: 'required', reasonCode: 'P0_RUNTIME' },
+        { name: 'local_tools', state: 'required', reasonCode: 'P0_LOCAL_TOOLS' },
+        { name: 'document_output', state: 'required', reasonCode: 'P0_DOCUMENT_OUTPUT' },
+        { name: 'native_web_search', state: 'unsupported_expected', reasonCode: 'GATEWAY_TOOL_TYPE_UNSUPPORTED' },
+        { name: 'native_web_fetch', state: 'unsupported_expected', reasonCode: 'GATEWAY_TOOL_TYPE_UNSUPPORTED' },
+      ],
     });
     expect(Object.isFrozen(profile)).toBe(true);
     expect(Object.isFrozen(profile?.allowedModels)).toBe(true);
+    expect(Object.isFrozen(profile?.capabilities)).toBe(true);
   });
 
   it('leaves generic behavior unprofiled when the selector is unset', () => {

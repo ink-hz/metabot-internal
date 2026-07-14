@@ -1,3 +1,8 @@
+import type {
+  CapabilityDeclaration,
+  CapabilityState,
+} from '../engines/claude/compatibility/profile.js';
+
 export type WsConnectionState =
   | 'idle'
   | 'connecting'
@@ -18,7 +23,14 @@ export interface BotRuntimeSource {
   engine: string;
   model?: string;
   backend: string;
+  capabilities?: readonly CapabilityDeclaration[];
   connectionStatus?: () => WsConnectionSnapshot;
+}
+
+export interface RuntimeCapability {
+  name: string;
+  state: CapabilityState;
+  reasonCode: string;
 }
 
 export interface BotRuntimeStatus {
@@ -28,6 +40,7 @@ export interface BotRuntimeStatus {
   model?: string;
   backend: string;
   ws: WsConnectionSnapshot | null;
+  capabilities?: RuntimeCapability[];
 }
 
 export interface RuntimeStatus {
@@ -82,6 +95,15 @@ export function buildRuntimeStatus(input: {
       ...(source.model ? { model: source.model } : {}),
       backend: source.backend,
       ws: readConnectionStatus(source),
+      ...(source.capabilities
+        ? {
+          capabilities: source.capabilities.map(({ name, state, reasonCode }) => ({
+            name,
+            state,
+            reasonCode,
+          })),
+        }
+        : {}),
     })),
   };
 }

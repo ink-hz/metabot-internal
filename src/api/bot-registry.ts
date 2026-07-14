@@ -99,6 +99,9 @@ export class BotRegistry {
         ? { model: defaultModelForEngine(bot.config) }
         : {}),
       backend: bot.config.claude.backend,
+      ...(bot.config.claude.compatibilityProfile?.capabilities
+        ? { capabilities: bot.config.claude.compatibilityProfile.capabilities }
+        : {}),
       ...(bot.connectionStatus
         ? { connectionStatus: bot.connectionStatus }
         : {}),

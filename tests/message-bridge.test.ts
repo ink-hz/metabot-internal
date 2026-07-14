@@ -177,6 +177,31 @@ describe('MessageBridge synthetic probe receipts', () => {
   });
 });
 
+describe('MessageBridge public error delivery', () => {
+  it('keeps partial output while replacing internal failure details with a correlated error', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(makeConfig(), mockLogger, sender as any) as any;
+
+    try {
+      await bridge.sendFinalCard('om_final', {
+        status: 'error',
+        userPrompt: 'private prompt',
+        responseText: '已完成的部分结果',
+        toolCalls: [],
+        errorMessage: 'spawn /private/agentops/bin/claude ENOENT token=secret',
+      }, 'oc_test');
+
+      const delivered = sender.updated.at(-1)?.state;
+      expect(delivered?.responseText).toBe('已完成的部分结果');
+      expect(delivered?.errorMessage).toMatch(/Claude 运行环境暂未就绪/);
+      expect(delivered?.errorMessage).toMatch(/R-[0-9A-F]{10}/);
+      expect(delivered?.errorMessage).not.toMatch(/private|agentops|token|secret|ENOENT/iu);
+    } finally {
+      bridge.destroy();
+    }
+  });
+});
+
 function makeSender() {
   const sent: Array<{ chatId: string; state: CardState }> = [];
   const updated: Array<{ messageId: string; state: CardState }> = [];

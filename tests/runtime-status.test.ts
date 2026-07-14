@@ -5,6 +5,7 @@ import {
   resolveReleaseSha,
 } from '../src/reliability/runtime-status.js';
 import { BotRegistry } from '../src/api/bot-registry.js';
+import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 
 describe('buildRuntimeStatus', () => {
   it('returns sanitized per-bot connection, model, backend, and release facts', () => {
@@ -81,6 +82,29 @@ describe('buildRuntimeStatus', () => {
     expect(result.bots.map(({ backend }) => backend)).toEqual(['pty', 'sdk']);
     expect(result.bots.map(({ ws }) => ws)).toEqual([null, null]);
   });
+
+  it('exposes only versioned capability names, states, and reason codes', () => {
+    const result = buildRuntimeStatus({
+      releaseSha: 'abc123',
+      bots: [{
+        name: 'marketing-bot',
+        platform: 'feishu',
+        engine: 'claude',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+        capabilities: [
+          { name: 'local_tools', state: 'required', reasonCode: 'P0_LOCAL_TOOLS' },
+          { name: 'native_web_search', state: 'unsupported_expected', reasonCode: 'GATEWAY_TOOL_TYPE_UNSUPPORTED' },
+        ],
+      }],
+    });
+
+    expect(result.bots[0].capabilities).toEqual([
+      { name: 'local_tools', state: 'required', reasonCode: 'P0_LOCAL_TOOLS' },
+      { name: 'native_web_search', state: 'unsupported_expected', reasonCode: 'GATEWAY_TOOL_TYPE_UNSUPPORTED' },
+    ]);
+    expect(JSON.stringify(result)).not.toMatch(/url|raw|exception|token/iu);
+  });
 });
 
 describe('resolveReleaseSha', () => {
@@ -109,6 +133,7 @@ describe('BotRegistry runtime sources', () => {
           outputsBaseDir: '/tmp/outputs',
           downloadsDir: '/tmp/downloads',
           backend: 'pty',
+          compatibilityProfile: OPUS_PROFILE,
         },
       },
       bridge: {} as never,
@@ -124,6 +149,7 @@ describe('BotRegistry runtime sources', () => {
       engine: 'claude',
       model: 'claude-opus-4-8',
       backend: 'pty',
+      capabilities: OPUS_PROFILE.capabilities,
     });
     expect(sources[0].connectionStatus?.()).toEqual({
       state: 'connected',

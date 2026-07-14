@@ -57,6 +57,10 @@ import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
 import type { ProbeReceiptStore } from '../reliability/probe-receipt-store.js';
 import { ProbeObserver } from '../reliability/probe-observer.js';
 import type { ProbeStageReceipt } from '../reliability/probe-types.js';
+import {
+  classifyReliabilityError,
+  toPublicError,
+} from '../reliability/public-error.js';
 import type { FlywheelConversation, FlywheelSender } from '../flywheel/envelope.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
@@ -3037,15 +3041,31 @@ export class MessageBridge {
    * sends a plain text fallback so the user at least sees the result.
    */
   private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<boolean> {
+    const publicState = this.toPublicCardState(state);
     return sendFinalCardWithRetry({
       sender: this.sender,
       config: this.config,
       logger: this.logger,
       sessionManager: this.sessionManager,
       messageId,
-      state: this.enrichWithAgentTeams(state, chatId),
+      state: this.enrichWithAgentTeams(publicState, chatId),
       chatId,
     });
+  }
+
+  private toPublicCardState(state: CardState): CardState {
+    if (state.status !== 'error') return state;
+    const errorClass = classifyReliabilityError(state.errorMessage);
+    const incidentId = `R-${randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase()}`;
+    const publicError = toPublicError(errorClass, incidentId);
+    this.logger.error(
+      { incidentId, errorClass, publicCode: publicError.code },
+      'Delivering redacted public error',
+    );
+    return {
+      ...state,
+      errorMessage: `${publicError.message}\n错误码：${publicError.code} · 错误编号：${publicError.incidentId}`,
+    };
   }
 
   private recordProbeTerminal(
