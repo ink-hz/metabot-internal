@@ -23,6 +23,16 @@
 | `CLAUDE_MAX_BUDGET_USD` | 不限 | 每次请求费用上限（美元） |
 | `CLAUDE_MODEL` | SDK 默认 | Claude 模型 |
 | `CLAUDE_EXECUTABLE_PATH` | 自动检测 | `claude` 二进制路径 |
+| `METABOT_CLAUDE_COMPAT_PROFILE` | — | 启用经过实测的网关/Claude Code 兼容 profile；当前值为 `nexcor-opus-4-8-claude-code-2.1.207` |
+| `ANTHROPIC_BASE_URL` | Claude 默认 | Anthropic 兼容网关地址。兼容 profile 会先保存真实上游，再让 Claude 子进程通过私有 loopback adapter 访问 |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Claude settings | 网关凭据；也可以只保存在私有 `~/.claude/settings.json` 中，settings env 优先级更高 |
+
+Opus 兼容 profile 始终保留 Claude Code 原生 `WebSearch` 和 `WebFetch`，
+不会安装 Tavily、增加搜索 API Key、挂载搜索 MCP，也不会禁用原生工具。
+如果当前上游拒绝原生工具，但 Claude Code 已输出非空的顶层 `end_turn`
+回答，MetaBot 会正常发送该回答，不再替换成进程退出红色错误。运行
+`npm run probe:opus-native-web` 会把脱敏能力证据写入
+`~/.metabot/capabilities/`。
 
 ## Codex CLI
 
