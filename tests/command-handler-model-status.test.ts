@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { CommandHandler } from '../src/bridge/command-handler.js';
+import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import type { IncomingMessage } from '../src/types.js';
 
 interface RecordedNotice {
@@ -20,6 +21,7 @@ interface BuildOpts {
   hasRunningTask?: boolean;
   memoryError?: boolean;
   docSyncConfigured?: boolean;
+  compatibilityProfile?: boolean;
 }
 
 function buildHandler(opts: BuildOpts = {}) {
@@ -81,7 +83,10 @@ function buildHandler(opts: BuildOpts = {}) {
   // Config has engine defaults for all supported engines.
   const config = {
     name: 'test-bot',
-    claude: { model: 'claude-opus-4-6' },
+    claude: {
+      model: opts.compatibilityProfile ? 'claude-opus-4-8' : 'claude-opus-4-6',
+      ...(opts.compatibilityProfile ? { compatibilityProfile: OPUS_PROFILE } : {}),
+    },
     kimi: { model: 'kimi-for-coding' },
     codex: { model: 'gpt-5.5', displayModel: 'gpt-5.5' },
   } as any;
@@ -195,6 +200,15 @@ describe('CommandHandler /model', () => {
     expect(notices[0].content).toContain('claude-haiku-4-5');
   });
 
+  it('filters the Claude model picker to the compatibility profile allowlist', async () => {
+    const { handler, notices } = buildHandler({ engine: 'claude', compatibilityProfile: true });
+    await handler.handle(msg('/model list'));
+    expect(notices[0].content).toContain('claude-opus-4-8');
+    expect(notices[0].content).not.toContain('claude-fable-5');
+    expect(notices[0].content).not.toContain('claude-opus-4-8[1m]');
+    expect(notices[0].content).not.toContain('claude-sonnet-4-6');
+  });
+
   it('lists kimi models on /model list when engine is kimi', async () => {
     const { handler, notices } = buildHandler({ engine: 'kimi' });
     await handler.handle(msg('/model list'));
@@ -250,6 +264,18 @@ describe('CommandHandler /model', () => {
     expect(getSessionModel()).toBe('claude-opus-4-8');
     expect(notices[0].color).toBe('green');
     expect(notices[0].content).toContain('claude-opus-4-8');
+  });
+
+  it('rejects a typed disallowed Claude model without mutating the session', async () => {
+    const { handler, notices, getSessionModel } = buildHandler({
+      engine: 'claude',
+      sessionModel: 'claude-opus-4-8',
+      compatibilityProfile: true,
+    });
+    await handler.handle(msg('/model claude-fable-5'));
+    expect(getSessionModel()).toBe('claude-opus-4-8');
+    expect(notices[0].color).toBe('red');
+    expect(notices[0].content).toMatch(/not allowed/);
   });
 
   it('clears overrides on /model reset', async () => {

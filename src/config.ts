@@ -3,6 +3,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import {
+  assertAllowedClaudeModel,
+  loadClaudeCompatibilityProfile,
+  type ClaudeCompatibilityProfile,
+} from './engines/claude/compatibility/profile.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -85,6 +90,7 @@ export interface BotConfigBase {
     apiKey: string | undefined;
     outputsBaseDir: string;
     downloadsDir: string;
+    compatibilityProfile?: ClaudeCompatibilityProfile;
     /**
      * Which backend drives Claude Code turns:
      *   - 'pty' (default) — a real interactive `claude` TUI driven over a PTY,
@@ -596,6 +602,7 @@ export interface BotsJsonNewFormat {
 
 export function loadAppConfig(): AppConfig {
   const botsConfigPath = process.env.BOTS_CONFIG;
+  const claudeCompatibilityProfile = loadClaudeCompatibilityProfile();
 
   let feishuBots: BotConfig[] = [];
   let telegramBots: TelegramBotConfig[] = [];
@@ -653,6 +660,14 @@ export function loadAppConfig(): AppConfig {
     }
     if (feishuBots.length === 0 && telegramBots.length === 0 && wechatBots.length === 0) {
       throw new Error('No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.');
+    }
+  }
+
+  if (claudeCompatibilityProfile) {
+    const bots: BotConfigBase[] = [...feishuBots, ...telegramBots, ...webBots, ...wechatBots];
+    for (const bot of bots) {
+      bot.claude.compatibilityProfile = claudeCompatibilityProfile;
+      assertAllowedClaudeModel(claudeCompatibilityProfile, bot.claude.model);
     }
   }
 

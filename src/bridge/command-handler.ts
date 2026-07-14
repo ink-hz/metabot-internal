@@ -4,6 +4,7 @@ import type { IncomingMessage } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { resolveEngineName, SessionManager } from '../engines/index.js';
 import type { EngineName } from '../engines/index.js';
+import { assertAllowedClaudeModel } from '../engines/claude/compatibility/profile.js';
 import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
@@ -400,6 +401,10 @@ export class CommandHandler {
         { id: 'claude-sonnet-4-6[1m]', label: 'Sonnet 4.6 (1M)', note: '1M context window' },
         { id: 'claude-haiku-4-5', label: 'Haiku 4.5', note: 'Fastest · 200k context' },
       ];
+      const allowedClaudeModels = this.config.claude.compatibilityProfile?.allowedModels as readonly string[] | undefined;
+      const selectableClaudeModels = allowedClaudeModels
+        ? claudeModels.filter((model) => allowedClaudeModels.includes(model.id))
+        : claudeModels;
       const kimiModels = [
         { id: 'kimi-for-coding', label: 'Kimi for Coding', note: 'Subscription default · 256k context · thinking' },
         { id: 'kimi-k2', label: 'Kimi K2', note: 'Legacy coding model' },
@@ -409,7 +414,7 @@ export class CommandHandler {
         { id: 'gpt-5.5-codex', label: 'GPT 5.5 Codex', note: 'Codex coding model, when available in your Codex account' },
         { id: 'gpt-5.2-codex', label: 'GPT-5.2 Codex', note: 'Legacy Codex coding model' },
       ];
-      const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : claudeModels;
+      const models = activeEngine === 'kimi' ? kimiModels : activeEngine === 'codex' ? codexModels : selectableClaudeModels;
       const header = activeEngine === 'kimi'
         ? '**Available Kimi models:**'
         : activeEngine === 'codex'
@@ -429,7 +434,11 @@ export class CommandHandler {
       }
       lines.push('');
       if (activeEngine === 'claude') {
-        lines.push('_Tip: Fable 5 uses its native 1M context. For Opus/Sonnet, append `[1m]` to enable the 1M context window._');
+        if (this.config.claude.compatibilityProfile) {
+          lines.push(`_Locked by compatibility profile \`${this.config.claude.compatibilityProfile.id}\`._`);
+        } else {
+          lines.push('_Tip: Fable 5 uses its native 1M context. For Opus/Sonnet, append `[1m]` to enable the 1M context window._');
+        }
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
       } else {
@@ -457,6 +466,16 @@ export class CommandHandler {
 
     // Set the model (use only the first token, ignore trailing junk)
     const newModel = args.split(/\s+/)[0];
+    const compatibilityProfile = this.config.claude.compatibilityProfile;
+    if (activeEngine === 'claude' && compatibilityProfile) {
+      try {
+        assertAllowedClaudeModel(compatibilityProfile, newModel);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.sender.sendTextNotice(chatId, '❌ Model Not Allowed', message, 'red');
+        return;
+      }
+    }
     this.sessionManager.setSessionModel(chatId, newModel, activeEngine);
     await this.sender.sendTextNotice(
       chatId,
@@ -632,7 +651,9 @@ export class CommandHandler {
   private exampleModelsForEngine(engine: EngineName): string {
     switch (engine) {
       case 'claude':
-        return '`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
+        return this.config.claude.compatibilityProfile
+          ? this.config.claude.compatibilityProfile.allowedModels.map((model) => `\`${model}\``).join(', ')
+          : '`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
       case 'kimi':
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':
