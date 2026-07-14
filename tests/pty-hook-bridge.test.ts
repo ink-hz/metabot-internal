@@ -60,6 +60,27 @@ describe('createHookBridge settings generation', () => {
     await bridge.dispose();
   });
 
+  it('merges compatibility env after private user env', async () => {
+    const root = temporaryRoot();
+    const sourceSettingsPath = join(root, 'settings.json');
+    writeFileSync(sourceSettingsPath, JSON.stringify({
+      env: { ANTHROPIC_AUTH_TOKEN: 'keep-user-token' },
+    }));
+
+    const bridge = createHookBridge({
+      sourceSettingsPath,
+      settingsEnv: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123' },
+    });
+    const generated = JSON.parse(readFileSync(await bridge.writeSettings(), 'utf8'));
+
+    expect(generated.env).toEqual({
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
+      ANTHROPIC_AUTH_TOKEN: 'keep-user-token',
+    });
+
+    await bridge.dispose();
+  });
+
   it.each([
     ['missing', undefined],
     ['malformed', '{not-json'],
