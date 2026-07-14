@@ -5,8 +5,30 @@
 - Date: 2026-07-14
 - Scope: MetaBot Claude engine, the `agentops` runtime, and all six Feishu bots
 - Selected model: `claude-opus-4-8`
-- Selected approach: local request adapter plus MCP replacements for incompatible web tools
+- Selected approach: local request adapter for the exact broken image shape,
+  while preserving Claude Code's native tools as the primary capability path
+- Extension policy: Skills and MCP servers may add domain workflows or connect
+  external systems, but must not silently replace a Claude Code native tool
+- Web replacement policy: no Tavily, external search API, or search MCP is
+  introduced by this design
 - Explicitly prohibited: any request, fallback, probe, or model-selection path that can invoke Fable
+
+### 2026-07-14 native-capability decision
+
+The owner selected the following implementation rule after reproducing the
+failure directly in Claude Code:
+
+1. Claude Code native capabilities are the foundation and must be made to work
+   through the configured gateway rather than replaced when compatibility is
+   missing.
+2. Skills remain valid for domain knowledge and repeatable workflows.
+3. MCP remains valid for explicit connections to systems Claude Code does not
+   natively expose.
+4. Skills and MCP must not shadow a native capability merely to hide a gateway
+   defect.
+5. While the provider repair is pending, a recoverable native tool failure
+   must produce Claude Code's truthful final explanation instead of a red Bot
+   process error.
 
 ## Problem
 
@@ -27,6 +49,16 @@ but specific Claude Code tool paths either lose content or terminate the turn:
   `web_search_20250305` for this model.
 - built-in `WebFetch` depends on Claude Code's external domain-safety
   verification and fails even when the runtime can reach the target URL.
+
+A local Claude Code 2.1.207 reproduction on 2026-07-14 proved the web-search
+failure boundary. A plain `claude-opus-4-8` turn succeeded. The same CLI with
+only `WebSearch` exposed produced an upstream `aws_invoke_error`: Bedrock
+rejected server tool type `web_search_20250305` with HTTP 400. Claude Code then
+completed the turn normally and explained that live search was unavailable;
+the final process result was successful while `web_search_requests` remained
+zero. This means the model and Claude Code process work, the server tool did
+not run, and MetaBot must preserve Claude Code's recoverable final answer
+rather than convert it into a red process error.
 
 MetaBot currently contains an uncommitted emergency fallback in
 `src/bridge/message-bridge.ts` that strips images before model execution. It
@@ -52,8 +84,8 @@ are advisory only.
 | Image promoted beside its `tool_result` in the same user message | Pass; real screenshot read as `Metabot` | Target wire format |
 | PDF as top-level user content | Pass; verification code read correctly | Native path |
 | PDF nested inside `tool_result.content` | Pass; verification code read correctly | Native path; do not rewrite |
-| Built-in `WebSearch` | Fail; upstream rejects server tool type | Deny and replace with MCP |
-| Built-in `WebFetch` | Fail during domain-safety verification | Deny and replace with MCP |
+| Built-in `WebSearch` | Current gateway route fails; Bedrock rejects `web_search_20250305` | Keep native tool exposed; preserve Claude Code's recoverable final answer; re-probe after gateway fix |
+| Built-in `WebFetch` | Current domain-safety verification can fail | Keep native tool exposed; preserve its native result/error contract; diagnose separately from WebSearch |
 | 1M context | Declared by gateway but not proved by the current Claude Code route | Treat as 200K |
 | Claude Code MCP launch/config flags | Present in Claude Code 2.1.207 | Supported integration seam |
 | `ANTHROPIC_BASE_URL` in process env versus `--settings` env | `--settings` wins for both `HEAD /` and `POST /v1/messages?beta=true` | Override both layers |
@@ -71,12 +103,16 @@ The validated runtime versions are:
 2. Preserve Claude Code sessions, project instructions, tools, prompt caching,
    extended thinking, and the PTY backend.
 3. Restore image analysis through the existing `Read` workflow.
-4. Replace only the two incompatible built-in web tools.
+4. Preserve Claude Code's native `WebSearch` and `WebFetch` path without
+   substituting an external search provider.
 5. Convert unsupported-capability failures into controlled tool or turn errors,
    never an unexplained process exit.
-6. Keep gateway, Feishu, and web-provider credentials out of source control,
-   prompts, generated logs, and capability evidence.
+6. Keep gateway and Feishu credentials out of source control, prompts,
+   generated logs, and capability evidence.
 7. Survive MetaBot/PM2 and machine restarts without interactive password entry.
+8. Allow Skills and MCP servers to extend business workflows only where Claude
+   Code has no equivalent native capability or where an explicit external
+   system connection is required.
 
 ## Non-goals
 
@@ -85,7 +121,11 @@ The validated runtime versions are:
 - Automatically believing or enabling gateway-advertised capabilities.
 - Enabling the unverified 1M context route.
 - Adding OCR, image captioning, or a second model call before the main turn.
-- Supporting arbitrary web-search providers in the first release.
+- Adding Tavily, another search API, or a web-search MCP as a workaround for
+  the current gateway failure.
+- Disabling a native Claude Code tool merely because the current gateway build
+  does not yet support it.
+- Using capability probes as automatic runtime feature flags.
 - Changing the flywheel schema or reading flywheel data back into agents.
 
 ## Architecture
@@ -97,9 +137,9 @@ The implementation has four bounded components:
 2. **Loopback request adapter** — an in-process HTTP proxy owned by MetaBot. It
    rewrites only the proved-broken image shape and streams all responses
    without interpretation.
-3. **Claude launch policy** — injects the adapter URL, denies the incompatible
-   built-in web tools, mounts the approved MCP server, and enforces the model
-   allowlist in both PTY and SDK backends.
+3. **Claude launch and native-tool policy** — injects the adapter URL, preserves
+   Claude Code's native tools, and enforces the model allowlist in both PTY and
+   SDK backends. It does not inject a replacement web MCP.
 4. **Capability probe** — an explicit deployment/diagnostic command that
    records sanitized evidence. It never runs on every bot turn or every
    ordinary restart.
@@ -124,9 +164,19 @@ nexcor gateway -> Opus
 
 Claude web request
       |
-      +-- built-in WebSearch/WebFetch: denied before invocation
+      v
+Claude Code native WebSearch/WebFetch
       |
-      `-- Tavily MCP search/extract: allowed
+      v
+compatibility adapter: byte-for-byte pass-through
+      |
+      v
+configured gateway/upstream
+      |
+      +-- supported: native result returned normally
+      |
+      `-- unsupported: tool error returned to Claude Code; its final
+          explanatory answer is delivered instead of a red process error
 ```
 
 The adapter belongs inside the MetaBot process rather than a separate daemon.
@@ -144,14 +194,16 @@ interface ClaudeCompatibilityProfile {
   allowedModels: readonly ['claude-opus-4-8'];
   contextWindow: 200_000;
   promoteToolResultImages: true;
-  deniedBuiltInTools: readonly ['WebSearch', 'WebFetch'];
-  deniedMcpTools: readonly [
-    'mcp__tavily__tavily-map',
-    'mcp__tavily__tavily-crawl',
-  ];
-  webMcp: 'tavily';
+  nativeWebTools: readonly ['WebSearch', 'WebFetch'];
+  nativeToolFailureMode: 'recoverable-turn';
 }
 ```
+
+The profile must not add `WebSearch` or `WebFetch` to PTY
+`--disallowedTools`, SDK `disallowedTools`, or generated settings. It must not
+mount a search MCP. Existing generic Skill/MCP seams remain available for
+future explicit business integrations, but this compatibility profile does
+not populate them.
 
 The profile is selected explicitly with
 `METABOT_CLAUDE_COMPAT_PROFILE=nexcor-opus-4-8-claude-code-2.1.207`. There is
@@ -256,60 +308,57 @@ both envelopes to prove the 502 path retries and the 400 path does not. If an
 SSE stream fails after headers, the socket closes and the existing executor
 lifecycle handles the failed turn.
 
-## Web tools through MCP
+## Claude Code native web tools
 
-Claude Code starts with built-in `WebSearch` and `WebFetch` denied. This is
-enforced in both launch paths:
+`WebSearch` and `WebFetch` remain Claude Code-owned tools. MetaBot does not
+reimplement their schemas, translate them to another provider, add a search
+API key, or replace them with an MCP server. Both PTY and SDK launch paths must
+leave the tools exposed exactly as Claude Code provides them.
 
-- PTY: add `--disallowedTools WebSearch WebFetch`.
-- SDK: set `disallowedTools: ['WebSearch', 'WebFetch']`.
+The loopback adapter treats native web requests as non-target traffic. Unless
+the request also contains the exact nested-image shape defined above, request
+bytes, server-tool declarations, headers, response status, response bytes, and
+SSE order pass through unchanged. In particular, the adapter must not remove,
+rename, downgrade, or synthesize `web_search_20250305`.
 
-The replacement is the official Tavily MCP server, pinned to npm package
-`tavily-mcp@0.2.21`. MetaBot invokes the installed local binary directly; it
-does not execute `npx -y`, install `latest`, or download code at bot startup.
-The enabled tools are limited to Tavily search and extract for the first
-release. The MCP server is named `tavily`, so Claude Code exposes deterministic
-tool names. `mcp__tavily__tavily-map` and
-`mcp__tavily__tavily-crawl` are included in the same denied-tools launch
-policy as the two broken built-ins; map and crawl therefore cannot be invoked.
+The current gateway's Bedrock route cannot execute that server tool. This is an
+upstream capability defect, not a reason to change the agent architecture.
+The gateway owner is being asked either to support the native server tool on
+the selected route or route such requests to a compatible Anthropic backend.
+When that change lands, MetaBot must regain search without a code or bot-config
+change.
 
-`TAVILY_API_KEY` is supplied to the `agentops` runtime from Keychain/bootstrap
-configuration and written only into the generated private MCP configuration or
-child environment. It is never placed in `bots.json`, a project `CLAUDE.md`, or
-source control. Known unrelated secrets such as Anthropic and Feishu tokens are
-overridden to empty strings in the MCP subprocess environment.
+Until then, failure is fail-soft:
 
-Web-tool policy has three states:
+1. Claude Code invokes the native tool and receives the upstream tool/API
+   error.
+2. Claude Code may continue the same turn and explain that live access is
+   unavailable.
+3. If a non-empty final assistant answer exists, MetaBot sends it normally and
+   records the tool failure as diagnostic metadata; it does not render the
+   turn as a red process error.
+4. If the Claude process exits abnormally and produces no usable assistant
+   answer, the existing process-error behavior remains unchanged.
 
-- `required`: startup fails if the package or key is missing. This is the
-  production setting for Marketing Bot.
-- `optional`: Claude starts without the MCP server if unavailable, while the
-  incompatible built-ins remain denied. A clear startup warning is emitted,
-  and the appended system prompt explicitly says live web access is unavailable
-  and current facts must be qualified rather than guessed from model memory.
-- `disabled`: neither built-in nor MCP web tools are exposed.
+MetaBot does not retry a native server-tool POST, because the provider or
+Claude Code owns retry semantics and an adapter retry could duplicate cost or
+side effects. It also does not automatically disable a tool based on the
+capability probe; keeping the native path exposed makes a gateway repair take
+effect immediately and keeps production behavior aligned with local Claude
+Code reproduction.
 
-HR Bot is explicitly `disabled` because candidate and employee content must not
-have an available route to Tavily. Marketing Bot is `required` after its key is
-provided. `feishu-default`, Product Commercialization, Quality, and FAE default
-to `optional` until their scenarios require a stricter policy. A short appended
-system-prompt section maps user intent to `tavily-search` and
-`tavily-extract`; it never claims that the built-in web tools work.
-
-Tavily is an external service and may have usage charges. This design does not
-authorize account creation or spending. Production web-tool acceptance remains
-blocked until the owner supplies a key. The official server and authentication
-mechanism are documented at <https://github.com/tavily-ai/tavily-mcp>.
+Skills may teach Marketing, HR, or other bots when and how to use native web
+tools. MCP remains appropriate for systems Claude Code does not natively
+connect to, such as a private HR system or an internal document service. A
+Skill or MCP may not claim to be Claude Code's native WebSearch/WebFetch, and
+adding one requires its own explicit design and authorization.
 
 ## Claude launch integration
 
-`PtyQueryOptions` and `PtyClaudeSessionOptions` gain explicit child environment,
-denied-tool, and MCP-config inputs. `PtyClaudeSession` converts them to Claude
-Code CLI arguments. The SDK query path receives the equivalent SDK options.
-
-MetaBot generates one private MCP config for each Claude executor, next to the
-existing generated hook settings. The containing directory remains mode `0700`
-and files remain mode `0600`. The hook-settings merge behavior is preserved.
+`PtyQueryOptions` and `PtyClaudeSessionOptions` gain explicit child-environment
+and settings-environment inputs. The SDK query path receives the equivalent
+SDK options. No web-specific denied-tool or MCP configuration is injected.
+The existing hook-settings merge behavior is preserved.
 
 Both backends receive the same child environment:
 
@@ -339,7 +388,10 @@ production bot state. The command covers:
 5. nested tool-result image recognition, both before and after promotion.
 6. direct and nested PDF recognition using a deterministic generated PDF.
 7. prompt-cache usage fields.
-8. built-in server web-search rejection.
+8. native `WebSearch`, classified as `available`, `upstream_unsupported`,
+   `transport_error`, or `unexpected_error`;
+9. native `WebFetch`, classified separately so domain verification is not
+   confused with server-tool support.
 
 Probe output contains only status, latency, response block types, selected
 model, sanitized error category, and pass/fail assertions. It never writes
@@ -352,15 +404,26 @@ evidence, not an automatic feature toggle. A new gateway build, Claude Code
 version, or selected model requires a new probe before the compatibility
 profile can be relaxed.
 
+The 2026-07-14 baseline records native WebSearch as `upstream_unsupported`
+because the gateway returned `aws_invoke_error` / Bedrock HTTP 400 for
+`web_search_20250305`. The probe must not encode this failure as the desired
+permanent result. After the provider announces a repair, the same probe must
+change to `available` and report a positive native search request count.
+
 ## Error handling and user experience
 
 - A capability-specific error does not terminate MetaBot or unrelated bot
   sessions.
 - Adapter validation errors retain an Anthropic-compatible error envelope so
   Claude Code can surface a meaningful turn failure.
-- MCP startup errors name the missing server/key but never include its value.
-- Tavily request errors return a tool error to Opus; Opus can explain that live
-  web access is temporarily unavailable and continue using local knowledge.
+- A native web-tool error followed by a non-empty Claude final answer is a
+  completed turn. MetaBot sends that answer and does not replace it with
+  `claude process exited before the turn completed`.
+- A process exit with no usable assistant answer remains a real failed turn;
+  MetaBot must not fabricate a success message.
+- Native tool errors are recorded only as sanitized category, provider status,
+  and tool name. Provider messages, prompts, queries, and credentials are not
+  copied into ordinary logs.
 - The existing image-stripping fallback remains in place during development.
   It is removed only after the real Claude Code image acceptance test passes
   through the adapter. There must never be a deployment gap in which images can
@@ -378,14 +441,15 @@ The compatibility work does not grant agents access to `/Users/neo`.
 
 The adapter does not create a new public surface. Loopback binding and token
 validation prevent unauthenticated local callers from using it as an open
-gateway. Generated hook/MCP configs and capability evidence are private to
+gateway. Generated hook settings and capability evidence are private to
 `agentops`.
 
-Web search/extract sends the user's search query or requested public URL to
-Tavily. It does not send Feishu credentials, Anthropic credentials, arbitrary
-local files, or the full conversation by default. Bot instructions must not
-ask the web MCP to process HR-private attachments or other sensitive local
-content.
+Native WebSearch/WebFetch use Claude Code and the configured gateway/provider,
+so their normal provider data boundary still applies. Bot instructions must
+not put candidate files, employee records, credentials, or unrelated private
+conversation content into a public search query. HR-specific workflow and
+privacy guidance belongs in the HR Skill; it does not require replacing or
+globally disabling Claude Code's native tool.
 
 ## Testing
 
@@ -402,8 +466,11 @@ content.
   ambiguous image shapes pass through unchanged.
 - Fable and every non-allowlisted model are rejected at configuration and
   session `/model` boundaries.
-- PTY and SDK launch options both deny built-in web tools and receive the same
-  adapter/MCP configuration.
+- PTY and SDK launch options both leave `WebSearch` and `WebFetch` exposed,
+  receive the same adapter URL, and inject no replacement web MCP.
+- A native tool error followed by a successful Claude result with non-empty
+  assistant text is delivered as a normal answer.
+- A failed Claude result without usable assistant text remains a failed turn.
 - Log records contain metadata but no fixture prompt, base64, or token marker.
 
 ### Adapter integration tests
@@ -419,13 +486,19 @@ A local fake Anthropic upstream verifies:
 - real Claude Code retries the adapter's transient 502 envelope but does not
   retry the adapter's validation 400 envelope.
 
-### MCP tests
+### Native web-tool tests
 
-- Generated MCP config uses the pinned local Tavily binary.
-- `required`, `optional`, and `disabled` policies behave exactly as specified.
-- missing/invalid keys are reported without disclosure.
-- a mocked Tavily server proves search and extract tool availability.
-- no unrelated runtime secrets are present in the MCP-specific environment.
+- PTY argv contains no `--disallowedTools WebSearch WebFetch` entry.
+- SDK options do not deny `WebSearch` or `WebFetch`.
+- No Tavily dependency, key, generated config, prompt instruction, or MCP
+  server is introduced.
+- A deterministic fixture reproduces a `WebSearch` tool failure followed by a
+  successful final assistant explanation; the bridge sends the explanation
+  and does not emit a red process error.
+- A deterministic fixture with no final assistant content still emits the
+  existing process error.
+- Non-image requests containing native server-tool declarations pass through
+  the loopback adapter byte-for-byte.
 
 ### Live acceptance
 
@@ -440,10 +513,16 @@ sequence is:
    different fixtures; require correct recognition, no duplicate promoted
    images, and non-zero `cache_read_input_tokens` after promotion.
 5. Send the deterministic PDF; require the exact code `ORBBEC-7429`.
-6. With a configured Tavily key, require one search and one extract result.
-7. Restart MetaBot/PM2 without an interactive password and repeat the markers.
-8. Send one smoke message to each of the six Feishu bots.
-9. Confirm logs and flywheel records contain no credential, base64 attachment,
+6. Before the gateway repair, invoke native WebSearch and require a truthful
+   final explanation with no red MetaBot process error; evidence must classify
+   the tool as `upstream_unsupported` and report zero completed search calls.
+7. After the gateway owner reports a repair, repeat the identical command and
+   require a positive native web-search request count plus cited live results.
+8. Test native WebFetch independently against a known safe URL and the original
+   failing URL so domain verification is diagnosed separately.
+9. Restart MetaBot/PM2 without an interactive password and repeat the markers.
+10. Send one smoke message to each of the six Feishu bots.
+11. Confirm logs and flywheel records contain no credential, base64 attachment,
    thinking, or signature content.
 
 ## Deployment and rollback
@@ -467,8 +546,9 @@ long-lived staged rollout; the bots are not yet publicly used.
 
 Rollback restores the previous MetaBot runtime and private Claude settings,
 restarts PM2, and re-enables the image-stripping fallback. Rollback never
-selects Fable. If Tavily alone fails, built-in web tools stay denied and the
-remaining Opus capabilities continue operating.
+selects Fable. Native web-tool upstream failure is not a deployment rollback
+trigger when Claude Code completes the turn with a usable explanation; text,
+local tools, images, and PDFs must continue operating.
 
 ## Implementation decomposition
 
@@ -477,10 +557,13 @@ The design will be implemented as two independently reviewable plans:
 1. **Core gateway compatibility** — profile/model guard, loopback adapter,
    image promotion, Claude launch integration, probe command, tests, and
    removal of the temporary image fallback after live verification.
-2. **Web MCP replacement** — pinned Tavily MCP package, private generated
-   config, deny rules, required/optional/disabled policy, mocked/live tests,
-   and Keychain/bootstrap deployment instructions.
+2. **Native web-tool reliability** — byte-for-byte native tool pass-through,
+   recoverable final-answer handling, separate WebSearch/WebFetch capability
+   evidence, current-failure fixture, and post-provider-fix live acceptance.
 
-The core adapter is usable and testable without a Tavily account. Marketing
-Bot is not considered fully accepted until the Web MCP plan passes its live
-search/extract checks.
+Neither plan installs a web provider, creates a search credential, or mounts a
+replacement search MCP. Marketing Bot remains usable while the gateway repair
+is pending because a recoverable native tool failure must produce a normal,
+truthful answer instead of terminating the turn. Live-search acceptance is
+complete only after the unchanged native Claude Code probe succeeds against
+the repaired gateway.
