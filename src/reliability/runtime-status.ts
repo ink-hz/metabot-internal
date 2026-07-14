@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type {
   CapabilityDeclaration,
   CapabilityState,
@@ -23,6 +24,7 @@ export interface BotRuntimeSource {
   engine: string;
   model?: string;
   backend: string;
+  workdirFingerprint?: string;
   capabilities?: readonly CapabilityDeclaration[];
   connectionStatus?: () => WsConnectionSnapshot;
 }
@@ -39,6 +41,7 @@ export interface BotRuntimeStatus {
   engine: string;
   model?: string;
   backend: string;
+  workdirFingerprint?: string;
   ws: WsConnectionSnapshot | null;
   capabilities?: RuntimeCapability[];
 }
@@ -51,6 +54,10 @@ export interface RuntimeStatus {
 
 export function resolveReleaseSha(value: string | undefined): string {
   return value?.trim() || 'unknown';
+}
+
+export function fingerprintRuntimePath(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function readConnectionStatus(
@@ -94,6 +101,9 @@ export function buildRuntimeStatus(input: {
       engine: source.engine,
       ...(source.model ? { model: source.model } : {}),
       backend: source.backend,
+      ...(source.workdirFingerprint
+        ? { workdirFingerprint: source.workdirFingerprint }
+        : {}),
       ws: readConnectionStatus(source),
       ...(source.capabilities
         ? {

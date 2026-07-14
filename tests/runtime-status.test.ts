@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildRuntimeStatus,
+  fingerprintRuntimePath,
   resolveReleaseSha,
 } from '../src/reliability/runtime-status.js';
 import { BotRegistry } from '../src/api/bot-registry.js';
@@ -18,6 +19,7 @@ describe('buildRuntimeStatus', () => {
           engine: 'claude',
           model: 'claude-opus-4-8',
           backend: 'pty',
+          workdirFingerprint: fingerprintRuntimePath('/workspace/marketing'),
           connectionStatus: () => ({
             state: 'connected',
             reconnectAttempts: 0,
@@ -37,6 +39,7 @@ describe('buildRuntimeStatus', () => {
           engine: 'claude',
           model: 'claude-opus-4-8',
           backend: 'pty',
+          workdirFingerprint: fingerprintRuntimePath('/workspace/marketing'),
           ws: {
             state: 'connected',
             reconnectAttempts: 0,
@@ -149,6 +152,7 @@ describe('BotRegistry runtime sources', () => {
       engine: 'claude',
       model: 'claude-opus-4-8',
       backend: 'pty',
+      workdirFingerprint: fingerprintRuntimePath('/workspace/marketing'),
       capabilities: OPUS_PROFILE.capabilities,
     });
     expect(sources[0].connectionStatus?.()).toEqual({

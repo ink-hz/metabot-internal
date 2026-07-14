@@ -7,6 +7,7 @@ import type {
   BotRuntimeSource,
   WsConnectionSnapshot,
 } from '../reliability/runtime-status.js';
+import { fingerprintRuntimePath } from '../reliability/runtime-status.js';
 
 export interface RegisteredBot {
   name: string;
@@ -99,6 +100,7 @@ export class BotRegistry {
         ? { model: defaultModelForEngine(bot.config) }
         : {}),
       backend: bot.config.claude.backend,
+      workdirFingerprint: fingerprintRuntimePath(bot.config.claude.defaultWorkingDirectory),
       ...(bot.config.claude.compatibilityProfile?.capabilities
         ? { capabilities: bot.config.claude.compatibilityProfile.capabilities }
         : {}),
