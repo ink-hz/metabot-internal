@@ -111,6 +111,7 @@ done
 mkdir -p "$SERVER_STATIC_DIR"
 
 EXTRA_TAR_ARGS=()
+REPRODUCIBLE_TAR_ARGS=()
 TMP_EXTRA_DIR=""
 cleanup() {
   if [[ -n "$TMP_EXTRA_DIR" ]]; then
@@ -132,18 +133,27 @@ if [[ -n "$PACKAGE_DEFAULT_ENV_FILE" ]]; then
   echo "==> Embedding packaged default env from $PACKAGE_DEFAULT_ENV_FILE"
 fi
 
+# GNU tar supports deterministic archive metadata flags that BSD tar (the
+# macOS default) does not. Packaging must still work on both supported hosts.
+if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+  REPRODUCIBLE_TAR_ARGS=(
+    '--sort=name'
+    '--owner=0'
+    '--group=0'
+    '--numeric-owner'
+    '--mtime=UTC 2026-01-01'
+  )
+fi
+
 echo "==> Writing $SERVER_STATIC_DIR/$TARBALL_NAME (atomic)"
-# Sort+mtime flags produce a deterministic tarball — easier diffs across
-# builds and avoids spurious rsync churn on the deploy host. -C anchors all
-# include paths to the repo root.
-tar --sort=name \
-    --owner=0 --group=0 --numeric-owner \
-    --mtime='UTC 2026-01-01' \
+# GNU tar produces a deterministic tarball; BSD tar produces the same content
+# without deterministic metadata. -C anchors all include paths to the repo root.
+tar ${REPRODUCIBLE_TAR_ARGS[@]+"${REPRODUCIBLE_TAR_ARGS[@]}"} \
     "${TAR_EXCLUDES[@]}" \
     -czf "$SERVER_STATIC_DIR/$TARBALL_NAME.new" \
     -C "$REPO_ROOT" \
     "${PRESENT_INCLUDES[@]}" \
-    "${EXTRA_TAR_ARGS[@]}"
+    ${EXTRA_TAR_ARGS[@]+"${EXTRA_TAR_ARGS[@]}"}
 
 # Post-pack sanity: confirm SKILL_SENTINEL actually landed in the tarball.
 # Catches cases where an --exclude pattern accidentally swallowed it.

@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import type * as http from 'node:http';
-import { addBot, removeBot, updateBot, getBotEntry, addPeer, removePeer } from '../bots-config-writer.js';
+import { addBot, removeBot, updateBot, getBotEntry, addPeer, removePeer, mergeBotEntryUpdates } from '../bots-config-writer.js';
 import { installSkillsToWorkDir } from '../skills-installer.js';
 import { webBotFromJson } from '../../config.js';
 import { resolveEngineName } from '../../engines/index.js';
@@ -199,6 +199,14 @@ export async function handleBotRoutes(
       };
     }
 
+    let preflightConfig: import('../../config.js').BotConfigBase;
+    try {
+      preflightConfig = webBotFromJson(entry as any);
+    } catch (err: any) {
+      jsonResponse(res, 400, { error: err?.message || 'Bot configuration is not compatible' });
+      return true;
+    }
+
     try {
       const workDir = body.defaultWorkingDirectory as string;
       fs.mkdirSync(workDir, { recursive: true });
@@ -212,7 +220,7 @@ export async function handleBotRoutes(
 
       let activated = false;
       if (platform === 'web') {
-        const config = webBotFromJson(entry as any);
+        const config = preflightConfig;
         const sender = new NullSender();
         const bridge = new MessageBridge(config, logger, sender);
         registry.register({ name, platform: 'web', config, bridge, sender });
@@ -247,11 +255,23 @@ export async function handleBotRoutes(
       return true;
     }
     const body = await parseJsonBody(req);
-    const updated = updateBot(botsConfigPath, name, body);
-    if (!updated) {
+    const found = getBotEntry(botsConfigPath, name);
+    if (!found) {
       jsonResponse(res, 404, { error: `Bot not found: ${name}` });
       return true;
     }
+    try {
+      const merged = mergeBotEntryUpdates(
+        found.entry as unknown as Record<string, unknown>,
+        body,
+      );
+      webBotFromJson(merged as any);
+    } catch (err: any) {
+      jsonResponse(res, 400, { error: err?.message || 'Bot configuration is not compatible' });
+      return true;
+    }
+    const updated = updateBot(botsConfigPath, name, body);
+    if (!updated) throw new Error(`Bot disappeared during update: ${name}`);
     logger.info({ name, updates: Object.keys(body) }, 'Bot config updated');
     ws.handle?.broadcastBotList();
     jsonResponse(res, 200, { name, updated: true });

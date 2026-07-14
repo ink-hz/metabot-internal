@@ -22,6 +22,7 @@ import {
   SessionManager,
 } from '../engines/index.js';
 import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
+import { assertAllowedClaudeModel } from '../engines/claude/compatibility/profile.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
@@ -592,6 +593,7 @@ export class MessageBridge {
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
         backend: this.config.claude.backend,
+        compatibilityProfile: this.config.claude.compatibilityProfile,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
@@ -1342,6 +1344,10 @@ export class MessageBridge {
       flywheelContext?: FlywheelTurnContext;
     },
   ): Promise<ExecutionHandle> {
+    const compatibilityProfile = this.config.claude.compatibilityProfile;
+    if (engineName === 'claude' && compatibilityProfile) {
+      assertAllowedClaudeModel(compatibilityProfile, opts.model ?? this.config.claude.model);
+    }
     const session = this.sessionManager.getSession(chatId);
     if (this.flywheel && opts.flywheelContext && !opts.flywheelContext.runId) {
       opts.flywheelContext.runId = randomUUID();

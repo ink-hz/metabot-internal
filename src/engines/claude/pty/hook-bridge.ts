@@ -40,6 +40,8 @@ export interface HookBridgeOptions {
   teamEvents?: boolean;
   /** Source Claude settings to preserve in the generated PTY settings. */
   sourceSettingsPath?: string;
+  /** Compatibility environment merged after the source settings environment. */
+  settingsEnv?: Record<string, string>;
 }
 
 function readUserSettings(sourceSettingsPath: string): Record<string, unknown> {
@@ -121,7 +123,18 @@ export function createHookBridge(options?: HookBridgeOptions): PtyHookBridge {
       ]);
     }
 
-    const settings = { ...userSettings, hooks };
+    const sourceEnv = userSettings.env;
+    const env = {
+      ...(sourceEnv && typeof sourceEnv === 'object' && !Array.isArray(sourceEnv)
+        ? sourceEnv as Record<string, unknown>
+        : {}),
+      ...(options?.settingsEnv ?? {}),
+    };
+    const settings = {
+      ...userSettings,
+      ...(Object.keys(env).length ? { env } : {}),
+      hooks,
+    };
 
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2), {
       encoding: 'utf8',

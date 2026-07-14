@@ -90,6 +90,19 @@ describe('StreamProcessor', () => {
     expect(state.errorMessage).toBe('Something failed; Another error');
   });
 
+  it('delivers a recovered completed assistant explanation as a normal answer', () => {
+    const p = new StreamProcessor('search current news');
+    const state = p.processMessage(msg({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      result: 'Live search is currently unavailable.',
+    }));
+    expect(state.status).toBe('complete');
+    expect(state.responseText).toBe('Live search is currently unavailable.');
+    expect(state.errorMessage).toBeUndefined();
+  });
+
   it('detects AskUserQuestion and sets waiting_for_input', () => {
     const p = new StreamProcessor('hi');
     const state = p.processMessage(msg({

@@ -3,6 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
+import {
+  assertAllowedClaudeModel,
+  assertEnabledClaudeModel,
+  loadClaudeCompatibilityProfile,
+  type ClaudeCompatibilityProfile,
+} from './engines/claude/compatibility/profile.js';
 
 function loadEnvFiles(): void {
   const originalEnv = new Set(Object.keys(process.env));
@@ -85,6 +91,7 @@ export interface BotConfigBase {
     apiKey: string | undefined;
     outputsBaseDir: string;
     downloadsDir: string;
+    compatibilityProfile?: ClaudeCompatibilityProfile;
     /**
      * Which backend drives Claude Code turns:
      *   - 'pty' (default) — a real interactive `claude` TUI driven over a PTY,
@@ -215,6 +222,18 @@ export interface AppConfig {
   peers: PeerConfig[];
   /** Resident MetaBot Agent Teams reconciled into the bridge runtime. */
   agentTeams: AgentTeamConfig[];
+}
+
+export function finalizeClaudeCompatibilityProfile<T extends BotConfigBase>(
+  bot: T,
+  env: { METABOT_CLAUDE_COMPAT_PROFILE?: string } = process.env,
+): T {
+  assertEnabledClaudeModel(bot.claude.model);
+  const profile = loadClaudeCompatibilityProfile(env);
+  if (!profile) return bot;
+  bot.claude.compatibilityProfile = profile;
+  assertAllowedClaudeModel(profile, bot.claude.model);
+  return bot;
 }
 
 function required(name: string): string {
@@ -405,7 +424,7 @@ export interface WebBotJsonEntry extends EngineJsonFields {
 
 export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
   const codex = buildCodexConfig(entry.codex);
-  return {
+  return finalizeClaudeCompatibilityProfile({
     name: entry.name,
     ...(entry.description ? { description: entry.description } : {}),
     ...(entry.specialties?.length ? { specialties: entry.specialties } : {}),
@@ -420,7 +439,7 @@ export function webBotFromJson(entry: WebBotJsonEntry): BotConfigBase {
     ...(entry.kimi ? { kimi: entry.kimi } : {}),
     ...(codex ? { codex } : {}),
     claude: buildClaudeConfig(entry),
-  };
+  });
 }
 
 // --- WeChat JSON entry (used in bots.json) ---
@@ -463,6 +482,10 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
 
 // --- Shared Claude config builder ---
 
+function genericClaudeModelFallback(): string {
+  return 'claude-opus-4-8';
+}
+
 function buildClaudeConfig(entry: {
   defaultWorkingDirectory: string;
   maxTurns?: number;
@@ -479,7 +502,7 @@ function buildClaudeConfig(entry: {
     backend: entry.backend ?? (backendEnv === 'sdk' ? 'sdk' : 'pty'),
     maxTurns: entry.maxTurns ?? (process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined),
     maxBudgetUsd: entry.maxBudgetUsd ?? (process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined),
-    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || 'claude-fable-5',
+    model: entry.model || process.env.CLAUDE_MODEL || process.env.ANTHROPIC_MODEL || genericClaudeModelFallback(),
     apiKey: entry.apiKey || undefined,
     outputsBaseDir: entry.outputsBaseDir || process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
     downloadsDir: entry.downloadsDir || process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -524,7 +547,7 @@ function feishuBotFromEnv(): BotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      model: process.env.CLAUDE_MODEL || genericClaudeModelFallback(),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -546,7 +569,7 @@ function telegramBotFromEnv(): TelegramBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      model: process.env.CLAUDE_MODEL || genericClaudeModelFallback(),
       apiKey: undefined,
       outputsBaseDir: process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`),
       downloadsDir: process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`),
@@ -568,7 +591,7 @@ function wechatBotFromEnv(): WechatBotConfig {
       defaultWorkingDirectory: expandUserPath(required('CLAUDE_DEFAULT_WORKING_DIRECTORY')),
       maxTurns: process.env.CLAUDE_MAX_TURNS ? parseInt(process.env.CLAUDE_MAX_TURNS, 10) : undefined,
       maxBudgetUsd: process.env.CLAUDE_MAX_BUDGET_USD ? parseFloat(process.env.CLAUDE_MAX_BUDGET_USD) : undefined,
-      model: process.env.CLAUDE_MODEL || 'claude-fable-5',
+      model: process.env.CLAUDE_MODEL || genericClaudeModelFallback(),
       apiKey: undefined,
       outputsBaseDir: expandUserPath(process.env.OUTPUTS_BASE_DIR || path.join(os.tmpdir(), `metabot-outputs-${os.userInfo().username}`)),
       downloadsDir: expandUserPath(process.env.DOWNLOADS_DIR || path.join(os.tmpdir(), `metabot-downloads-${os.userInfo().username}`)),
@@ -654,6 +677,11 @@ export function loadAppConfig(): AppConfig {
     if (feishuBots.length === 0 && telegramBots.length === 0 && wechatBots.length === 0) {
       throw new Error('No bot configured. Set FEISHU_APP_ID/FEISHU_APP_SECRET, TELEGRAM_BOT_TOKEN, or WECHAT_ILINK_ENABLED=true, or use BOTS_CONFIG for multi-bot mode.');
     }
+  }
+
+  const bots: BotConfigBase[] = [...feishuBots, ...telegramBots, ...webBots, ...wechatBots];
+  for (const bot of bots) {
+    finalizeClaudeCompatibilityProfile(bot);
   }
 
   const apiPort = process.env.API_PORT ? parseInt(process.env.API_PORT, 10) : 9100;

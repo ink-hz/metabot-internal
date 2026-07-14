@@ -24,6 +24,17 @@ All configuration is via `.env` file or system environment variables. Copy `.env
 | `CLAUDE_MAX_BUDGET_USD` | unlimited | Max cost per request (USD) |
 | `CLAUDE_MODEL` | SDK default | Claude model to use |
 | `CLAUDE_EXECUTABLE_PATH` | auto-detect | Path to `claude` binary |
+| `METABOT_CLAUDE_COMPAT_PROFILE` | — | Enable an explicitly probed gateway/Claude Code profile. Current profile: `nexcor-opus-4-8-claude-code-2.1.207` |
+| `ANTHROPIC_BASE_URL` | Claude default | Upstream Anthropic-compatible gateway. The compatibility profile captures it before routing children through the private loopback adapter |
+| `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` | Claude settings | Gateway credential. May also be stored in private `~/.claude/settings.json`; settings env has precedence |
+
+The Opus compatibility profile keeps Claude Code native `WebSearch` and
+`WebFetch` exposed. It does not install Tavily, add a search API key, mount a
+search MCP, or deny the native tools. If the current upstream rejects a native
+tool but Claude Code completes the turn with a non-empty `end_turn` answer,
+MetaBot sends that answer normally instead of replacing it with a process-exit
+error. Run `npm run probe:opus-native-web` to write sanitized capability
+evidence under `~/.metabot/capabilities/`.
 
 ## Codex CLI
 

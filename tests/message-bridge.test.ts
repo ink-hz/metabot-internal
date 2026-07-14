@@ -1,3 +1,6 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MessageBridge,
@@ -9,12 +12,14 @@ import {
 } from '../src/bridge/message-bridge.js';
 import { CodexCommandController } from '../src/bridge/codex-command-controller.js';
 import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS } from '../src/engines/index.js';
+import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 const mockLogger = {
@@ -49,6 +54,62 @@ function makeCodexConfig(): BotConfigBase {
     },
   } as BotConfigBase;
 }
+
+function makeProfileConfig(rootDir: string): BotConfigBase {
+  return {
+    ...makeConfig(),
+    name: 'profile-test-bot',
+    persistentExecutor: { enabled: false },
+    claude: {
+      ...makeConfig().claude,
+      defaultWorkingDirectory: rootDir,
+      outputsBaseDir: path.join(rootDir, 'outputs'),
+      downloadsDir: path.join(rootDir, 'downloads'),
+      model: 'claude-opus-4-8',
+      compatibilityProfile: OPUS_PROFILE,
+    },
+  };
+}
+
+describe('MessageBridge Claude compatibility execution guard', () => {
+  it('rejects a disallowed model restored from the persistent session store', async () => {
+    const storeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-restored-profile-'));
+    vi.stubEnv('SESSION_STORE_DIR', storeDir);
+    fs.writeFileSync(path.join(storeDir, 'sessions-profile-test-bot.json'), JSON.stringify({
+      'restored-chat': {
+        sessionId: 'restored-session-id',
+        sessionIdEngine: 'claude',
+        workingDirectory: storeDir,
+        lastUsed: Date.now(),
+        model: 'claude-fable-5',
+        modelEngine: 'claude',
+      },
+    }));
+    const bridge = new MessageBridge(makeProfileConfig(storeDir), mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn(() => ({
+      stream: (async function* () {})(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    bridge.engineCache.set('claude', {
+      engine: { name: 'claude' },
+      executor: { startExecution },
+    });
+
+    try {
+      await expect(bridge.executeApiTask({
+        prompt: 'continue restored session',
+        chatId: 'restored-chat',
+        engine: 'claude',
+      })).rejects.toThrow(/claude-fable-5.*not allowed/);
+      expect(startExecution).not.toHaveBeenCalled();
+    } finally {
+      bridge.destroy();
+      fs.rmSync(storeDir, { recursive: true, force: true });
+    }
+  });
+});
 
 function makeSender() {
   const sent: Array<{ chatId: string; state: CardState }> = [];

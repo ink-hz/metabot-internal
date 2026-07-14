@@ -47,7 +47,7 @@ function buildHandler() {
     {
       name: 'test-bot',
       engine: 'claude',
-      claude: { model: 'claude-fable-5' },
+      claude: { model: 'claude-opus-4-8' },
     } as any,
     { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} } as any,
     sender as any,
@@ -116,12 +116,12 @@ describe('CommandHandler /help', () => {
     expect(handled).toBe(false);
   });
 
-  it('lists Fable 5 as the default Claude model option', async () => {
+  it('lists Opus 4.8 and does not expose disabled Fable models', async () => {
     const { handler, notices } = buildHandler();
     await handler.handle({ ...helpMessage(), text: '/model list' });
     const body = notices[0].content;
-    expect(body).toContain('claude-fable-5');
-    expect(body).toContain('Fable 5');
-    expect(body).toContain('native 1M context');
+    expect(body).toContain('claude-opus-4-8');
+    expect(body).not.toContain('claude-fable-5');
+    expect(body).not.toContain('Fable 5');
   });
 });

@@ -103,6 +103,8 @@ export interface PtyQueryOptions {
    * interactive default (NOT 'sdk-cli') so billing lands on the subscription.
    */
   env?: NodeJS.ProcessEnv;
+  /** Compatibility env merged last into generated Claude settings. */
+  settingsEnv?: Record<string, string>;
   /** Path to the claude executable (defaults to resolveClaudePath()). */
   pathToClaudeExecutable?: string;
   /** PTY geometry. Defaults: 120x40. */
@@ -302,7 +304,7 @@ export interface SynthesizeResultArgs {
   resultText?: string;
   isError?: boolean;
   numTurns?: number;
-  /** Real model name (from the assistant jsonl records), e.g. claude-fable-5. */
+  /** Real model name (from the assistant jsonl records), e.g. claude-opus-4-8. */
   model?: string;
   usage?: {
     inputTokens?: number;

@@ -17,7 +17,7 @@ export interface UserSession {
   cumulativeCostUsd: number;
   /** Cumulative duration (ms) across all queries in this session */
   cumulativeDurationMs: number;
-  /** Per-session model override (e.g. "claude-fable-5"). Falls back to bot default when undefined. */
+  /** Per-session model override (e.g. "claude-opus-4-8"). Falls back to bot default when undefined. */
   model?: string;
   /** Engine that owns model. Model names are engine-specific. */
   modelEngine?: EngineName;
@@ -118,6 +118,11 @@ export class SessionManager {
       this.saveToDisk();
     }
     return session;
+  }
+
+  /** Read an existing session without creating it or updating lastUsed. */
+  peekSession(chatId: string): UserSession | undefined {
+    return this.sessions.get(chatId);
   }
 
   private evictOldest(): void {
