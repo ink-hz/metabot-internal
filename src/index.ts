@@ -32,6 +32,7 @@ import {
   loadSyntheticAllowlist,
   type SyntheticAllowlist,
 } from './reliability/synthetic-context.js';
+import { ProbeReceiptStore } from './reliability/probe-receipt-store.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -84,6 +85,7 @@ async function startFeishuBot(
   localAgent?: https.Agent,
   flywheel?: FlywheelRecorder,
   syntheticAllowlist?: SyntheticAllowlist,
+  probeReceiptStore?: ProbeReceiptStore,
 ): Promise<FeishuBotHandle> {
   const botLogger = logger.child({ bot: botConfig.name });
 
@@ -113,7 +115,7 @@ async function startFeishuBot(
   // Create sender and bridge (FeishuSenderAdapter wraps the Feishu-specific MessageSender)
   const rawSender = new MessageSender(client, botLogger);
   const sender = new FeishuSenderAdapter(rawSender);
-  const bridge = new MessageBridge(botConfig, botLogger, sender, flywheel);
+  const bridge = new MessageBridge(botConfig, botLogger, sender, flywheel, probeReceiptStore);
 
   // Create event dispatcher wired to the bridge
   const dispatcher = createEventDispatcher(
@@ -133,6 +135,7 @@ async function startFeishuBot(
     },
     flywheel,
     syntheticAllowlist,
+    probeReceiptStore,
   );
 
   // Create WebSocket client
@@ -239,6 +242,7 @@ async function main() {
     })
     : undefined;
   const syntheticAllowlist = loadSyntheticAllowlist();
+  const probeReceiptStore = new ProbeReceiptStore();
 
   // Read (and clear) the restart breadcrumb left by `metabot restart/update`,
   // so the first turn in each chat after a restart can be reminded not to
@@ -262,7 +266,14 @@ async function main() {
   const feishuHandles = feishuCount > 0
     ? await startBotsSafely(
       appConfig.feishuBots,
-      (bot) => startFeishuBot(bot, logger, feishuLocalAgent, flywheel, syntheticAllowlist),
+      (bot) => startFeishuBot(
+        bot,
+        logger,
+        feishuLocalAgent,
+        flywheel,
+        syntheticAllowlist,
+        probeReceiptStore,
+      ),
       logger,
       'feishu',
     )
@@ -427,6 +438,7 @@ async function main() {
     peerManager,
     sessionRegistry,
     agentTeams: appConfig.agentTeams,
+    probeReceiptStore,
   });
 
   // Graceful shutdown

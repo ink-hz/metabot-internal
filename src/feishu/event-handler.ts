@@ -4,6 +4,7 @@ import type { Logger } from '../utils/logger.js';
 import { MessageSender } from './message-sender.js';
 import { randomUUID } from 'node:crypto';
 import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
+import type { ProbeReceiptStore } from '../reliability/probe-receipt-store.js';
 import {
   classifySyntheticProbe,
   stripSyntheticControlMarker,
@@ -89,6 +90,7 @@ export function createEventDispatcher(
   onCardAction?: CardActionHandler,
   flywheel?: FlywheelRecorder,
   syntheticAllowlist: SyntheticAllowlist = { unionIds: new Set(), chatIds: new Set() },
+  probeReceiptStore?: ProbeReceiptStore,
 ): lark.EventDispatcher {
   const dispatcher = new lark.EventDispatcher({});
 
@@ -310,6 +312,18 @@ export function createEventDispatcher(
           fileName,
         }, syntheticAllowlist);
         if (syntheticProbe) text = stripSyntheticControlMarker(text);
+        if (syntheticProbe && probeReceiptStore) {
+          try {
+            probeReceiptStore.record(syntheticProbe, {
+              stage: 'feishu_received',
+              at: new Date().toISOString(),
+              botName: config.name,
+              messageId,
+            });
+          } catch {
+            // Reliability observation must never control message delivery.
+          }
+        }
         const normalized: IncomingMessage = {
           messageId, chatId, chatType, userId, text, imageKey, fileKey, fileName,
           mimeType, sizeBytes, extraMedia,

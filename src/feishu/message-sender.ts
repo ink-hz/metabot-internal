@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
+import type { DeliveryReceipt } from '../reliability/probe-types.js';
 
 export class MessageSender {
   constructor(
@@ -103,8 +104,12 @@ export class MessageSender {
   }
 
   async sendImage(chatId: string, imageKey: string): Promise<boolean> {
+    return (await this.sendImageWithReceipt(chatId, imageKey)).ok;
+  }
+
+  async sendImageWithReceipt(chatId: string, imageKey: string): Promise<DeliveryReceipt> {
     try {
-      await this.client.im.v1.message.create({
+      const resp = await this.client.im.v1.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
@@ -112,17 +117,24 @@ export class MessageSender {
           msg_type: 'image',
         },
       });
-      return true;
+      const messageId = resp?.data?.message_id;
+      return messageId
+        ? { ok: true, kind: 'image', messageId, fileKey: imageKey }
+        : { ok: false, kind: 'image', fileKey: imageKey };
     } catch (err) {
       this.logger.error({ err, chatId, imageKey }, 'Failed to send image');
-      return false;
+      return { ok: false, kind: 'image', fileKey: imageKey };
     }
   }
 
   async sendImageFile(chatId: string, filePath: string): Promise<boolean> {
+    return (await this.sendImageFileWithReceipt(chatId, filePath)).ok;
+  }
+
+  async sendImageFileWithReceipt(chatId: string, filePath: string): Promise<DeliveryReceipt> {
     const imageKey = await this.uploadImage(filePath);
-    if (!imageKey) return false;
-    return this.sendImage(chatId, imageKey);
+    if (!imageKey) return { ok: false, kind: 'image' };
+    return this.sendImageWithReceipt(chatId, imageKey);
   }
 
   async uploadFile(filePath: string, fileName: string, fileType: string): Promise<string | undefined> {
@@ -146,8 +158,16 @@ export class MessageSender {
   }
 
   async sendFile(chatId: string, fileKey: string): Promise<boolean> {
+    return (await this.sendFileWithReceipt(chatId, fileKey)).ok;
+  }
+
+  async sendFileWithReceipt(
+    chatId: string,
+    fileKey: string,
+    fileName?: string,
+  ): Promise<DeliveryReceipt> {
     try {
-      await this.client.im.v1.message.create({
+      const resp = await this.client.im.v1.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
           receive_id: chatId,
@@ -155,17 +175,29 @@ export class MessageSender {
           msg_type: 'file',
         },
       });
-      return true;
+      const messageId = resp?.data?.message_id;
+      return messageId
+        ? { ok: true, kind: 'file', messageId, fileKey, ...(fileName ? { fileName } : {}) }
+        : { ok: false, kind: 'file', fileKey, ...(fileName ? { fileName } : {}) };
     } catch (err) {
       this.logger.error({ err, chatId, fileKey }, 'Failed to send file');
-      return false;
+      return { ok: false, kind: 'file', fileKey, ...(fileName ? { fileName } : {}) };
     }
   }
 
   async sendLocalFile(chatId: string, filePath: string, fileName: string, fileType: string): Promise<boolean> {
+    return (await this.sendLocalFileWithReceipt(chatId, filePath, fileName, fileType)).ok;
+  }
+
+  async sendLocalFileWithReceipt(
+    chatId: string,
+    filePath: string,
+    fileName: string,
+    fileType: string,
+  ): Promise<DeliveryReceipt> {
     const fileKey = await this.uploadFile(filePath, fileName, fileType);
-    if (!fileKey) return false;
-    return this.sendFile(chatId, fileKey);
+    if (!fileKey) return { ok: false, kind: 'file', fileName };
+    return this.sendFileWithReceipt(chatId, fileKey, fileName);
   }
 
   async sendAudio(chatId: string, fileKey: string): Promise<boolean> {

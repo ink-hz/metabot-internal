@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -153,5 +153,31 @@ describe('OutputHandler.sendOutputFiles', () => {
     await new OutputHandler(mockLogger, sender, outputs).sendOutputFiles('chat-1', chatDir, mockProcessor, emptyState());
     expect(notices[0].content).toMatch(/1\*\* file because it exceeds/);
     expect(notices[0].content).not.toMatch(/files because they/);
+  });
+
+  it('uses the receipt path for synthetic output and forwards actual identifiers', async () => {
+    fs.writeFileSync(path.join(chatDir, 'report.pdf'), Buffer.alloc(1024));
+    const { sender, sends } = buildSender();
+    sender.sendLocalFileWithReceipt = vi.fn().mockResolvedValue({
+      ok: true,
+      kind: 'file',
+      messageId: 'om_out',
+      fileKey: 'file_key_out',
+      fileName: 'report.pdf',
+    });
+    const onReceipt = vi.fn();
+
+    await new OutputHandler(mockLogger, sender, outputs).sendOutputFiles(
+      'chat-1', chatDir, mockProcessor, emptyState(), onReceipt,
+    );
+
+    expect(sends).toEqual([]);
+    expect(onReceipt).toHaveBeenCalledWith({
+      ok: true,
+      kind: 'file',
+      messageId: 'om_out',
+      fileKey: 'file_key_out',
+      fileName: 'report.pdf',
+    });
   });
 });

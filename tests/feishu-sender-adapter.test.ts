@@ -116,4 +116,17 @@ describe('FeishuSenderAdapter.sendQuestionCard / updateQuestionCard', () => {
     await expect(adapter.sendAudioFile('oc_test', '/tmp/reply.opus')).resolves.toBe(true);
     expect(fakeSender.sendAudioFile).toHaveBeenCalledWith('oc_test', '/tmp/reply.opus', 'reply.opus');
   });
+
+  it('sendLocalFileWithReceipt resolves the Feishu file type and preserves identifiers', async () => {
+    const { adapter, fakeSender } = makeAdapter();
+    fakeSender.sendLocalFileWithReceipt = vi.fn().mockResolvedValue({
+      ok: true, kind: 'file', messageId: 'om_file', fileKey: 'fk_file', fileName: 'report.pdf',
+    });
+    await expect(adapter.sendLocalFileWithReceipt?.(
+      'oc_test', '/tmp/report.pdf', 'report.pdf',
+    )).resolves.toMatchObject({ messageId: 'om_file', fileKey: 'fk_file' });
+    expect(fakeSender.sendLocalFileWithReceipt).toHaveBeenCalledWith(
+      'oc_test', '/tmp/report.pdf', 'report.pdf', 'pdf',
+    );
+  });
 });

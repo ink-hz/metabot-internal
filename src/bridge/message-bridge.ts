@@ -54,6 +54,9 @@ import { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontane
 import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
+import type { ProbeReceiptStore } from '../reliability/probe-receipt-store.js';
+import { ProbeObserver } from '../reliability/probe-observer.js';
+import type { ProbeStageReceipt } from '../reliability/probe-types.js';
 import type { FlywheelConversation, FlywheelSender } from '../flywheel/envelope.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
@@ -273,13 +276,18 @@ export class MessageBridge {
    * {@link destroy}. Unref'd so it never keeps the process alive on its own.
    */
   private chatIdCleanupTimer?: ReturnType<typeof setInterval>;
+  private readonly probeObserver?: ProbeObserver;
 
   constructor(
     private config: BotConfigBase,
     private logger: Logger,
     private sender: IMessageSender,
     private flywheel?: FlywheelRecorder,
+    probeReceiptStore?: ProbeReceiptStore,
   ) {
+    this.probeObserver = probeReceiptStore
+      ? new ProbeObserver(probeReceiptStore, config.name)
+      : undefined;
     this.engine = createEngine(config, logger);
     this.executor = this.engine.createExecutor();
     const defaultEngineName = resolveEngineName(config);
@@ -1921,6 +1929,7 @@ export class MessageBridge {
 
   private async executeQuery(msg: IncomingMessage): Promise<void> {
     const { userId, chatId, text, imageKey, fileKey, fileName, messageId: msgId } = msg;
+    const probe = msg.syntheticProbe;
     const { session, engineName } = this.prepareSessionForExecution(chatId);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
@@ -2002,9 +2011,23 @@ export class MessageBridge {
       ? `🖼️ [${mediaCount} files] ${text}`
       : fileKey ? '📎 ' + text : imageKey ? '🖼️ ' + text : text;
     const processor = new StreamProcessor(displayPrompt,
-      this.flywheel && flywheelContext ? {
-        recordToolCall: (payload) => this.flywheel?.recordToolCall(this.flywheelInput(flywheelContext, payload)),
-        recordEvidence: (payload) => this.flywheel?.recordEvidence(this.flywheelInput(flywheelContext, payload)),
+      (this.flywheel && flywheelContext) || probe ? {
+        recordToolCall: (payload) => {
+          if (this.flywheel && flywheelContext) {
+            this.flywheel.recordToolCall(this.flywheelInput(flywheelContext, payload));
+          }
+          if (payload.status === 'completed') {
+            this.probeObserver?.stage(probe, {
+              stage: 'tool_completed',
+              at: new Date().toISOString(),
+            });
+          }
+        },
+        recordEvidence: (payload) => {
+          if (this.flywheel && flywheelContext) {
+            this.flywheel.recordEvidence(this.flywheelInput(flywheelContext, payload));
+          }
+        },
       } : undefined);
     // Capture mirrored goal once at task start. New /goal messages can't
     // arrive mid-task (handleMessage rejects them with "Task In Progress"),
@@ -2022,6 +2045,11 @@ export class MessageBridge {
 
     if (!messageId) {
       this.logger.error('Failed to send initial card, aborting');
+      this.probeObserver?.stage(probe, {
+        stage: 'failed',
+        at: new Date().toISOString(),
+        errorClass: 'feishu_deliver',
+      });
       return;
     }
 
@@ -2080,16 +2108,32 @@ export class MessageBridge {
     // All turn-starting paths (initial + retry) route through runOneTurn so
     // persistent mode is enforced consistently and stale-session retries
     // properly release the bound executor before reacquiring.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext,
-      model: session.model,
-      onTeamEvent,
-      flywheelContext,
+    this.probeObserver?.stage(probe, {
+      stage: 'run_started',
+      at: new Date().toISOString(),
+      model: session.model ?? this.config.claude.model,
+      backend: engineName === 'claude' ? this.config.claude.backend : engineName,
     });
+    let executionHandle: ExecutionHandle;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt,
+        cwd,
+        abortController,
+        outputsDir,
+        apiContext,
+        model: session.model,
+        onTeamEvent,
+        flywheelContext,
+      });
+    } catch (err) {
+      this.probeObserver?.stage(probe, {
+        stage: 'failed',
+        at: new Date().toISOString(),
+        errorClass: classifyFlywheelError(err instanceof Error ? err.message : String(err)),
+      });
+      throw err;
+    }
 
     // Register running task
     const startTime = Date.now();
@@ -2372,7 +2416,9 @@ export class MessageBridge {
         await rateLimiter.cancelAndWait();
       }
 
-      await this.sendFinalCard(messageId, lastState, chatId);
+      this.recordProbeTerminal(probe, processor, lastState);
+      const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
+      this.recordProbeTextDelivery(probe, messageId, textDelivered);
 
       // Audit + cost tracking
       const durationMs = Date.now() - startTime;
@@ -2413,7 +2459,13 @@ export class MessageBridge {
       });
 
       // Send any output files produced by Claude
-      await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+      await this.outputHandler.sendOutputFiles(
+        chatId,
+        outputsDir,
+        processor,
+        lastState,
+        probe ? (receipt) => this.probeObserver?.delivery(probe, receipt) : undefined,
+      );
       this.codexCommands.maybeScheduleGoalContinuation(
         msg,
         lastState,
@@ -2452,7 +2504,9 @@ export class MessageBridge {
             rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
           }
           await rateLimiter.cancelAndWait();
-          await this.sendFinalCard(messageId, lastState, chatId);
+          this.recordProbeTerminal(probe, processor, lastState);
+          const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
+          this.recordProbeTextDelivery(probe, messageId, textDelivered);
 
           const durationMs = Date.now() - startTime;
           this.audit.log({
@@ -2481,7 +2535,13 @@ export class MessageBridge {
             state: lastState,
             durationMs,
           });
-          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+          await this.outputHandler.sendOutputFiles(
+            chatId,
+            outputsDir,
+            processor,
+            lastState,
+            probe ? (receipt) => this.probeObserver?.delivery(probe, receipt) : undefined,
+          );
           return; // skip the normal error handling below
         } catch (retryErr: any) {
           this.logger.error({ err: retryErr, chatId }, 'Retry after stale session also failed');
@@ -2515,7 +2575,9 @@ export class MessageBridge {
         errorMessage: err.message || 'Unknown error',
       };
       await rateLimiter.cancelAndWait();
-      await this.sendFinalCard(messageId, errorState, chatId);
+      this.recordProbeTerminal(probe, processor, errorState);
+      const textDelivered = await this.sendFinalCard(messageId, errorState, chatId);
+      this.recordProbeTextDelivery(probe, messageId, textDelivered);
     } finally {
       clearTimeout(timeoutId);
       if (idleTimerId) clearTimeout(idleTimerId);
@@ -2974,8 +3036,8 @@ export class MessageBridge {
    * Retries with exponential backoff (2s → 4s → 8s). If all retries fail,
    * sends a plain text fallback so the user at least sees the result.
    */
-  private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<void> {
-    await sendFinalCardWithRetry({
+  private async sendFinalCard(messageId: string, state: CardState, chatId?: string): Promise<boolean> {
+    return sendFinalCardWithRetry({
       sender: this.sender,
       config: this.config,
       logger: this.logger,
@@ -2983,6 +3045,44 @@ export class MessageBridge {
       messageId,
       state: this.enrichWithAgentTeams(state, chatId),
       chatId,
+    });
+  }
+
+  private recordProbeTerminal(
+    probe: IncomingMessage['syntheticProbe'],
+    processor: StreamProcessor,
+    state: CardState,
+  ): void {
+    const common: Omit<ProbeStageReceipt, 'stage'> = {
+      at: new Date().toISOString(),
+      sessionId: processor.getSessionId(),
+      model: state.model ?? this.config.claude.model,
+      backend: this.config.claude.backend,
+    };
+    if (state.status === 'complete') {
+      this.probeObserver?.stage(probe, { stage: 'run_completed', ...common });
+      return;
+    }
+    this.probeObserver?.stage(probe, {
+      stage: 'failed',
+      ...common,
+      errorClass: classifyFlywheelError(state.errorMessage),
+    });
+  }
+
+  private recordProbeTextDelivery(
+    probe: IncomingMessage['syntheticProbe'],
+    messageId: string,
+    delivered: boolean,
+  ): void {
+    this.probeObserver?.stage(probe, delivered ? {
+      stage: 'text_delivered',
+      at: new Date().toISOString(),
+      messageId,
+    } : {
+      stage: 'failed',
+      at: new Date().toISOString(),
+      errorClass: 'feishu_deliver',
     });
   }
 

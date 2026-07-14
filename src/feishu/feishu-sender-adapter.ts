@@ -5,6 +5,7 @@ import { MessageSender } from './message-sender.js';
 import { buildCard, buildTextCard } from './card-builder.js';
 import { buildCardV2, buildTextCardV2 } from './card-builder-v2.js';
 import { OutputsManager } from '../bridge/outputs-manager.js';
+import type { DeliveryReceipt } from '../reliability/probe-types.js';
 
 // v2 (native table + lark_md headings + grey footer) is the default.
 // Set CARD_SCHEMA_V2=false to opt out and fall back to v1.
@@ -60,10 +61,24 @@ export class FeishuSenderAdapter implements IMessageSender {
     return this.sender.sendImageFile(chatId, filePath);
   }
 
+  async sendImageFileWithReceipt(chatId: string, filePath: string): Promise<DeliveryReceipt> {
+    return this.sender.sendImageFileWithReceipt(chatId, filePath);
+  }
+
   async sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean> {
     const ext = path.extname(fileName).toLowerCase();
     const feishuType = OutputsManager.feishuFileType(ext);
     return this.sender.sendLocalFile(chatId, filePath, fileName, feishuType);
+  }
+
+  async sendLocalFileWithReceipt(
+    chatId: string,
+    filePath: string,
+    fileName: string,
+  ): Promise<DeliveryReceipt> {
+    const ext = path.extname(fileName).toLowerCase();
+    const feishuType = OutputsManager.feishuFileType(ext);
+    return this.sender.sendLocalFileWithReceipt(chatId, filePath, fileName, feishuType);
   }
 
   async sendAudioFile(chatId: string, filePath: string, fileName?: string): Promise<boolean> {

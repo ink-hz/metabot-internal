@@ -1,4 +1,5 @@
 import type { CardState } from '../types.js';
+import type { DeliveryReceipt } from '../reliability/probe-types.js';
 
 /**
  * Platform-agnostic message sender interface.
@@ -43,8 +44,18 @@ export interface IMessageSender {
   /** Send a local image file to the chat. */
   sendImageFile(chatId: string, filePath: string): Promise<boolean>;
 
+  /** Synthetic-only observation path; normal callers may keep the boolean API. */
+  sendImageFileWithReceipt?(chatId: string, filePath: string): Promise<DeliveryReceipt>;
+
   /** Send a local file to the chat. */
   sendLocalFile(chatId: string, filePath: string, fileName: string): Promise<boolean>;
+
+  /** Synthetic-only observation path; returns actual upload and message identifiers. */
+  sendLocalFileWithReceipt?(
+    chatId: string,
+    filePath: string,
+    fileName: string,
+  ): Promise<DeliveryReceipt>;
 
   /** Send a local audio file as a native voice/audio message, when supported. */
   sendAudioFile?(chatId: string, filePath: string, fileName?: string): Promise<boolean>;

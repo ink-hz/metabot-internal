@@ -16,6 +16,7 @@ export interface SyntheticProbeContext {
 export interface ProbeStageReceipt {
   stage: ProbeStage;
   at: string;
+  botName?: string;
   messageId?: string;
   fileKey?: string;
   fileName?: string;

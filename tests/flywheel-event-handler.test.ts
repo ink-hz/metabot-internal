@@ -4,6 +4,7 @@ import {
   buildFlywheelRawEventRecord,
   createEventDispatcher,
 } from '../src/feishu/event-handler.js';
+import { ProbeReceiptStore } from '../src/reliability/probe-receipt-store.js';
 
 describe('Feishu flywheel normalization', () => {
   it('keeps global identity, reply relation, attachment metadata and full L1 content', () => {
@@ -91,6 +92,7 @@ describe('Feishu flywheel normalization', () => {
     const order: string[] = [];
     let recorded: any;
     let delivered: any;
+    const receipts = new ProbeReceiptStore();
     const recordMessageReceived = vi.fn((record) => {
       order.push('record');
       recorded = record;
@@ -119,6 +121,7 @@ describe('Feishu flywheel normalization', () => {
         recordEvidence: vi.fn(),
       } as never,
       { unionIds: new Set(['on_test']), chatIds: new Set(['oc_canary']) },
+      receipts,
     );
 
     await dispatcher.invoke({
@@ -147,5 +150,11 @@ describe('Feishu flywheel normalization', () => {
     expect(delivered.syntheticProbe).toEqual({
       isSynthetic: true, probeId, attemptId,
     });
+    expect(receipts.getAttempt(probeId, attemptId)?.stages).toEqual([{
+      stage: 'feishu_received',
+      at: expect.any(String),
+      botName: 'hr-bot',
+      messageId: 'om_probe',
+    }]);
   });
 });

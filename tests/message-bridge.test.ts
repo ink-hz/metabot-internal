@@ -16,6 +16,7 @@ import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
+import { ProbeReceiptStore } from '../src/reliability/probe-receipt-store.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -107,6 +108,71 @@ describe('MessageBridge Claude compatibility execution guard', () => {
     } finally {
       bridge.destroy();
       fs.rmSync(storeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MessageBridge synthetic probe receipts', () => {
+  it('records execution and actual final-card delivery without storing content', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-probe-bridge-'));
+    const config = makeConfig();
+    config.persistentExecutor = { enabled: false };
+    config.claude.defaultWorkingDirectory = rootDir;
+    config.claude.outputsBaseDir = path.join(rootDir, 'outputs');
+    config.claude.downloadsDir = path.join(rootDir, 'downloads');
+    config.claude.model = 'claude-opus-4-8';
+    const store = new ProbeReceiptStore();
+    const sender = makeSender();
+    const bridge = new MessageBridge(config, mockLogger, sender as any, undefined, store) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        yield {
+          type: 'result',
+          subtype: 'success',
+          result: 'private response content',
+          session_id: 'session-probe',
+          total_cost_usd: 0,
+          duration_ms: 10,
+        };
+      })(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    const probe = {
+      isSynthetic: true as const,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+      attemptId: '01J2Z9M77A68K8B1T4W5F6H9P0',
+    };
+
+    try {
+      await bridge.executeQuery({
+        messageId: 'om_in',
+        chatId: 'oc_canary',
+        chatType: 'private',
+        userId: 'on_test',
+        text: 'private prompt content',
+        syntheticProbe: probe,
+      });
+
+      const receipt = store.getAttempt(probe.probeId, probe.attemptId);
+      expect(receipt?.stages.map((stage) => stage.stage)).toEqual([
+        'run_started',
+        'run_completed',
+        'text_delivered',
+      ]);
+      expect(receipt?.stages).toContainEqual(expect.objectContaining({
+        stage: 'run_completed',
+        botName: 'test-bot',
+        sessionId: 'session-probe',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+      }));
+      expect(JSON.stringify(receipt)).not.toContain('private prompt content');
+      expect(JSON.stringify(receipt)).not.toContain('private response content');
+    } finally {
+      bridge.destroy();
+      fs.rmSync(rootDir, { recursive: true, force: true });
     }
   });
 });

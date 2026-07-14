@@ -15,7 +15,7 @@ export async function sendFinalCardWithRetry(opts: {
   messageId: string;
   state: CardState;
   chatId?: string;
-}): Promise<void> {
+}): Promise<boolean> {
   const { sender, config, logger, sessionManager, messageId, state, chatId } = opts;
 
   if (chatId && (state.status === 'complete' || state.status === 'error')) {
@@ -28,7 +28,7 @@ export async function sendFinalCardWithRetry(opts: {
     const ok = await sender.updateCard(messageId, state);
     if (ok) {
       void sendVoiceReplyIfEnabled({ sender, config, logger, chatId, state });
-      return;
+      return true;
     }
     const delay = FINAL_CARD_BASE_DELAY_MS * Math.pow(2, attempt);
     logger.warn({ attempt, delay, messageId }, 'Final card update failed, retrying');
@@ -47,6 +47,8 @@ export async function sendFinalCardWithRetry(opts: {
       // Last resort failed; the card path already logged the delivery failure.
     }
   }
+
+  return false;
 }
 
 export async function sendVoiceReplyIfEnabled(opts: {

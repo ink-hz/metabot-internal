@@ -24,6 +24,7 @@ import { AgentTeamStore } from '../agent-teams/team-store.js';
 import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
+import { ProbeReceiptStore } from '../reliability/probe-receipt-store.js';
 import {
   buildRuntimeStatus,
   resolveReleaseSha,
@@ -42,6 +43,7 @@ import {
   handleSessionRoutes,
   handleExecutorRoutes,
   handleAgentTeamRoutes,
+  handleReliabilityRoutes,
   parseCoreChatRunRequest,
 } from './routes/index.js';
 import type { RouteContext } from './routes/index.js';
@@ -62,6 +64,7 @@ interface ApiServerOptions {
   agentTeamStore?: AgentTeamStore;
   agentTeams?: AgentTeamConfig[];
   sessionRegistry?: SessionRegistry;
+  probeReceiptStore?: ProbeReceiptStore;
 }
 
 const startTime = Date.now();
@@ -137,6 +140,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
   const meetingService = new VoiceMeetingService(registry, logger);
   const voiceIdentityStore = new VoiceIdentityStore(logger);
   const activityStore = new ActivityStore(logger);
+  const probeReceiptStore = options.probeReceiptStore ?? new ProbeReceiptStore();
   const agentTeamSupervisor = new AgentTeamSupervisor({ registry, store: agentTeamStore, logger });
   if (options.agentTeams?.length) {
     agentTeamStore.reconcileTeams(options.agentTeams);
@@ -172,6 +176,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     activityStore,
     agentTeamStore,
     agentTeamSupervisor,
+    probeReceiptStore,
   };
 
   if (peerManager) {
@@ -236,6 +241,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     handleSessionRoutes,
     handleExecutorRoutes,
     handleAgentTeamRoutes,
+    handleReliabilityRoutes,
   ];
 
   const server = http.createServer(async (req, res) => {

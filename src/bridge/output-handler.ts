@@ -4,6 +4,7 @@ import type { CardState } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { StreamProcessor, extractImagePaths } from '../engines/index.js';
 import { OutputsManager } from './outputs-manager.js';
+import type { DeliveryReceipt } from '../reliability/probe-types.js';
 
 /**
  * Feishu API limits documented at
@@ -42,6 +43,7 @@ export class OutputHandler {
     outputsDir: string,
     processor: StreamProcessor,
     state: CardState,
+    onDeliveryReceipt?: (receipt: DeliveryReceipt) => void,
   ): Promise<void> {
     const sentPaths = new Set<string>();
     const oversized: OversizedFile[] = [];
@@ -52,10 +54,26 @@ export class OutputHandler {
       try {
         if (file.isImage && file.sizeBytes <= IMAGE_MAX_BYTES) {
           this.logger.info({ filePath: file.filePath }, 'Sending output image from outputs dir');
-          await this.sender.sendImageFile(chatId, file.filePath);
+          if (onDeliveryReceipt && this.sender.sendImageFileWithReceipt) {
+            const receipt = await this.sender.sendImageFileWithReceipt(chatId, file.filePath);
+            onDeliveryReceipt(receipt);
+          } else {
+            await this.sender.sendImageFile(chatId, file.filePath);
+          }
         } else if (!file.isImage && file.sizeBytes <= FILE_MAX_BYTES) {
           this.logger.info({ filePath: file.filePath }, 'Sending output file from outputs dir');
-          const sent = await this.sender.sendLocalFile(chatId, file.filePath, file.fileName);
+          let sent: boolean;
+          if (onDeliveryReceipt && this.sender.sendLocalFileWithReceipt) {
+            const receipt = await this.sender.sendLocalFileWithReceipt(
+              chatId,
+              file.filePath,
+              file.fileName,
+            );
+            onDeliveryReceipt(receipt);
+            sent = receipt.ok;
+          } else {
+            sent = await this.sender.sendLocalFile(chatId, file.filePath, file.fileName);
+          }
           if (!sent && OutputsManager.isTextFile(file.extension) && file.sizeBytes < 30 * 1024) {
             this.logger.info({ filePath: file.filePath }, 'File upload failed, sending as text message');
             const content = fs.readFileSync(file.filePath, 'utf-8');
@@ -89,7 +107,12 @@ export class OutputHandler {
           if (size <= 0) continue;
           if (size <= IMAGE_MAX_BYTES) {
             this.logger.info({ imgPath }, 'Sending output image (fallback)');
-            await this.sender.sendImageFile(chatId, imgPath);
+            if (onDeliveryReceipt && this.sender.sendImageFileWithReceipt) {
+              const receipt = await this.sender.sendImageFileWithReceipt(chatId, imgPath);
+              onDeliveryReceipt(receipt);
+            } else {
+              await this.sender.sendImageFile(chatId, imgPath);
+            }
           } else {
             // Same notice path as the outputs-dir scan — match user-visible behaviour.
             this.logger.warn({ imgPath, sizeBytes: size }, 'Fallback output image too large to send');
