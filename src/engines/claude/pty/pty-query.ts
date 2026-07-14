@@ -45,6 +45,10 @@ import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
 import { createHookBridge } from './hook-bridge.js';
 import { driveInteractiveTool, isExitPlanMenu, parseAskMenuFromScreen } from './interactive-driver.js';
+import {
+  readCompletedAssistantTextSince,
+  resolveUnexpectedExit,
+} from './turn-recovery.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -209,6 +213,10 @@ export const ptyQuery = (args: {
   // terminal `result` is emitted (Stop hook). The exit watchdog uses it to
   // decide whether an unexpected claude death orphaned an in-flight turn.
   let turnInFlight = false;
+  // Byte offset captured immediately before the current prompt is submitted.
+  // Exit recovery reads only records after this boundary, so a previous
+  // turn's completed answer can never turn a new crashed turn into success.
+  let turnJsonlStartOffset = 0;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
@@ -469,6 +477,11 @@ export const ptyQuery = (args: {
         }
         if (!session) await boot; // ensure session exists
         if (!session || disposed) break;
+        try {
+          turnJsonlStartOffset = statSync(session.jsonlPath).size;
+        } catch {
+          turnJsonlStartOffset = 0;
+        }
         turnInFlight = true; // a new turn starts the moment we submit the prompt
         await session.typePrompt(text);
         // Client-side slash commands (/effort, /model, /status, …) change a
@@ -543,11 +556,17 @@ export const ptyQuery = (args: {
     logger.warn({ ...info, turnInFlight }, 'ptyQuery: claude exited unexpectedly');
     if (turnInFlight) {
       turnInFlight = false;
+      const completedText = session
+        ? readCompletedAssistantTextSince(session.jsonlPath, turnJsonlStartOffset)
+        : null;
+      const recovered = resolveUnexpectedExit(completedText);
+      logger.info({ recoveredCompletedTurn: !recovered.isError },
+        'ptyQuery: resolved unexpected exit from current-turn JSONL');
       out.enqueue(
         synthesizeResult({
           sessionId,
-          isError: true,
-          resultText: 'claude process exited before the turn completed',
+          isError: recovered.isError,
+          resultText: recovered.resultText,
           model: lastUsage.model,
           usage: lastUsage,
         }),
