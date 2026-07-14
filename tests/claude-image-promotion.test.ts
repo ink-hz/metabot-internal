@@ -162,6 +162,65 @@ describe('Claude nested tool-result image promotion', () => {
     expect(result.body.equals(raw)).toBe(true);
   });
 
+  it('passes through when a PDF is hidden in a nested array beside a promotable image', () => {
+    const raw = requestWith([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tool-nested-array-pdf',
+        content: [
+          image(demo1Data),
+          [
+            {
+              type: 'document',
+              source: { type: 'base64', media_type: 'application/pdf', data: demo2Data },
+            },
+          ],
+        ],
+      },
+    ]);
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
+  it('passes through when an assistant message contains a PDF and a user message has a promotable image', () => {
+    const raw = Buffer.from(
+      JSON.stringify({
+        model: 'claude-opus-4-8',
+        messages: [
+          {
+            role: 'assistant',
+            content: [
+              {
+                type: 'document',
+                source: { type: 'base64', media_type: 'application/pdf', data: demo2Data },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'tool_result',
+                tool_use_id: 'tool-after-assistant-pdf',
+                content: [image(demo1Data)],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
   it('leaves unsupported nested image media types byte-for-byte unchanged', () => {
     const raw = requestWith([
       {
@@ -252,6 +311,42 @@ describe('Claude nested tool-result image promotion', () => {
   it('passes through a target request with a nested cache_control __proto__ key byte-for-byte', () => {
     const raw = Buffer.from(
       `{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-cache-proto","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"${demo1Data}"},"cache_control":{"type":"ephemeral","__proto__":{"nested-marker":true}}}]}]}]}`,
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
+  it('passes through a target request with a root isLosslessNumber sentinel byte-for-byte', () => {
+    const raw = Buffer.from(
+      `{"isLosslessNumber":true,"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-root-sentinel","content":[${JSON.stringify(image(demo1Data))}]}]}]}`,
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
+  it('passes through a target request with a nested metadata isLosslessNumber sentinel byte-for-byte', () => {
+    const raw = Buffer.from(
+      `{"metadata":{"isLosslessNumber":true,"marker":"metadata"},"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-metadata-sentinel","content":[${JSON.stringify(image(demo1Data))}]}]}]}`,
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
+  it('passes through a target request with a cache_control isLosslessNumber sentinel byte-for-byte', () => {
+    const raw = Buffer.from(
+      `{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-cache-sentinel","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"${demo1Data}"},"cache_control":{"type":"ephemeral","isLosslessNumber":true}}]}]}]}`,
     );
 
     const result = promoteToolResultImages(raw);

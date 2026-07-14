@@ -5,7 +5,7 @@ const ATTACHMENT_TEXT = 'The requested image is attached as a sibling content bl
 const SUPPORTED_MEDIA_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
 const IMAGE_KEYS = new Set(['type', 'source', 'cache_control']);
 const SOURCE_KEYS = new Set(['type', 'media_type', 'data']);
-const UNSAFE_LOSSLESS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const UNSAFE_LOSSLESS_KEYS = new Set(['__proto__', 'constructor', 'prototype', 'isLosslessNumber', 'toJSON']);
 
 type JsonObject = Record<string, unknown>;
 
@@ -42,7 +42,7 @@ function hasOnlyKeys(value: JsonObject, allowedKeys: ReadonlySet<string>): boole
   return Object.keys(value).every((key) => allowedKeys.has(key));
 }
 
-function hasUnsafeLosslessKey(value: unknown): boolean {
+function hasUnsafeRequestShape(value: unknown): boolean {
   const pending = [value];
   while (pending.length > 0) {
     const current = pending.pop();
@@ -51,23 +51,11 @@ function hasUnsafeLosslessKey(value: unknown): boolean {
       continue;
     }
     if (!isObject(current)) continue;
+    if (current.type === 'document') return true;
 
     for (const key of Object.keys(current)) {
       if (UNSAFE_LOSSLESS_KEYS.has(key)) return true;
       pending.push(current[key]);
-    }
-  }
-  return false;
-}
-
-function containsDocumentBlock(value: unknown): boolean {
-  const pending = [value];
-  while (pending.length > 0) {
-    const current = pending.pop();
-    if (!isObject(current)) continue;
-    if (current.type === 'document') return true;
-    if (Array.isArray(current.content)) {
-      for (const nested of current.content) pending.push(nested);
     }
   }
   return false;
@@ -102,11 +90,11 @@ function inspectRequest(value: unknown): Inspection {
     }
 
     for (const block of message.content) {
-      if (!isObject(block)) continue;
-
-      if (containsDocumentBlock(block)) {
+      if (Array.isArray(block)) {
         ambiguous = true;
+        continue;
       }
+      if (!isObject(block)) continue;
 
       if (block.type === 'image' && !isExactSupportedImage(block)) {
         ambiguous = true;
@@ -114,6 +102,10 @@ function inspectRequest(value: unknown): Inspection {
 
       if (block.type !== 'tool_result' || !Array.isArray(block.content)) continue;
       for (const nestedBlock of block.content) {
+        if (Array.isArray(nestedBlock)) {
+          ambiguous = true;
+          continue;
+        }
         if (!isObject(nestedBlock) || nestedBlock.type !== 'image') continue;
         if (isExactSupportedImage(nestedBlock)) promotable = true;
         else ambiguous = true;
@@ -186,7 +178,7 @@ export function promoteToolResultImages(raw: Buffer): PromotionResult {
     throw new InvalidAnthropicRequestError();
   }
 
-  if (hasUnsafeLosslessKey(inspectedValue)) {
+  if (hasUnsafeRequestShape(inspectedValue)) {
     return { kind: 'passthrough', body: raw };
   }
 
