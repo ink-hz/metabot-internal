@@ -140,6 +140,28 @@ describe('Claude nested tool-result image promotion', () => {
     expect(result.body.equals(raw)).toBe(true);
   });
 
+  it('passes through the whole request when a nested PDF is mixed with a promotable image', () => {
+    const raw = requestWith([
+      {
+        type: 'tool_result',
+        tool_use_id: 'tool-mixed-pdf',
+        content: [
+          image(demo1Data),
+          {
+            type: 'document',
+            source: { type: 'base64', media_type: 'application/pdf', data: demo2Data },
+          },
+        ],
+      },
+    ]);
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
   it('leaves unsupported nested image media types byte-for-byte unchanged', () => {
     const raw = requestWith([
       {
@@ -196,6 +218,47 @@ describe('Claude nested tool-result image promotion', () => {
 
     expect(() => promoteToolResultImages(raw)).toThrow(InvalidAnthropicRequestError);
     expect(() => promoteToolResultImages(raw)).toThrow(/malformed JSON/i);
+  });
+
+  it('normalizes a lossless-parser duplicate-key failure without leaking request data', () => {
+    const raw = Buffer.from(
+      `{"model":"claude-opus-4-8","duplicate":"first","duplicate":"secret-request-marker","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-duplicate-key","content":[${JSON.stringify(image(demo1Data))}]}]}]}`,
+    );
+
+    let thrown: unknown;
+    try {
+      promoteToolResultImages(raw);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(InvalidAnthropicRequestError);
+    expect((thrown as Error).message).toBe('Anthropic request contains malformed JSON');
+    expect((thrown as Error).message).not.toContain('secret-request-marker');
+  });
+
+  it('passes through a target request with a root __proto__ key byte-for-byte', () => {
+    const raw = Buffer.from(
+      `{"__proto__":{"root-marker":true},"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-root-proto","content":[${JSON.stringify(image(demo1Data))}]}]}]}`,
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
+  });
+
+  it('passes through a target request with a nested cache_control __proto__ key byte-for-byte', () => {
+    const raw = Buffer.from(
+      `{"model":"claude-opus-4-8","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-cache-proto","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"${demo1Data}"},"cache_control":{"type":"ephemeral","__proto__":{"nested-marker":true}}}]}]}]}`,
+    );
+
+    const result = promoteToolResultImages(raw);
+
+    expect(result.kind).toBe('passthrough');
+    expect(result.body).toBe(raw);
+    expect(result.body.equals(raw)).toBe(true);
   });
 
   it('returns the original Buffer for valid non-target input with a large integer', () => {
