@@ -99,5 +99,5 @@ lark-cli base records list ...                           # Query bitable
 
 - **Search before creating** — always check if a file or document already exists before creating new ones.
 - **Save to shared memory** — when you discover important knowledge, project patterns, or user preferences, save them via `metabot memory create ...` so future sessions can benefit.
-- **Output files** — when generating files the user needs (images, PDFs, reports), copy them to the outputs directory provided in the system prompt so they get sent to the chat automatically.
+- **Output files** — when the user requests a specific format, honour it. Write every requested file to the outputs directory provided in the system prompt so it is sent to the chat automatically, and use a readable, topic-specific filename. Markdown can be written directly; create Word with `pandoc input.md -o output.docx` and PDF with `pandoc input.md -o output.pdf --pdf-engine=typst`. If conversion is unavailable, send a usable fallback format and explain briefly; file failure must not suppress the text answer. Use lark-doc only when the user explicitly asks for a Feishu cloud document, online document, or shareable Feishu document link.
 - **Be concise in chat** — responses appear as Feishu/Telegram cards with limited space. Keep answers focused and use markdown formatting.
