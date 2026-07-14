@@ -56,6 +56,7 @@ are advisory only.
 | Built-in `WebFetch` | Fail during domain-safety verification | Deny and replace with MCP |
 | 1M context | Declared by gateway but not proved by the current Claude Code route | Treat as 200K |
 | Claude Code MCP launch/config flags | Present in Claude Code 2.1.207 | Supported integration seam |
+| `ANTHROPIC_BASE_URL` in process env versus `--settings` env | `--settings` wins for both `HEAD /` and `POST /v1/messages?beta=true` | Override both layers |
 
 The validated runtime versions are:
 
@@ -156,6 +157,12 @@ The profile is selected explicitly with
 `METABOT_CLAUDE_COMPAT_PROFILE=nexcor-opus-4-8-claude-code-2.1.207`. There is
 no automatic fuzzy match based on model names or gateway marketing tags.
 
+MetaBot resolves the configured Claude executable at startup and runs
+`claude --version`. The result must be exactly `2.1.207` for this profile. A
+different or unreadable version refuses to start Claude executors and requires
+a new probe/profile; it is not treated as a warning-only condition. Production
+bootstrap installs the exact CLI version and does not auto-upgrade it.
+
 If a configured Claude model is not in `allowedModels`, MetaBot rejects the
 Claude bot configuration at startup and reports the bot name plus disallowed
 model. Session-level `/model` choices are filtered by the same allowlist. No
@@ -175,30 +182,56 @@ is not changed or printed.
 - Accept only requests whose Anthropic authorization header matches the token
   already configured for MetaBot.
 - Capture the upstream base URL before starting children; override
-  `ANTHROPIC_BASE_URL` only in each Claude child environment.
+  `ANTHROPIC_BASE_URL` in each Claude child environment and in the generated
+  Claude settings passed with `--settings`.
 - Forward the existing Anthropic authorization and version headers unchanged.
+
+The dual override is mandatory. A deterministic two-listener probe proved that
+Claude Code 2.1.207 gives `--settings` `env.ANTHROPIC_BASE_URL` precedence over
+the process environment for both its base-URL preflight and the actual message
+request. `createHookBridge()` therefore merges settings in this order:
+
+```text
+existing private user settings
+  -> MetaBot hooks
+  -> compatibility env overrides (loopback URL wins last)
+```
+
+The original upstream URL remains only in the parent adapter configuration; it
+must not survive in the generated child settings.
 
 The adapter exposes the upstream path space transparently. Requests other than
 `POST /v1/messages` are streamed through without buffering or modification.
 
 ### Image promotion transform
 
-For `POST /v1/messages`, the adapter buffers at most 64 MiB and parses JSON. It
-walks each user message's content array. For every `tool_result` whose nested
-content array contains a supported Anthropic image block:
+For `POST /v1/messages`, the adapter buffers at most 64 MiB and inspects JSON.
+If no exact promotable shape is present, it forwards the original request bytes
+unchanged; it does not parse and reserialize every Claude request. For every
+`tool_result` whose nested content array contains a supported Anthropic image
+block:
 
 1. Keep the `tool_result`, its `tool_use_id`, and all non-image content.
 2. Remove only nested blocks with `type: "image"` and a base64 source whose
    media type is `image/jpeg`, `image/png`, `image/gif`, or `image/webp`.
 3. Insert a short text block in the nested result if removing the image would
    otherwise leave it empty: `The requested image is attached as a sibling content block.`
-4. Append each removed image as a top-level sibling in that same user message.
+4. Insert each removed image as a top-level sibling immediately after its
+   owning `tool_result` in that same user message.
 5. Preserve existing top-level images, documents, citations, unknown blocks,
    message ordering, tools, thinking settings, cache controls, and model.
 
-The transform is idempotent for already-promoted requests: a nested image whose
-source already exists as an identical sibling is removed but not appended a
-second time.
+The transform is idempotent for already-promoted requests. Deduplication is
+scoped to one user message and keyed by `media_type + SHA-256(base64 data)`: a
+nested image whose source already exists as an identical sibling is removed but
+not appended a second time. Identical images in different historical messages
+remain in their original turns, and different images are never coalesced.
+
+Target requests use lossless JSON number handling so unknown numeric fields do
+not suffer JavaScript precision changes. Unknown keys and values survive the
+rewrite. The adapter applies promotion only when the full known broken shape is
+present; if structural validation is inconclusive, it fail-safes to the
+original unmodified bytes rather than attempting a partial transform.
 
 PDF/document blocks are never promoted because both validated PDF shapes work.
 Malformed JSON, an unsupported image source, or an oversized body returns an
@@ -214,8 +247,13 @@ an ambiguous retry could bill or execute the same turn twice.
 
 Safe metadata GET requests may retry once after a connection failure. If the
 upstream connection fails before headers, the adapter returns an
-Anthropic-shaped `api_error` with HTTP 502. If an SSE stream fails after headers,
-the socket closes and the existing executor lifecycle handles the failed turn.
+Anthropic-shaped `api_error` with HTTP 502 and no `Retry-After`, allowing Claude
+Code's built-in transient-error policy to decide whether to retry. Adapter
+validation failures return HTTP 400 with `invalid_request_error`, which Claude
+Code must not retry. Contract tests run the real Claude Code client against
+both envelopes to prove the 502 path retries and the 400 path does not. If an
+SSE stream fails after headers, the socket closes and the existing executor
+lifecycle handles the failed turn.
 
 ## Web tools through MCP
 
@@ -245,13 +283,17 @@ Web-tool policy has three states:
 - `required`: startup fails if the package or key is missing. This is the
   production setting for Marketing Bot.
 - `optional`: Claude starts without the MCP server if unavailable, while the
-  incompatible built-ins remain denied. A clear startup warning is emitted.
+  incompatible built-ins remain denied. A clear startup warning is emitted,
+  and the appended system prompt explicitly says live web access is unavailable
+  and current facts must be qualified rather than guessed from model memory.
 - `disabled`: neither built-in nor MCP web tools are exposed.
 
-The other five bots default to `optional` until their scenarios require web
-access. A short appended system-prompt section maps user intent to
-`tavily-search` and `tavily-extract`; it does not claim that the built-in web
-tools work.
+HR Bot is explicitly `disabled` because candidate and employee content must not
+have an available route to Tavily. Marketing Bot is `required` after its key is
+provided. `feishu-default`, Product Commercialization, Quality, and FAE default
+to `optional` until their scenarios require a stricter policy. A short appended
+system-prompt section maps user intent to `tavily-search` and
+`tavily-extract`; it never claims that the built-in web tools work.
 
 Tavily is an external service and may have usage charges. This design does not
 authorize account creation or spending. Production web-tool acceptance remains
@@ -274,6 +316,10 @@ Both backends receive the same child environment:
 - the existing Anthropic token
 - the existing Claude Code settings and context controls
 - no Fable default or fallback
+
+The generated Claude settings receive the same loopback
+`ANTHROPIC_BASE_URL`. This later merge is the authoritative value because
+Claude Code applies settings env after process env.
 
 The adapter starts before any Claude executor can be created and stops after
 all executors are drained. If the selected profile requires the adapter and it
@@ -346,7 +392,11 @@ content.
 
 - Exact image promotion with one and multiple tool results.
 - Idempotency when the image already exists as a sibling.
+- Three-turn persistent-history replay with two distinct images, proving each
+  historical user message contains exactly one matching promoted image.
 - PDF and unknown content blocks remain untouched.
+- Any valid non-target request is forwarded byte-for-byte; target requests
+  retain unknown fields and lossless numeric values.
 - Malformed, unsupported, and oversized bodies return the specified error.
 - Fable and every non-allowlisted model are rejected at configuration and
   session `/model` boundaries.
@@ -364,6 +414,8 @@ A local fake Anthropic upstream verifies:
 - streaming SSE status, headers, chunks, and ordering are unchanged;
 - upstream failures map to the documented error behavior without retries for
   message creation.
+- real Claude Code retries the adapter's transient 502 envelope but does not
+  retry the adapter's validation 400 envelope.
 
 ### MCP tests
 
@@ -382,11 +434,14 @@ sequence is:
 2. Require an exact text marker and one normal local tool call.
 3. Send the existing deterministic Feishu screenshot through `Read`; require
    the exact answer `Metabot` and no `Content block not found` error.
-4. Send the deterministic PDF; require the exact code `ORBBEC-7429`.
-5. With a configured Tavily key, require one search and one extract result.
-6. Restart MetaBot/PM2 without an interactive password and repeat the markers.
-7. Send one smoke message to each of the six Feishu bots.
-8. Confirm logs and flywheel records contain no credential, base64 attachment,
+4. Continue the same persistent session for three image turns using two
+   different fixtures; require correct recognition, no duplicate promoted
+   images, and non-zero `cache_read_input_tokens` after promotion.
+5. Send the deterministic PDF; require the exact code `ORBBEC-7429`.
+6. With a configured Tavily key, require one search and one extract result.
+7. Restart MetaBot/PM2 without an interactive password and repeat the markers.
+8. Send one smoke message to each of the six Feishu bots.
+9. Confirm logs and flywheel records contain no credential, base64 attachment,
    thinking, or signature content.
 
 ## Deployment and rollback
