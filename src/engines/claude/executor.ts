@@ -13,6 +13,7 @@ import {
   applyClaudeCompatibilityRuntime,
   getRuntimeForProfile,
 } from './compatibility/runtime.js';
+import { assertEnabledClaudeModel } from './compatibility/profile.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -179,9 +180,6 @@ export interface ApiContext {
  *     to the API. Belt-and-braces for API-key auth modes where the SDK
  *     may not auto-infer the beta from the suffix alone.
  *
- *   - Fable 5 has native 1M context in Claude Code, so leave its env alone
- *     and let the CLI use the model's default window.
- *
  *   - Without `[1m]` on legacy 1M-capable Opus/Sonnet models: keep the model
  *     at the standard 200K window. We set
  *     two env vars in the spawn env:
@@ -209,13 +207,10 @@ export interface ApiContext {
  * suffix detection sees the actually-effective model, not the bot default.
  */
 export const DEFAULT_AUTO_COMPACT_WINDOW = '200000';
-const FABLE_5_MODEL_RE = /^claude-fable-5(?:$|\[)/;
 
 export function apply1MContextSettings(queryOptions: Record<string, unknown>): void {
   const model = queryOptions.model as string | undefined;
-  if (model && FABLE_5_MODEL_RE.test(model)) {
-    return;
-  }
+  assertEnabledClaudeModel(model);
   if (model?.includes('[1m]')) {
     queryOptions.betas = ['context-1m-2025-08-07'];
   } else {

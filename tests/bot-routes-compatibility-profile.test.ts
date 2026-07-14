@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readBotsConfig } from '../src/api/bots-config-writer.js';
 import { handleBotRoutes } from '../src/api/routes/bot-routes.js';
 import type { RouteContext } from '../src/api/routes/types.js';
+import { webBotFromJson } from '../src/config.js';
 import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 
 const logger = {
@@ -125,13 +126,14 @@ describe('runtime bot create with a Claude compatibility profile', () => {
     expect(register).not.toHaveBeenCalled();
   });
 
-  it('does not persist or activate the old generic default when model is omitted', async () => {
+  it('activates Opus 4.8 when model is omitted', async () => {
     const res = await createWebBot();
 
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatch(/\(unset\).*not allowed/);
-    expect(readBotsConfig(configPath).webBots).toEqual([]);
-    expect(register).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(register).toHaveBeenCalledOnce();
+    expect(register.mock.calls[0][0].config.claude.model).toBe('claude-opus-4-8');
+    const persisted = readBotsConfig(configPath).webBots?.[0];
+    expect(webBotFromJson(persisted!).claude.model).toBe('claude-opus-4-8');
   });
 
   it('does not persist a disallowed model update', async () => {
@@ -142,11 +144,11 @@ describe('runtime bot create with a Claude compatibility profile', () => {
     expect(readBotsConfig(configPath).webBots?.[0].model).toBe('claude-opus-4-8');
   });
 
-  it('does not delete the allowed model into an invalid generic default', async () => {
+  it('falls back to Opus 4.8 when an explicit model is cleared', async () => {
     const res = await updateWebBot('');
 
-    expect(res.statusCode).toBe(400);
-    expect(res.json().error).toMatch(/\(unset\).*not allowed/);
-    expect(readBotsConfig(configPath).webBots?.[0].model).toBe('claude-opus-4-8');
+    expect(res.statusCode).toBe(200);
+    const persisted = readBotsConfig(configPath).webBots?.[0];
+    expect(webBotFromJson(persisted!).claude.model).toBe('claude-opus-4-8');
   });
 });

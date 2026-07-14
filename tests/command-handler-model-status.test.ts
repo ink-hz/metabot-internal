@@ -291,6 +291,17 @@ describe('CommandHandler /model', () => {
     expect(notices[0].content).toMatch(/not allowed/);
   });
 
+  it('rejects Fable without requiring a compatibility profile', async () => {
+    const { handler, notices, getSessionModel } = buildHandler({
+      engine: 'claude',
+      sessionModel: 'claude-opus-4-8',
+    });
+    await handler.handle(msg('/model claude-fable-5'));
+    expect(getSessionModel()).toBe('claude-opus-4-8');
+    expect(notices[0].color).toBe('red');
+    expect(notices[0].content).toMatch(/temporarily disabled/i);
+  });
+
   it('rejects a typed disallowed model before creating or updating a session', async () => {
     const {
       handler,

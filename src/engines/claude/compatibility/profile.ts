@@ -12,6 +12,15 @@ export const OPUS_PROFILE = Object.freeze({
 
 export type ClaudeCompatibilityProfile = typeof OPUS_PROFILE;
 
+const DISABLED_CLAUDE_MODEL_RE = /^claude-fable-5(?:$|\[)/;
+
+/** Product-level model gate. Fable stays disabled regardless of profile. */
+export function assertEnabledClaudeModel(model?: string): void {
+  if (model && DISABLED_CLAUDE_MODEL_RE.test(model)) {
+    throw new Error(`Claude model ${model} is not allowed: temporarily disabled; use claude-opus-4-8`);
+  }
+}
+
 export function loadClaudeCompatibilityProfile(
   env: { METABOT_CLAUDE_COMPAT_PROFILE?: string } = process.env,
 ): ClaudeCompatibilityProfile | undefined {
@@ -22,6 +31,7 @@ export function loadClaudeCompatibilityProfile(
 }
 
 export function assertAllowedClaudeModel(profile: ClaudeCompatibilityProfile, model?: string): void {
+  assertEnabledClaudeModel(model);
   if (!(profile.allowedModels as readonly string[]).includes(model ?? '')) {
     throw new Error(`Claude model ${model ?? '(unset)'} is not allowed by ${profile.id}`);
   }

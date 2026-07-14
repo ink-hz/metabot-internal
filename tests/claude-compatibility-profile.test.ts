@@ -6,6 +6,7 @@ import { loadAppConfig } from '../src/config.js';
 import {
   OPUS_PROFILE,
   assertAllowedClaudeModel,
+  assertEnabledClaudeModel,
   loadClaudeCompatibilityProfile,
 } from '../src/engines/claude/compatibility/profile.js';
 import { assertCompatibleClaudeVersion } from '../src/engines/claude/compatibility/version.js';
@@ -110,6 +111,12 @@ describe('Claude compatibility profile', () => {
     expect(() => assertAllowedClaudeModel(OPUS_PROFILE, undefined)).toThrow(/not allowed/);
   });
 
+  it('temporarily disables Fable even without a compatibility profile', () => {
+    expect(() => assertEnabledClaudeModel('claude-opus-4-8')).not.toThrow();
+    expect(() => assertEnabledClaudeModel('claude-fable-5')).toThrow(/temporarily disabled/i);
+    expect(() => assertEnabledClaudeModel('claude-fable-5[1m]')).toThrow(/temporarily disabled/i);
+  });
+
   it('requires the exact Claude Code version from the resolved executable', () => {
     const calls: Array<{ executable: string; args: readonly string[] }> = [];
     assertCompatibleClaudeVersion(OPUS_PROFILE, '/opt/claude', (executable, args) => {
@@ -177,12 +184,25 @@ describe('Claude compatibility profile', () => {
     expect(config.webBots[0].claude.compatibilityProfile).toBeUndefined();
   });
 
+  it('rejects an explicit Fable bot even when no profile is selected', () => {
+    useWebBotConfig('claude-fable-5');
+    delete process.env.METABOT_CLAUDE_COMPAT_PROFILE;
+
+    expect(() => loadAppConfig()).toThrow(/temporarily disabled/i);
+  });
+
   it.each(['feishu', 'telegram', 'wechat'] as const)(
-    'does not apply the old generic fallback in %s single-bot env mode',
+    'defaults to Opus 4.8 in %s single-bot env mode',
     (platform) => {
       useSingleBotEnv(platform);
 
-      expect(() => loadAppConfig()).toThrow(/Claude model \(unset\) is not allowed/);
+      const config = loadAppConfig();
+      const bot = platform === 'feishu'
+        ? config.feishuBots[0]
+        : platform === 'telegram'
+          ? config.telegramBots[0]
+          : config.wechatBots[0];
+      expect(bot.claude.model).toBe('claude-opus-4-8');
     },
   );
 });

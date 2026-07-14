@@ -4,7 +4,10 @@ import type { IncomingMessage } from '../types.js';
 import type { IMessageSender } from './message-sender.interface.js';
 import { resolveEngineName, SessionManager } from '../engines/index.js';
 import type { EngineName } from '../engines/index.js';
-import { assertAllowedClaudeModel } from '../engines/claude/compatibility/profile.js';
+import {
+  assertAllowedClaudeModel,
+  assertEnabledClaudeModel,
+} from '../engines/claude/compatibility/profile.js';
 import type { SessionSummary } from '../engines/claude/session-lister.js';
 import { MemoryClient } from '../memory/memory-client.js';
 import { AuditLogger } from '../utils/audit-logger.js';
@@ -345,12 +348,13 @@ export class CommandHandler {
       && normalized !== 'clear'
       && normalized !== 'default';
 
-    if (compatibilityProfile && isTypedModel) {
+    if (isTypedModel) {
       const activeEngine = this.sessionManager.peekSession(chatId)?.engine ?? botEngine;
       if (activeEngine === 'claude') {
         const newModel = args.split(/\s+/)[0];
         try {
-          assertAllowedClaudeModel(compatibilityProfile, newModel);
+          assertEnabledClaudeModel(newModel);
+          if (compatibilityProfile) assertAllowedClaudeModel(compatibilityProfile, newModel);
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           await this.sender.sendTextNotice(chatId, '❌ Model Not Allowed', message, 'red');
@@ -412,8 +416,7 @@ export class CommandHandler {
     if (normalized === 'list' || normalized === 'ls') {
       const active = session.model || botDefault;
       const claudeModels = [
-        { id: 'claude-fable-5', label: 'Fable 5', note: 'Latest Claude Code model · 1M context · 128k max output · adaptive thinking' },
-        { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'High-capability legacy default · 200k context · 128k max output' },
+        { id: 'claude-opus-4-8', label: 'Opus 4.8', note: 'Recommended default · 200k context · 128k max output' },
         { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', note: '1M context window' },
         { id: 'claude-opus-4-7', label: 'Opus 4.7', note: '200k context' },
         { id: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)', note: '1M context window' },
@@ -459,7 +462,7 @@ export class CommandHandler {
         if (this.config.claude.compatibilityProfile) {
           lines.push(`_Locked by compatibility profile \`${this.config.claude.compatibilityProfile.id}\`._`);
         } else {
-          lines.push('_Tip: Fable 5 uses its native 1M context. For Opus/Sonnet, append `[1m]` to enable the 1M context window._');
+          lines.push('_Tip: append `[1m]` to Opus/Sonnet models to enable the 1M context window when supported._');
         }
       } else if (activeEngine === 'codex') {
         lines.push('_Tip: leave unset to use the Codex CLI default from `~/.codex/config.toml`._');
@@ -665,7 +668,7 @@ export class CommandHandler {
       case 'claude':
         return this.config.claude.compatibilityProfile
           ? this.config.claude.compatibilityProfile.allowedModels.map((model) => `\`${model}\``).join(', ')
-          : '`claude-fable-5`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
+          : '`claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`';
       case 'kimi':
         return '`kimi-for-coding`, `kimi-k2`';
       case 'codex':

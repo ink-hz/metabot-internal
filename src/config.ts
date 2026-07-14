@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import type { AgentTeamConfig } from './agent-teams/team-store.js';
 import {
   assertAllowedClaudeModel,
+  assertEnabledClaudeModel,
   loadClaudeCompatibilityProfile,
   type ClaudeCompatibilityProfile,
 } from './engines/claude/compatibility/profile.js';
@@ -227,6 +228,7 @@ export function finalizeClaudeCompatibilityProfile<T extends BotConfigBase>(
   bot: T,
   env: { METABOT_CLAUDE_COMPAT_PROFILE?: string } = process.env,
 ): T {
+  assertEnabledClaudeModel(bot.claude.model);
   const profile = loadClaudeCompatibilityProfile(env);
   if (!profile) return bot;
   bot.claude.compatibilityProfile = profile;
@@ -480,8 +482,8 @@ function wechatBotFromJson(entry: WechatBotJsonEntry): WechatBotConfig {
 
 // --- Shared Claude config builder ---
 
-function genericClaudeModelFallback(): string | undefined {
-  return loadClaudeCompatibilityProfile() ? undefined : 'claude-fable-5';
+function genericClaudeModelFallback(): string {
+  return 'claude-opus-4-8';
 }
 
 function buildClaudeConfig(entry: {
