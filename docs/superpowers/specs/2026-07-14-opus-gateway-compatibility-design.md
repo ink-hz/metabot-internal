@@ -234,9 +234,10 @@ present; if structural validation is inconclusive, it fail-safes to the
 original unmodified bytes rather than attempting a partial transform.
 
 PDF/document blocks are never promoted because both validated PDF shapes work.
-Malformed JSON, an unsupported image source, or an oversized body returns an
-Anthropic-shaped `invalid_request_error`; the request is not partially
-forwarded.
+Malformed JSON or an oversized body returns an Anthropic-shaped
+`invalid_request_error`; the request is not partially forwarded. An unsupported
+or structurally ambiguous image block does not match the exact transform and
+therefore causes the original request bytes to pass through unchanged.
 
 ### Response handling
 
@@ -397,7 +398,8 @@ content.
 - PDF and unknown content blocks remain untouched.
 - Any valid non-target request is forwarded byte-for-byte; target requests
   retain unknown fields and lossless numeric values.
-- Malformed, unsupported, and oversized bodies return the specified error.
+- Malformed and oversized bodies return the specified error; unsupported or
+  ambiguous image shapes pass through unchanged.
 - Fable and every non-allowlisted model are rejected at configuration and
   session `/model` boundaries.
 - PTY and SDK launch options both deny built-in web tools and receive the same
