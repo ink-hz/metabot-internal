@@ -288,6 +288,7 @@ async function main() {
       bridge: handle.bridge,
       sender: handle.sender,
       feishuClient: handle.feishuClient,
+      connectionStatus: () => handle.wsClient.getConnectionStatus(),
     });
   }
 

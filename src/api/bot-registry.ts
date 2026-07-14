@@ -3,6 +3,10 @@ import type { BotConfigBase } from '../config.js';
 import { resolveEngineName, type EngineName } from '../engines/index.js';
 import type { MessageBridge } from '../bridge/message-bridge.js';
 import type { IMessageSender } from '../bridge/message-sender.interface.js';
+import type {
+  BotRuntimeSource,
+  WsConnectionSnapshot,
+} from '../reliability/runtime-status.js';
 
 export interface RegisteredBot {
   name: string;
@@ -12,6 +16,8 @@ export interface RegisteredBot {
   sender: IMessageSender;
   /** Feishu SDK client (only for feishu platform bots). */
   feishuClient?: lark.Client;
+  /** Side-effect-free Feishu WebSocket lifecycle snapshot reader. */
+  connectionStatus?: () => WsConnectionSnapshot;
 }
 
 /** Public DTO returned by list() — no secrets or internal refs. */
@@ -81,6 +87,22 @@ export class BotRegistry {
   /** Return all registered bots with full internal info (bridge, sender, etc.) */
   listRegistered(): RegisteredBot[] {
     return Array.from(this.bots.values());
+  }
+
+  /** Select the non-secret runtime facts consumed by authenticated status. */
+  listRuntimeSources(): BotRuntimeSource[] {
+    return Array.from(this.bots.values()).map((bot) => ({
+      name: bot.name,
+      platform: bot.platform,
+      engine: resolveEngineName(bot.config),
+      ...(defaultModelForEngine(bot.config)
+        ? { model: defaultModelForEngine(bot.config) }
+        : {}),
+      backend: bot.config.claude.backend,
+      ...(bot.connectionStatus
+        ? { connectionStatus: bot.connectionStatus }
+        : {}),
+    }));
   }
 
   list(): BotInfo[] {

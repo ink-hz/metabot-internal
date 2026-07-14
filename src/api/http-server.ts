@@ -25,6 +25,10 @@ import { AgentTeamSupervisor } from '../agent-teams/team-supervisor.js';
 import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import {
+  buildRuntimeStatus,
+  resolveReleaseSha,
+} from '../reliability/runtime-status.js';
+import {
   jsonResponse,
   acceptCoreChatRun,
   handleCoreChatRoutes,
@@ -351,6 +355,10 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           memory: { rssMb: toMb(mem.rss), heapUsedMb: toMb(mem.heapUsed) },
           executors: { total: executorTotal, active: executorActive },
           rateLimit: { trackedIps: rateLimiter.size() },
+          runtime: buildRuntimeStatus({
+            releaseSha: resolveReleaseSha(process.env.METABOT_RELEASE_SHA),
+            bots: registry.listRuntimeSources(),
+          }),
         });
         return;
       }
