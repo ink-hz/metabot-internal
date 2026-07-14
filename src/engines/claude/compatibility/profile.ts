@@ -6,6 +6,8 @@ export const OPUS_PROFILE = Object.freeze({
   allowedModels: Object.freeze(['claude-opus-4-8'] as const),
   contextWindow: 200_000 as const,
   promoteToolResultImages: true as const,
+  nativeWebTools: Object.freeze(['WebSearch', 'WebFetch'] as const),
+  nativeToolFailureMode: 'recoverable-turn' as const,
 });
 
 export type ClaudeCompatibilityProfile = typeof OPUS_PROFILE;

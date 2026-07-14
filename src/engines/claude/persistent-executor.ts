@@ -44,6 +44,11 @@ import type {
   PtyInteractiveTool,
   PtyInteractiveResponse,
 } from './pty/contract.js';
+import type { ClaudeCompatibilityProfile } from './compatibility/profile.js';
+import {
+  applyClaudeCompatibilityRuntime,
+  getRuntimeForProfile,
+} from './compatibility/runtime.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -171,6 +176,8 @@ export interface PersistentExecutorOptions {
    * query()). 'pty' keeps Claude Code subscription billing post-June-2026.
    */
   backend?: 'sdk' | 'pty';
+  /** Selected gateway compatibility profile, if any. */
+  compatibilityProfile?: ClaudeCompatibilityProfile;
 }
 
 export type ExecutorState =
@@ -477,6 +484,10 @@ export class PersistentClaudeExecutor extends EventEmitter {
       };
     }
     apply1MContextSettings(queryOptions);
+    const compatibilityRuntime = getRuntimeForProfile(this.options.compatibilityProfile);
+    if (compatibilityRuntime) {
+      applyClaudeCompatibilityRuntime(queryOptions, compatibilityRuntime);
+    }
 
     // Hooks: AskUserQuestion (mirrored from legacy executor — required so
     // that questions can be answered by users via Feishu cards) + Agent
@@ -506,6 +517,8 @@ export class PersistentClaudeExecutor extends EventEmitter {
         model: this.options.model,
         systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
         logger: this.options.logger,
+        env: compatibilityRuntime?.childEnv,
+        settingsEnv: compatibilityRuntime?.settingsEnv,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
       };

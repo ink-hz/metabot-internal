@@ -84,6 +84,8 @@ describe('Claude compatibility profile', () => {
       allowedModels: ['claude-opus-4-8'],
       contextWindow: 200_000,
       promoteToolResultImages: true,
+      nativeWebTools: ['WebSearch', 'WebFetch'],
+      nativeToolFailureMode: 'recoverable-turn',
     });
     expect(Object.isFrozen(profile)).toBe(true);
     expect(Object.isFrozen(profile?.allowedModels)).toBe(true);

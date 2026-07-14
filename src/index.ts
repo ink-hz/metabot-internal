@@ -21,6 +21,13 @@ import { DocSync } from './sync/doc-sync.js';
 import { MemoryClient } from './memory/memory-client.js';
 import { createFlywheelRecorder, type FlywheelRecorder } from './flywheel/index.js';
 import { isFlywheelEnabled } from './flywheel/config.js';
+import {
+  clearActiveClaudeCompatibilityRuntime,
+  setActiveClaudeCompatibilityRuntime,
+  startClaudeCompatibilityRuntime,
+  type ClaudeCompatibilityRuntime,
+} from './engines/claude/compatibility/runtime.js';
+import type { ClaudeCompatibilityProfile } from './engines/claude/compatibility/profile.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -195,6 +202,30 @@ async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
   applyBotFilter(appConfig, logger);
+  const allBotConfigs = [
+    ...appConfig.feishuBots,
+    ...appConfig.telegramBots,
+    ...appConfig.webBots,
+    ...appConfig.wechatBots,
+  ];
+  const profiles = new Map<string, ClaudeCompatibilityProfile>();
+  for (const bot of allBotConfigs) {
+    const profile = bot.claude.compatibilityProfile;
+    if (profile) profiles.set(profile.id, profile);
+  }
+  if (profiles.size > 1) {
+    throw new Error(`Multiple Claude compatibility profiles are not supported: ${[...profiles.keys()].join(', ')}`);
+  }
+  let claudeCompatibilityRuntime: ClaudeCompatibilityRuntime | undefined;
+  const compatibilityProfile = profiles.values().next().value as ClaudeCompatibilityProfile | undefined;
+  if (compatibilityProfile) {
+    claudeCompatibilityRuntime = await startClaudeCompatibilityRuntime({
+      profile: compatibilityProfile,
+      logger,
+    });
+    setActiveClaudeCompatibilityRuntime(claudeCompatibilityRuntime);
+    logger.info({ profileId: compatibilityProfile.id }, 'Claude compatibility runtime started');
+  }
   const flywheel = isFlywheelEnabled()
     ? createFlywheelRecorder({
       logger,
@@ -420,6 +451,10 @@ async function main() {
       Promise.allSettled(teardowns),
       new Promise((resolve) => setTimeout(resolve, 15_000)),
     ]);
+    if (claudeCompatibilityRuntime) {
+      clearActiveClaudeCompatibilityRuntime();
+      await claudeCompatibilityRuntime.close();
+    }
     process.exit(0);
   };
 

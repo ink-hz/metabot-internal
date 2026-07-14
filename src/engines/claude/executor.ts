@@ -9,6 +9,10 @@ import type { CodexReasoningEffort } from '../../config.js';
 import type { Logger } from '../../utils/logger.js';
 import { AsyncQueue } from '../../utils/async-queue.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
+import {
+  applyClaudeCompatibilityRuntime,
+  getRuntimeForProfile,
+} from './compatibility/runtime.js';
 
 const isWindows = process.platform === 'win32';
 
@@ -435,6 +439,11 @@ export class ClaudeExecutor {
 
     if (sessionId) {
       queryOptions.resume = sessionId;
+    }
+
+    const compatibilityRuntime = getRuntimeForProfile(this.config.claude.compatibilityProfile);
+    if (compatibilityRuntime) {
+      applyClaudeCompatibilityRuntime(queryOptions, compatibilityRuntime);
     }
 
     return queryOptions;

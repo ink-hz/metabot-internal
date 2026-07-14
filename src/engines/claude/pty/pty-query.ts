@@ -197,7 +197,9 @@ export const ptyQuery = (args: {
   const out = new AsyncQueue<SDKMessage>();
 
   // Hook bridge: owns settings.json + Stop/team-event command hooks.
-  const hookBridge: PtyHookBridge = options.hookBridge ?? createHookBridge();
+  const hookBridge: PtyHookBridge = options.hookBridge ?? createHookBridge({
+    settingsEnv: options.settingsEnv,
+  });
 
   // Mutable per-run state.
   let sessionId = options.resume ?? '';

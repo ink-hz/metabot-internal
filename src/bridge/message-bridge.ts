@@ -593,6 +593,7 @@ export class MessageBridge {
         defaultApiKey: this.config.claude.apiKey,
         defaultModel: this.config.claude.model,
         backend: this.config.claude.backend,
+        compatibilityProfile: this.config.claude.compatibilityProfile,
       });
       // Stage 3 — every newly added executor gets a spontaneous-activity
       // subscription so teammate / goal / background pings between turns
