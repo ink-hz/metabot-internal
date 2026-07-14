@@ -28,6 +28,7 @@
     "format:check": "prettier --check 'src/**/*.ts' 'tests/**/*.ts'",
     "probe:opus-gateway": "tsx scripts/probe-opus-gateway-capabilities.ts",
     "probe:opus-native-web": "tsx scripts/probe-opus-gateway-capabilities.ts",
+    "smoke:opus-image-session": "tsx scripts/smoke-opus-image-session.ts",
     "update-cli": "cp bin/metabot ~/.local/bin/metabot && chmod +x ~/.local/bin/metabot && echo \"Updated: metabot\" && rm -f ~/.local/bin/mb ~/.local/bin/mm ~/.local/bin/mh"
   },
   "dependencies": {

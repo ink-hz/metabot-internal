@@ -23,6 +23,11 @@ import type {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** Match Claude Code's `~/.claude/projects/<cwd>` directory encoding. */
+export function claudeProjectDirectoryName(cwd: string): string {
+  return path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
 
@@ -58,14 +63,16 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     this.sessionId = opts.resume ?? randomUUID();
 
     // Compute jsonl path: ~/.claude/projects/<escaped-cwd>/<sessionId>.jsonl
-    // Escaped cwd: every '/' replaced by '-' (leading slash → leading dash).
+    // Escaped cwd: every non-alphanumeric character becomes '-'. Claude Code
+    // applies this to both separators and dotted components such as
+    // `.worktrees`; replacing slashes alone points the scanner at no file.
     // cwd MUST be absolute here — a relative cwd (e.g. ".") escapes to "." and
     // the tail points at the wrong dir, so the scanner reads nothing and the
     // Feishu card renders blank. Config should already absolutize this
     // (expandUserPath), but resolve defensively so the path derivation matches
     // exactly what claude itself does (it derives its jsonl dir from its cwd).
     const resolvedCwd = path.resolve(opts.cwd);
-    const escaped = resolvedCwd.replace(/\//g, '-');
+    const escaped = claudeProjectDirectoryName(resolvedCwd);
     this.jsonlPath = path.join(
       os.homedir(),
       '.claude',
