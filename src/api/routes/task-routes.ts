@@ -49,6 +49,10 @@ export async function handleTaskRoutes(
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
     const syntheticProbe = parseInternalProbe(body.syntheticProbe);
+    const deliveryChatId = typeof body.deliveryChatId === 'string'
+      && /^[A-Za-z0-9_-]{2,128}$/u.test(body.deliveryChatId)
+      ? body.deliveryChatId
+      : undefined;
 
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
@@ -56,6 +60,10 @@ export async function handleTaskRoutes(
     }
     if (body.syntheticProbe !== undefined && !syntheticProbe) {
       jsonResponse(res, 400, { error: 'Invalid syntheticProbe' });
+      return true;
+    }
+    if (body.deliveryChatId !== undefined && (!syntheticProbe || !deliveryChatId)) {
+      jsonResponse(res, 400, { error: 'Invalid deliveryChatId' });
       return true;
     }
 
@@ -127,6 +135,7 @@ export async function handleTaskRoutes(
             const result = await bot.bridge.executeApiTask({
               prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
               ...(syntheticProbe ? { syntheticProbe } : {}),
+              ...(deliveryChatId ? { deliveryChatId } : {}),
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -195,6 +204,7 @@ export async function handleTaskRoutes(
         userId: 'api',
         sendCards: sendCards ?? true,
         ...(syntheticProbe ? { syntheticProbe } : {}),
+        ...(deliveryChatId ? { deliveryChatId } : {}),
         ...(hasWsSubscribers ? {
           onUpdate: (state, bridgeMessageId, final) => {
             const msgType = final ? 'complete' : 'state';

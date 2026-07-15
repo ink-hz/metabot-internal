@@ -145,6 +145,8 @@ export interface ApiTaskOptions {
   sendCards?: boolean;
   /** Authenticated control-plane probe identity; never derived from prompt text. */
   syntheticProbe?: IncomingMessage['syntheticProbe'];
+  /** Optional Feishu delivery target for an isolated authenticated probe session. */
+  deliveryChatId?: string;
   /** Override maxTurns for this task (e.g. 1 for voice mode). */
   maxTurns?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
@@ -2653,6 +2655,9 @@ export class MessageBridge {
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
     const probe = options.syntheticProbe;
+    const deliveryChatId = probe && options.deliveryChatId
+      ? options.deliveryChatId
+      : chatId;
 
     if (this.runningTasks.has(chatId)) {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
@@ -2689,7 +2694,7 @@ export class MessageBridge {
 
     let messageId: string | undefined;
     if (sendCards) {
-      messageId = await this.sender.sendCard(chatId, initialState);
+      messageId = await this.sender.sendCard(deliveryChatId, initialState);
     }
 
     // Generate a messageId for onUpdate even if sendCards is false
@@ -2848,7 +2853,7 @@ export class MessageBridge {
             if (this.exitPlanCardsShown.delete(chatId)) {
               this.logger.debug({ chatId, toolUseId: tool.toolUseId }, 'Plan already shown via approval card; skipping duplicate');
             } else {
-              await this.sendPlanContent(chatId, processor, state);
+              await this.sendPlanContent(deliveryChatId, processor, state);
             }
           }
         }
@@ -2919,13 +2924,13 @@ export class MessageBridge {
 
       this.recordProbeTerminal(probe, processor, lastState);
       if (sendCards && messageId) {
-        const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
+        const textDelivered = await this.sendFinalCard(messageId, lastState, deliveryChatId);
         this.recordProbeTextDelivery(probe, messageId, textDelivered);
       }
       options.onUpdate?.(lastState, effectiveMessageId, true);
 
       await this.outputHandler.sendOutputFiles(
-        chatId,
+        deliveryChatId,
         outputsDir,
         processor,
         lastState,
@@ -3005,11 +3010,11 @@ export class MessageBridge {
           await rateLimiter.cancelAndWait();
 
           if (sendCards && messageId) {
-            await this.sendFinalCard(messageId, lastState, chatId);
+            await this.sendFinalCard(messageId, lastState, deliveryChatId);
           }
           options.onUpdate?.(lastState, effectiveMessageId, true);
 
-          await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+          await this.outputHandler.sendOutputFiles(deliveryChatId, outputsDir, processor, lastState);
 
           if (options.onOutputFiles) {
             const outputFiles = this.outputsManager.scanOutputs(outputsDir);
@@ -3039,7 +3044,7 @@ export class MessageBridge {
           errorMessage: err.message || 'Unknown error',
         };
         await rateLimiter.cancelAndWait();
-        await this.sendFinalCard(messageId, errorState, chatId);
+        await this.sendFinalCard(messageId, errorState, deliveryChatId);
       }
 
       const catchErrorState: CardState = {

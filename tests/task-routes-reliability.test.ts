@@ -58,6 +58,7 @@ describe('task route reliability probe', () => {
         chatId: 'oc_canary',
         prompt: 'private prompt',
         sendCards: false,
+        deliveryChatId: 'oc_delivery_canary',
         syntheticProbe: { probeId: PROBE_ID, attemptId: ATTEMPT_ID },
       }),
       res,
@@ -72,6 +73,7 @@ describe('task route reliability probe', () => {
         probeId: PROBE_ID,
         attemptId: ATTEMPT_ID,
       },
+      deliveryChatId: 'oc_delivery_canary',
     }));
   });
 
@@ -86,6 +88,27 @@ describe('task route reliability probe', () => {
         chatId: 'oc_canary',
         prompt: 'private prompt',
         syntheticProbe: { probeId: 'bad', attemptId: ATTEMPT_ID },
+      }),
+      res,
+      'POST',
+      '/api/talk',
+    );
+
+    expect(res.statusCode).toBe(400);
+    expect(executeApiTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects a separate delivery chat for non-synthetic traffic', async () => {
+    const executeApiTask = vi.fn();
+    const res = response();
+
+    await handleTaskRoutes(
+      context(executeApiTask),
+      request({
+        botName: 'hr-bot',
+        chatId: 'real-user-chat',
+        deliveryChatId: 'other-chat',
+        prompt: 'private prompt',
       }),
       res,
       'POST',

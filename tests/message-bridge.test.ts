@@ -229,10 +229,12 @@ describe('MessageBridge synthetic probe receipts', () => {
       await bridge.executeApiTask({
         prompt: 'private API prompt',
         chatId: 'oc_api_canary',
+        deliveryChatId: 'oc_api_delivery',
         sendCards: true,
         syntheticProbe: probe,
       });
 
+      expect(sender.sent[0]?.chatId).toBe('oc_api_delivery');
       const receipt = store.getAttempt(probe.probeId, probe.attemptId);
       expect(receipt?.stages.map((stage) => stage.stage)).toEqual([
         'run_started',
