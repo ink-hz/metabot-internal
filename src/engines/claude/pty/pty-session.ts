@@ -31,6 +31,24 @@ export function claudeProjectDirectoryName(cwd: string): string {
 /** Max bytes kept in the PTY output ring buffer. */
 const RING_CAP = 64 * 1024;
 
+/**
+ * Decide whether the current rendered Claude screen is ready for a user turn.
+ * This intentionally consumes the terminal grid, not the append-only PTY byte
+ * log: startup dialogs and redraws leave stale `❯` markers in the byte log.
+ */
+export function isClaudeIdleInputScreen(screen: string): boolean {
+  const normalized = screen.toLowerCase().replace(/\s+/g, '');
+  const hasInputBox = /(?:^|\n)\s*❯/u.test(screen);
+  const running = normalized.includes('esctointerrupt');
+  const menuUp =
+    normalized.includes('entertoselect') ||
+    normalized.includes('ctrl-gtoedit') ||
+    normalized.includes('shift+tabtoapprove') ||
+    normalized.includes('esctocancel') ||
+    /❯\d+[.)]/u.test(normalized);
+  return hasInputBox && !running && !menuUp;
+}
+
 class PtyClaudeSessionImpl implements IPtyClaudeSession {
   readonly sessionId: string;
   readonly jsonlPath: string;
@@ -210,14 +228,19 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
   private async waitForReady(): Promise<void> {
     const TIMEOUT = 30_000;
     const POLL = 150;
-    const SETTLE = 2500;
+    const STABLE_MS = 700;
     const start = Date.now();
+    let idleSince = 0;
 
     while (Date.now() - start < TIMEOUT) {
-      if (/❯/.test(this.ring)) {
-        this.log.info('pty-session: TUI input box detected, settling...');
-        await sleep(SETTLE);
-        return;
+      if (isClaudeIdleInputScreen(this.screen())) {
+        if (!idleSince) idleSince = Date.now();
+        if (Date.now() - idleSince >= STABLE_MS) {
+          this.log.info('pty-session: stable TUI input box detected');
+          return;
+        }
+      } else {
+        idleSince = 0;
       }
       await sleep(POLL);
     }
@@ -279,16 +302,7 @@ class PtyClaudeSessionImpl implements IPtyClaudeSession {
     const start = Date.now();
     let idleSince = 0;
     while (Date.now() - start < TIMEOUT) {
-      const tail = this.snapshot().slice(-700);
-      const sq = tail.toLowerCase().replace(/\s+/g, '');
-      const running = sq.includes('esctointerrupt');
-      const menuUp =
-        sq.includes('entertoselect') ||
-        sq.includes('ctrl-gtoedit') ||
-        sq.includes('shift+tabtoapprove') ||
-        /❯\d\./.test(sq); // pointer on a numbered menu option
-      const hasInputBox = tail.includes('❯');
-      if (hasInputBox && !running && !menuUp) {
+      if (isClaudeIdleInputScreen(this.screen())) {
         if (!idleSince) idleSince = Date.now();
         if (Date.now() - idleSince >= STABLE_MS) return;
       } else {
