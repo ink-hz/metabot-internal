@@ -1,6 +1,7 @@
 import type * as http from 'node:http';
 import { jsonResponse, parseJsonBody } from './helpers.js';
 import type { RouteContext } from './types.js';
+import { parseInternalProbe } from '../../reliability/internal-probe.js';
 
 export async function handleTaskRoutes(
   ctx: RouteContext,
@@ -47,9 +48,14 @@ export async function handleTaskRoutes(
     const asyncMode = body.async === true;
     const callbackChatId = body.callbackChatId as string | undefined;
     const callbackBotName = body.callbackBotName as string | undefined;
+    const syntheticProbe = parseInternalProbe(body.syntheticProbe);
 
     if (!rawBotName || !chatId || !prompt) {
       jsonResponse(res, 400, { error: 'Missing required fields: botName, chatId, prompt or content' });
+      return true;
+    }
+    if (body.syntheticProbe !== undefined && !syntheticProbe) {
+      jsonResponse(res, 400, { error: 'Invalid syntheticProbe' });
       return true;
     }
 
@@ -66,6 +72,10 @@ export async function handleTaskRoutes(
 
     // If targeting a specific peer, skip local lookup
     if (targetPeerName) {
+      if (syntheticProbe) {
+        jsonResponse(res, 400, { error: 'Synthetic probes cannot be forwarded to peers' });
+        return true;
+      }
       if (!peerManager) {
         jsonResponse(res, 404, { error: `No peers configured, cannot resolve: ${rawBotName}` });
         return true;
@@ -116,6 +126,7 @@ export async function handleTaskRoutes(
           try {
             const result = await bot.bridge.executeApiTask({
               prompt, chatId, userId: 'api', sendCards: sendCards ?? true,
+              ...(syntheticProbe ? { syntheticProbe } : {}),
             });
             asyncTaskStore.update(asyncTask.id, {
               status: result.success ? 'completed' : 'failed',
@@ -183,6 +194,7 @@ export async function handleTaskRoutes(
         chatId,
         userId: 'api',
         sendCards: sendCards ?? true,
+        ...(syntheticProbe ? { syntheticProbe } : {}),
         ...(hasWsSubscribers ? {
           onUpdate: (state, bridgeMessageId, final) => {
             const msgType = final ? 'complete' : 'state';

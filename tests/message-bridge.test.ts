@@ -175,6 +175,129 @@ describe('MessageBridge synthetic probe receipts', () => {
       fs.rmSync(rootDir, { recursive: true, force: true });
     }
   });
+
+  it('records authenticated API execution, tool, and text delivery stages', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-api-probe-'));
+    const config = makeConfig();
+    config.persistentExecutor = { enabled: false };
+    config.claude.defaultWorkingDirectory = rootDir;
+    config.claude.outputsBaseDir = path.join(rootDir, 'outputs');
+    config.claude.downloadsDir = path.join(rootDir, 'downloads');
+    config.claude.model = 'claude-opus-4-8';
+    const store = new ProbeReceiptStore();
+    const sender = makeSender();
+    const bridge = new MessageBridge(config, mockLogger, sender as any, undefined, store) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        yield {
+          type: 'stream_event',
+          session_id: 'session-api-probe',
+          parent_tool_use_id: null,
+          event: {
+            type: 'content_block_start',
+            content_block: { type: 'tool_use', name: 'Bash' },
+          },
+        };
+        yield {
+          type: 'assistant',
+          session_id: 'session-api-probe',
+          parent_tool_use_id: null,
+          message: {
+            content: [{ type: 'tool_result', content: 'ok' }],
+          },
+        };
+        yield {
+          type: 'result',
+          subtype: 'success',
+          result: 'private API response',
+          session_id: 'session-api-probe',
+          total_cost_usd: 0,
+          duration_ms: 10,
+        };
+      })(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    const probe = {
+      isSynthetic: true as const,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+      attemptId: '01J2Z9M77A68K8B1T4W5F6H9P0',
+    };
+
+    try {
+      await bridge.executeApiTask({
+        prompt: 'private API prompt',
+        chatId: 'oc_api_canary',
+        sendCards: true,
+        syntheticProbe: probe,
+      });
+
+      const receipt = store.getAttempt(probe.probeId, probe.attemptId);
+      expect(receipt?.stages.map((stage) => stage.stage)).toEqual([
+        'run_started',
+        'tool_completed',
+        'run_completed',
+        'text_delivered',
+      ]);
+      expect(receipt?.stages).toContainEqual(expect.objectContaining({
+        stage: 'run_completed',
+        botName: 'test-bot',
+        sessionId: 'session-api-probe',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+      }));
+      expect(JSON.stringify(receipt)).not.toContain('private API prompt');
+      expect(JSON.stringify(receipt)).not.toContain('private API response');
+    } finally {
+      bridge.destroy();
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('records a sanitized failed stage when an authenticated API stream throws', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-api-probe-error-'));
+    const config = makeConfig();
+    config.persistentExecutor = { enabled: false };
+    config.claude.defaultWorkingDirectory = rootDir;
+    config.claude.outputsBaseDir = path.join(rootDir, 'outputs');
+    config.claude.downloadsDir = path.join(rootDir, 'downloads');
+    config.claude.model = 'claude-opus-4-8';
+    const store = new ProbeReceiptStore();
+    const bridge = new MessageBridge(config, mockLogger, makeSender() as any, undefined, store) as any;
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        throw new Error('private token=secret upstream failed');
+      })(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    const probe = {
+      isSynthetic: true as const,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+      attemptId: '01J2Z9M77A68K8B1T4W5F6H9P0',
+    };
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: 'private API prompt',
+        chatId: 'oc_api_canary_error',
+        syntheticProbe: probe,
+      });
+
+      expect(result.success).toBe(false);
+      const receipt = store.getAttempt(probe.probeId, probe.attemptId);
+      expect(receipt?.stages.at(-1)).toEqual(expect.objectContaining({
+        stage: 'failed',
+        botName: 'test-bot',
+      }));
+      expect(JSON.stringify(receipt)).not.toMatch(/private|secret|token/iu);
+    } finally {
+      bridge.destroy();
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('MessageBridge public error delivery', () => {

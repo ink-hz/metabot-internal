@@ -143,6 +143,8 @@ export interface ApiTaskOptions {
   chatId: string;
   userId?: string;
   sendCards?: boolean;
+  /** Authenticated control-plane probe identity; never derived from prompt text. */
+  syntheticProbe?: IncomingMessage['syntheticProbe'];
   /** Override maxTurns for this task (e.g. 1 for voice mode). */
   maxTurns?: number;
   /** Override model for this task (e.g. faster model for voice calls). */
@@ -2650,6 +2652,7 @@ export class MessageBridge {
 
   async executeApiTask(options: ApiTaskOptions): Promise<ApiTaskResult> {
     const { prompt, chatId, userId = 'api', sendCards = false } = options;
+    const probe = options.syntheticProbe;
 
     if (this.runningTasks.has(chatId)) {
       return { success: false, responseText: '', error: 'Chat is busy with another task' };
@@ -2662,7 +2665,17 @@ export class MessageBridge {
     const outputsDir = this.outputsManager.prepareDir(chatId);
 
     const displayPrompt = prompt;
-    const processor = new StreamProcessor(displayPrompt);
+    const processor = new StreamProcessor(displayPrompt, probe ? {
+      recordToolCall: (payload) => {
+        if (payload.status === 'completed') {
+          this.probeObserver?.stage(probe, {
+            stage: 'tool_completed',
+            at: new Date().toISOString(),
+          });
+        }
+      },
+      recordEvidence: () => {},
+    } : undefined);
     const rateLimiter = new RateLimiter(1500);
     const activeGoal = session.activeGoal;
 
@@ -2713,17 +2726,33 @@ export class MessageBridge {
     // options; persistent executor would need additional plumbing to apply
     // them per-turn — runOneTurn falls back to legacy spawn automatically
     // when those are set.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext,
-      maxTurns: options.maxTurns,
-      model: options.model ?? session.model,
-      allowedTools: options.allowedTools,
-      onTeamEvent,
+    this.probeObserver?.stage(probe, {
+      stage: 'run_started',
+      at: new Date().toISOString(),
+      model: options.model ?? session.model ?? this.config.claude.model,
+      backend: engineName === 'claude' ? this.config.claude.backend : engineName,
     });
+    let executionHandle: ExecutionHandle;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt,
+        cwd,
+        abortController,
+        outputsDir,
+        apiContext,
+        maxTurns: options.maxTurns,
+        model: options.model ?? session.model,
+        allowedTools: options.allowedTools,
+        onTeamEvent,
+      });
+    } catch (err) {
+      this.probeObserver?.stage(probe, {
+        stage: 'failed',
+        at: new Date().toISOString(),
+        errorClass: classifyFlywheelError(err instanceof Error ? err.message : String(err)),
+      });
+      throw err;
+    }
 
     const startTime = Date.now();
     runningTask = {
@@ -2888,12 +2917,20 @@ export class MessageBridge {
         await rateLimiter.cancelAndWait();
       }
 
+      this.recordProbeTerminal(probe, processor, lastState);
       if (sendCards && messageId) {
-        await this.sendFinalCard(messageId, lastState, chatId);
+        const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
+        this.recordProbeTextDelivery(probe, messageId, textDelivered);
       }
       options.onUpdate?.(lastState, effectiveMessageId, true);
 
-      await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
+      await this.outputHandler.sendOutputFiles(
+        chatId,
+        outputsDir,
+        processor,
+        lastState,
+        probe ? (receipt) => this.probeObserver?.delivery(probe, receipt) : undefined,
+      );
 
       // Notify web clients about output files before cleanup
       if (options.onOutputFiles) {
@@ -3012,6 +3049,7 @@ export class MessageBridge {
         toolCalls: lastState.toolCalls,
         errorMessage: err.message || 'Unknown error',
       };
+      this.recordProbeTerminal(probe, processor, catchErrorState);
       options.onUpdate?.(catchErrorState, effectiveMessageId, true);
 
       this.emitActivity({
