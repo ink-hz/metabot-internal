@@ -517,7 +517,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
         model: this.options.model,
         systemPrompt: append ? { type: 'preset', preset: 'claude_code', append } : undefined,
         logger: this.options.logger,
-        env: compatibilityRuntime?.childEnv,
+        env: queryOptions.env as NodeJS.ProcessEnv | undefined,
         settingsEnv: compatibilityRuntime?.settingsEnv,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),

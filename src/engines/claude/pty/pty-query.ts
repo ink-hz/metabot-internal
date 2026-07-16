@@ -318,6 +318,23 @@ export const ptyQuery = (args: {
           const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
           if (sid) sessionId = sid;
         }
+        if (turnInFlight && isTerminalApiErrorRecord(rec)) {
+          const usage = { ...lastUsage };
+          lastUsage = {};
+          turnInFlight = false;
+          turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
+          logger.warn(
+            { apiErrorStatus: typeof rec.apiErrorStatus === 'number' ? rec.apiErrorStatus : undefined },
+            'ptyQuery: Claude API error ended the turn without a Stop hook',
+          );
+          out.enqueue(synthesizeResult({
+            sessionId,
+            isError: true,
+            model: usage.model,
+            usage,
+          }));
+          continue;
+        }
         const adapted = adaptJsonlRecord(rec);
         if (!adapted) continue;
         if (Array.isArray(adapted)) {
@@ -685,4 +702,10 @@ function recordContainsToolUse(record: RawJsonlRecord): boolean {
     block && typeof block === 'object' && !Array.isArray(block)
       && (block as { type?: unknown }).type === 'tool_use',
   ));
+}
+
+export function isTerminalApiErrorRecord(record: RawJsonlRecord): boolean {
+  if (record.type !== 'assistant' || record.isApiErrorMessage !== true) return false;
+  const parentToolUseId = record.parentToolUseID ?? record.parent_tool_use_id;
+  return parentToolUseId === null || parentToolUseId === undefined;
 }
