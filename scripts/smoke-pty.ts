@@ -11,7 +11,11 @@ const stream = ptyQuery({
   prompt: prompts,
   options: {
     cwd: process.cwd(),
-    model: 'fable',
+    model: 'claude-opus-4-8',
+    env: {
+      CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
+    },
     pathToClaudeExecutable: claude,
     logger: createLogger('warn'),
   },

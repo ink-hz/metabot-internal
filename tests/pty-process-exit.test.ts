@@ -5,8 +5,28 @@ import {
   isClaudeProcessExitError,
 } from '../src/engines/claude/pty/process-exit-error.js';
 import { AsyncQueue } from '../src/utils/async-queue.js';
+import { isTerminalApiErrorRecord } from '../src/engines/claude/pty/pty-query.js';
 
 describe('Claude PTY process exit contract', () => {
+  it('recognizes a top-level Claude API error as a terminal turn record', () => {
+    expect(isTerminalApiErrorRecord({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      parentToolUseID: null,
+      apiErrorStatus: 400,
+      message: { content: [{ type: 'text', text: 'API Error: 400 invalid beta flag' }] },
+    })).toBe(true);
+    expect(isTerminalApiErrorRecord({
+      type: 'assistant',
+      isApiErrorMessage: true,
+      parentToolUseID: 'tool-1',
+    })).toBe(false);
+    expect(isTerminalApiErrorRecord({
+      type: 'user',
+      message: { content: [{ type: 'tool_result', content: 'API Error: 400' }] },
+    })).toBe(false);
+  });
+
   it('allows only monotonic turn-phase advances', () => {
     expect(advanceClaudeTurnPhase('accepted', 'process_starting')).toBe('process_starting');
     expect(advanceClaudeTurnPhase('process_starting', 'prompt_dispatched')).toBe('prompt_dispatched');
