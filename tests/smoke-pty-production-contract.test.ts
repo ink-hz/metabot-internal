@@ -8,6 +8,9 @@ describe('production PTY smoke contract', () => {
     expect(source).toContain("model: 'claude-opus-4-8'");
     expect(source).toContain("CLAUDE_CODE_DISABLE_1M_CONTEXT: '1'");
     expect(source).toContain("CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000'");
+    expect(source).toContain('loadClaudeCompatibilityProfile');
+    expect(source).toContain('startClaudeCompatibilityRuntime');
+    expect(source).toContain('applyClaudeCompatibilityRuntime');
     expect(source).not.toContain("model: 'fable'");
     expect(source).toContain("message.type === 'assistant'");
     expect(source).toContain("message.subtype === 'success'");
