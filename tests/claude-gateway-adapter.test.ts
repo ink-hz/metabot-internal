@@ -81,7 +81,7 @@ describe('Claude gateway loopback adapter', () => {
       response.end('{"ok":true}');
     });
     const upstreamUrl = await listen(upstream.server);
-    const { logger } = loggerCapture();
+    const { logger, entries } = loggerCapture();
     const adapter = await startClaudeGatewayAdapter({
       upstreamBaseUrl: upstreamUrl,
       authToken: TOKEN,
@@ -117,6 +117,8 @@ describe('Claude gateway loopback adapter', () => {
       expect(upstream.requests[0].headers['anthropic-beta']).toBe(
         'claude-code-20250219, effort-2025-11-24',
       );
+      expect(JSON.stringify(entries)).toContain('claude-code-20250219');
+      expect(JSON.stringify(entries)).not.toContain(TOKEN);
       expect(upstream.requests[1].headers['anthropic-beta']).toBeUndefined();
       expect(upstream.requests[0].body).toEqual(raw);
       expect(upstream.requests[1].body).toEqual(raw);

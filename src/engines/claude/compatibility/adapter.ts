@@ -128,6 +128,13 @@ function proxyRequest(args: {
     sanitizedHeaders(request.headers),
     args.unsupportedRequestBetas,
   );
+  const requestBetas = headers['anthropic-beta'];
+  logger.debug?.({
+    path: target.pathname,
+    requestBetas: typeof requestBetas === 'string'
+      ? requestBetas.split(',').map((value) => value.trim())
+      : requestBetas ?? [],
+  }, 'Claude gateway adapter beta policy applied');
   if (body) headers['content-length'] = String(body.length);
   const transport = target.protocol === 'https:' ? https : http;
   let upstreamResponded = false;

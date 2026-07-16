@@ -11,7 +11,7 @@ import type { PtyUserMessage } from '../src/engines/claude/pty/contract.js';
 const marker = 'METABOT_PTY_OK_713';
 const claude = process.env.CLAUDE_BIN
   ?? new URL('../.tools/claude/node_modules/@anthropic-ai/claude-code/bin/claude.exe', import.meta.url).pathname;
-const logger = createLogger('warn');
+const logger = createLogger('debug');
 const profile = loadClaudeCompatibilityProfile();
 if (!profile) throw new Error('PTY smoke test requires METABOT_CLAUDE_COMPAT_PROFILE');
 const compatibilityRuntime = await startClaudeCompatibilityRuntime({
