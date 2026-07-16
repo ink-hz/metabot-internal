@@ -75,6 +75,77 @@ async function requestAdapter(
 }
 
 describe('Claude gateway loopback adapter', () => {
+  it('filters only profile-declared beta flags on message requests', async () => {
+    const upstream = captureUpstream((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{"ok":true}');
+    });
+    const upstreamUrl = await listen(upstream.server);
+    const { logger } = loggerCapture();
+    const adapter = await startClaudeGatewayAdapter({
+      upstreamBaseUrl: upstreamUrl,
+      authToken: TOKEN,
+      logger,
+      unsupportedRequestBetas: [
+        'redact-thinking-2026-02-12',
+        'prompt-caching-scope-2026-01-05',
+      ],
+    });
+    const raw = Buffer.from('{"model":"claude-opus-4-8","messages":[]}');
+
+    try {
+      await requestAdapter(adapter.baseUrl, '/v1/messages', {
+        method: 'POST',
+        headers: {
+          'anthropic-beta': [
+            'claude-code-20250219',
+            ' redact-thinking-2026-02-12',
+            ' effort-2025-11-24',
+            ' prompt-caching-scope-2026-01-05',
+          ].join(','),
+        },
+        body: raw,
+      });
+      await requestAdapter(adapter.baseUrl, '/v1/messages', {
+        method: 'POST',
+        headers: {
+          'anthropic-beta': 'redact-thinking-2026-02-12,prompt-caching-scope-2026-01-05',
+        },
+        body: raw,
+      });
+
+      expect(upstream.requests[0].headers['anthropic-beta']).toBe(
+        'claude-code-20250219, effort-2025-11-24',
+      );
+      expect(upstream.requests[1].headers['anthropic-beta']).toBeUndefined();
+      expect(upstream.requests[0].body).toEqual(raw);
+      expect(upstream.requests[1].body).toEqual(raw);
+    } finally {
+      await adapter.close();
+      await close(upstream.server);
+    }
+  });
+
+  it('preserves beta headers when no compatibility policy is supplied', async () => {
+    const upstream = captureUpstream((_request, response) => response.end('{"ok":true}'));
+    const upstreamUrl = await listen(upstream.server);
+    const { logger } = loggerCapture();
+    const adapter = await startClaudeGatewayAdapter({ upstreamBaseUrl: upstreamUrl, authToken: TOKEN, logger });
+    const betaHeader = 'redact-thinking-2026-02-12, prompt-caching-scope-2026-01-05';
+
+    try {
+      await requestAdapter(adapter.baseUrl, '/v1/messages', {
+        method: 'POST',
+        headers: { 'anthropic-beta': betaHeader },
+        body: Buffer.from('{"messages":[]}'),
+      });
+      expect(upstream.requests[0].headers['anthropic-beta']).toBe(betaHeader);
+    } finally {
+      await adapter.close();
+      await close(upstream.server);
+    }
+  });
+
   it('forwards native WebSearch request bytes and tool type unchanged', async () => {
     const upstream = captureUpstream((_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });

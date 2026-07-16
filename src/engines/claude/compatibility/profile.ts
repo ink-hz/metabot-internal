@@ -14,6 +14,10 @@ export const OPUS_PROFILE = Object.freeze({
   allowedModels: Object.freeze(['claude-opus-4-8'] as const),
   contextWindow: 200_000 as const,
   promoteToolResultImages: true as const,
+  unsupportedRequestBetas: Object.freeze([
+    'redact-thinking-2026-02-12',
+    'prompt-caching-scope-2026-01-05',
+  ] as const),
   nativeWebTools: Object.freeze(['WebSearch', 'WebFetch'] as const),
   nativeToolFailureMode: 'recoverable-turn' as const,
   capabilities: Object.freeze([

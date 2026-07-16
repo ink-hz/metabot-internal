@@ -38,6 +38,7 @@ export interface ClaudeGatewayAdapterOptions {
   authToken: string;
   logger: ClaudeGatewayAdapterLogger;
   maxMessageBodyBytes?: number;
+  unsupportedRequestBetas?: readonly string[];
 }
 
 export interface ClaudeGatewayAdapter {
@@ -72,6 +73,23 @@ function sanitizedHeaders(headers: IncomingHttpHeaders): IncomingHttpHeaders {
   return result;
 }
 
+function filterUnsupportedRequestBetas(
+  headers: IncomingHttpHeaders,
+  unsupportedRequestBetas: readonly string[] | undefined,
+): IncomingHttpHeaders {
+  if (!unsupportedRequestBetas?.length) return headers;
+  const value = headers['anthropic-beta'];
+  if (value === undefined) return headers;
+  const raw = Array.isArray(value) ? value.join(',') : value;
+  const segments = raw.split(',');
+  const unsupported = new Set(unsupportedRequestBetas);
+  const filtered = segments.filter((segment) => !unsupported.has(segment.trim()));
+  if (filtered.length === segments.length) return headers;
+  if (filtered.length === 0) delete headers['anthropic-beta'];
+  else headers['anthropic-beta'] = filtered.join(',');
+  return headers;
+}
+
 function upstreamUrl(baseUrl: URL, requestUrl: string): URL {
   const incoming = new URL(requestUrl, 'http://127.0.0.1');
   const target = new URL(baseUrl);
@@ -102,10 +120,14 @@ function proxyRequest(args: {
   logger: ClaudeGatewayAdapterLogger;
   promotedCount: number;
   requestBytes?: number;
+  unsupportedRequestBetas?: readonly string[];
 }): void {
   const { request, response, target, body, logger, promotedCount } = args;
   const startedAt = Date.now();
-  const headers = sanitizedHeaders(request.headers);
+  const headers = filterUnsupportedRequestBetas(
+    sanitizedHeaders(request.headers),
+    args.unsupportedRequestBetas,
+  );
   if (body) headers['content-length'] = String(body.length);
   const transport = target.protocol === 'https:' ? https : http;
   let upstreamResponded = false;
@@ -212,6 +234,7 @@ export async function startClaudeGatewayAdapter(
         logger: options.logger,
         promotedCount,
         requestBytes: raw.length,
+        unsupportedRequestBetas: options.unsupportedRequestBetas,
       });
     })().catch((error) => {
       options.logger.error({ errorCategory: 'adapter_internal_error' }, 'Claude gateway adapter request failed');
