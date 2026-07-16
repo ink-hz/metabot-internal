@@ -2,7 +2,6 @@ import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import type { RawJsonlRecord } from './contract.js';
 
 const MAX_RECOVERY_TAIL_BYTES = 4 * 1024 * 1024;
-const EXIT_ERROR_TEXT = 'claude process exited before the turn completed';
 
 export function extractCompletedAssistantText(record: RawJsonlRecord): string | null {
   if (record.type !== 'assistant') return null;
@@ -59,11 +58,11 @@ export function readCompletedAssistantTextSince(
 }
 
 export function resolveUnexpectedExit(completedText: string | null | undefined): {
-  isError: boolean;
+  kind: 'completed';
   resultText: string;
-} {
+} | { kind: 'incomplete' } {
   const text = completedText?.trim();
   return text
-    ? { isError: false, resultText: text }
-    : { isError: true, resultText: EXIT_ERROR_TEXT };
+    ? { kind: 'completed', resultText: text }
+    : { kind: 'incomplete' };
 }

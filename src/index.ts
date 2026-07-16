@@ -33,6 +33,7 @@ import {
   type SyntheticAllowlist,
 } from './reliability/synthetic-context.js';
 import { ProbeReceiptStore } from './reliability/probe-receipt-store.js';
+import { getRuntimeInstanceId } from './runtime/instance-identity.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -210,6 +211,7 @@ function applyBotFilter(appConfig: ReturnType<typeof loadAppConfig>, logger: Log
 async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
+  logger.info({ instanceId: getRuntimeInstanceId() }, 'MetaBot runtime identity');
   applyBotFilter(appConfig, logger);
   const allBotConfigs = [
     ...appConfig.feishuBots,

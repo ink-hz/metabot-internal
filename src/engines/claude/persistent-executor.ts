@@ -1137,7 +1137,7 @@ export class PersistentClaudeExecutor extends EventEmitter {
       if (this.activeTurn) {
         const turn = this.activeTurn;
         turn.detached = true;
-        turn.queue.finish();
+        turn.queue.fail(err);
         this.activeTurn = null;
         this.emit('turn-aborted', turn.id);
       }
