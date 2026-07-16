@@ -34,18 +34,24 @@ const timer = setTimeout(async () => {
   process.exit(2);
 }, 60_000);
 
-let transcript = '';
+let assistantText = '';
+let successful = false;
 for await (const message of stream) {
-  transcript += `${JSON.stringify(message)}\n`;
-  if ((message as { type?: string }).type === 'result') {
+  if (message.type === 'assistant') {
+    for (const block of message.message?.content ?? []) {
+      if (block.type === 'text' && block.text) assistantText += block.text;
+    }
+  }
+  if (message.type === 'result') {
+    successful = message.subtype === 'success' && message.is_error !== true;
     clearTimeout(timer);
     await stream.dispose?.();
     break;
   }
 }
 
-if (!transcript.includes(marker)) {
-  console.error(transcript);
+if (!successful || assistantText.trim() !== marker) {
+  console.error(JSON.stringify({ successful, assistantText: assistantText.trim() }));
   process.exit(1);
 }
 console.log(marker);
