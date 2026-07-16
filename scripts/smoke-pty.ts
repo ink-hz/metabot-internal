@@ -27,6 +27,7 @@ const queryOptions = {
     CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
   },
+  settingsEnv: compatibilityRuntime.settingsEnv,
   pathToClaudeExecutable: claude,
   logger,
 };

@@ -11,6 +11,7 @@ describe('production PTY smoke contract', () => {
     expect(source).toContain('loadClaudeCompatibilityProfile');
     expect(source).toContain('startClaudeCompatibilityRuntime');
     expect(source).toContain('applyClaudeCompatibilityRuntime');
+    expect(source).toContain('settingsEnv: compatibilityRuntime.settingsEnv');
     expect(source).not.toContain("model: 'fable'");
     expect(source).toContain("message.type === 'assistant'");
     expect(source).toContain("message.subtype === 'success'");
