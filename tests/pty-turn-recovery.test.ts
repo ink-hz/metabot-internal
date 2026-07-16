@@ -81,14 +81,11 @@ describe('PTY completed-turn recovery', () => {
     expect(readCompletedAssistantTextSince(path, Buffer.byteLength(previous))).toBeNull();
   });
 
-  it('maps completed text to success and missing text to the existing process error', () => {
+  it('maps completed text to success and leaves an incomplete turn for typed crash propagation', () => {
     expect(resolveUnexpectedExit('Provider search is unavailable.')).toEqual({
-      isError: false,
+      kind: 'completed',
       resultText: 'Provider search is unavailable.',
     });
-    expect(resolveUnexpectedExit(null)).toEqual({
-      isError: true,
-      resultText: 'claude process exited before the turn completed',
-    });
+    expect(resolveUnexpectedExit(null)).toEqual({ kind: 'incomplete' });
   });
 });

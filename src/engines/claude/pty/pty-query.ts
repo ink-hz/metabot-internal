@@ -49,6 +49,11 @@ import {
   readCompletedAssistantTextSince,
   resolveUnexpectedExit,
 } from './turn-recovery.js';
+import {
+  ClaudeProcessExitError,
+  advanceClaudeTurnPhase,
+  type ClaudeTurnPhase,
+} from './process-exit-error.js';
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -213,6 +218,8 @@ export const ptyQuery = (args: {
   // terminal `result` is emitted (Stop hook). The exit watchdog uses it to
   // decide whether an unexpected claude death orphaned an in-flight turn.
   let turnInFlight = false;
+  let turnPhase: ClaudeTurnPhase = 'process_starting';
+  let toolSideEffectSeen = false;
   // Byte offset captured immediately before the current prompt is submitted.
   // Exit recovery reads only records after this boundary, so a previous
   // turn's completed answer can never turn a new crashed turn into success.
@@ -256,6 +263,7 @@ export const ptyQuery = (args: {
       // Mark the turn complete IMMEDIATELY (not in the drain timeout below) so
       // the slash-command idle watchdog stands down and never double-emits.
       turnInFlight = false;
+      turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
       const usage = { ...lastUsage };
       // Reset for the next turn.
       lastUsage = {};
@@ -282,9 +290,15 @@ export const ptyQuery = (args: {
     void runInteractiveMenuWatcher();
   })();
 
-  boot.catch((err) => {
-    logger.error({ err }, 'ptyQuery: boot failed');
-    out.finish();
+  boot.catch(() => {
+    logger.error({ errorClass: 'claude_boot' }, 'ptyQuery: boot failed');
+    out.fail(new ClaudeProcessExitError({
+      exitCode: null,
+      phase: turnPhase,
+      sessionRef: sessionId ? sessionId.slice(0, 8) : undefined,
+      completedOutputRecovered: false,
+      toolSideEffectSeen,
+    }));
   });
 
   // ── Scanner loop ─────────────────────────────────────────────────────────
@@ -294,6 +308,12 @@ export const ptyQuery = (args: {
       for await (const rec of scanner) {
         if (disposed) break;
         trackUsage(rec);
+        if (turnInFlight && recordContainsToolUse(rec)) {
+          toolSideEffectSeen = true;
+          turnPhase = advanceClaudeTurnPhase(turnPhase, 'side_effect_started');
+        } else if (turnInFlight && rec.type === 'assistant' && turnPhase !== 'side_effect_started') {
+          turnPhase = advanceClaudeTurnPhase(turnPhase, 'output_started');
+        }
         if (!sessionId) {
           const sid = (rec.sessionId ?? rec.session_id) as string | undefined;
           if (sid) sessionId = sid;
@@ -482,7 +502,10 @@ export const ptyQuery = (args: {
         } catch {
           turnJsonlStartOffset = 0;
         }
+        turnPhase = 'accepted';
+        toolSideEffectSeen = false;
         turnInFlight = true; // a new turn starts the moment we submit the prompt
+        turnPhase = advanceClaudeTurnPhase(turnPhase, 'prompt_dispatched');
         await session.typePrompt(text);
         // Client-side slash commands (/effort, /model, /status, …) change a
         // setting WITHOUT a model turn → no assistant record, no Stop hook, so
@@ -560,17 +583,29 @@ export const ptyQuery = (args: {
         ? readCompletedAssistantTextSince(session.jsonlPath, turnJsonlStartOffset)
         : null;
       const recovered = resolveUnexpectedExit(completedText);
-      logger.info({ recoveredCompletedTurn: !recovered.isError },
+      logger.info({ recoveredCompletedTurn: recovered.kind === 'completed' },
         'ptyQuery: resolved unexpected exit from current-turn JSONL');
-      out.enqueue(
-        synthesizeResult({
-          sessionId,
-          isError: recovered.isError,
-          resultText: recovered.resultText,
-          model: lastUsage.model,
-          usage: lastUsage,
-        }),
-      );
+      if (recovered.kind === 'completed') {
+        turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
+        out.enqueue(
+          synthesizeResult({
+            sessionId,
+            isError: false,
+            resultText: recovered.resultText,
+            model: lastUsage.model,
+            usage: lastUsage,
+          }),
+        );
+      } else {
+        out.fail(new ClaudeProcessExitError({
+          exitCode: info.exitCode,
+          signal: info.signal,
+          phase: turnPhase,
+          sessionRef: sessionId ? sessionId.slice(0, 8) : undefined,
+          completedOutputRecovered: false,
+          toolSideEffectSeen,
+        }));
+      }
     }
     // The session is gone; no further turns can run on it. Tear down so the
     // caller's iteration ends cleanly instead of hanging forever.
@@ -641,3 +676,13 @@ export const ptyQuery = (args: {
   };
   return query;
 };
+
+function recordContainsToolUse(record: RawJsonlRecord): boolean {
+  if (record.type !== 'assistant') return false;
+  const message = record.message as { content?: unknown } | undefined;
+  if (!Array.isArray(message?.content)) return false;
+  return message.content.some((block) => Boolean(
+    block && typeof block === 'object' && !Array.isArray(block)
+      && (block as { type?: unknown }).type === 'tool_use',
+  ));
+}

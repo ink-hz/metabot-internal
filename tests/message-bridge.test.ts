@@ -14,6 +14,7 @@ import { CodexCommandController } from '../src/bridge/codex-command-controller.j
 import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS } from '../src/engines/index.js';
 import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
+import { ClaudeProcessExitError } from '../src/engines/claude/pty/process-exit-error.js';
 import type { BotConfigBase } from '../src/config.js';
 import type { CardState } from '../src/types.js';
 
@@ -107,6 +108,104 @@ describe('MessageBridge Claude compatibility execution guard', () => {
     } finally {
       bridge.destroy();
       fs.rmSync(storeDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MessageBridge Claude process exit recovery', () => {
+  function handleFrom(messages: AsyncGenerator<any>) {
+    return {
+      stream: messages,
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    };
+  }
+
+  function completedStream(text: string) {
+    return (async function* () {
+      yield {
+        type: 'result', subtype: 'success', result: text,
+        session_id: 'fresh-session', duration_ms: 10, total_cost_usd: 0,
+      };
+    })();
+  }
+
+  function crashedStream(toolSideEffectSeen: boolean) {
+    return (async function* () {
+      throw new ClaudeProcessExitError({
+        exitCode: 1,
+        phase: toolSideEffectSeen ? 'side_effect_started' : 'prompt_dispatched',
+        completedOutputRecovered: false,
+        toolSideEffectSeen,
+      });
+    })();
+  }
+
+  it('replays once in a fresh session when Claude exits before any side effect', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn()
+      .mockImplementationOnce(() => handleFrom(crashedStream(false)))
+      .mockImplementationOnce(() => handleFrom(completedStream('你好，我在。')));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '你好呀', chatId: 'safe-replay-chat', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({ success: true, responseText: '你好，我在。' });
+      expect(startExecution).toHaveBeenCalledTimes(2);
+      expect(startExecution.mock.calls[1][0].sessionId).toBeUndefined();
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('does not replay after a possible tool side effect and hides internal exit details', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn(() => handleFrom(crashedStream(true)));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '执行一个操作', chatId: 'side-effect-chat', engine: 'claude', maxTurns: 1,
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('避免重复执行');
+      expect(result.error).not.toContain('exited');
+      expect(startExecution).toHaveBeenCalledTimes(1);
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('records task acceptance before Claude process startup fails', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const events: any[] = [];
+    bridge.onActivityEvent = (event: any) => events.push(event);
+    const startExecution = vi.fn(() => {
+      expect(events[0]).toMatchObject({ type: 'task_started', phase: 'accepted' });
+      throw new ClaudeProcessExitError({
+        exitCode: null, phase: 'process_starting', completedOutputRecovered: false,
+        toolSideEffectSeen: false,
+      });
+    });
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: 'secret prompt', chatId: 'startup-failure-chat', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({ success: false });
+      expect(events.at(-1)).toMatchObject({
+        type: 'task_failed', phase: 'process_starting', errorClass: 'claude_process_exit',
+      });
+      expect(events.at(-1).prompt).toBeUndefined();
+      expect(events.at(-1).turnId).toBeTruthy();
+      expect(events.at(-1).attemptId).toBeTruthy();
+      expect(events.at(-1).instanceId).toMatch(/^metabot-/);
+    } finally {
+      bridge.destroy();
     }
   });
 });

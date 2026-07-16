@@ -20,6 +20,11 @@ export interface ActivityEvent {
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;
+  turnId?: string;
+  attemptId?: string;
+  instanceId?: string;
+  phase?: string;
+  errorClass?: string;
   timestamp: number;
 }
 
@@ -65,6 +70,15 @@ export class ActivityStore {
       CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_events(timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_activity_bot_name ON activity_events(bot_name, timestamp DESC);
     `);
+    const columns = new Set(
+      (this.db.prepare('PRAGMA table_info(activity_events)').all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    for (const [name, type] of [
+      ['turn_id', 'TEXT'], ['attempt_id', 'TEXT'], ['instance_id', 'TEXT'],
+      ['phase', 'TEXT'], ['error_class', 'TEXT'],
+    ] as const) {
+      if (!columns.has(name)) this.db.exec(`ALTER TABLE activity_events ADD COLUMN ${name} ${type}`);
+    }
   }
 
   /** Record an activity event. Returns the event with generated ID. */
@@ -73,14 +87,16 @@ export class ActivityStore {
     const full: ActivityEvent = { id, ...event };
 
     this.db.prepare(`
-      INSERT INTO activity_events (id, type, bot_name, chat_id, user_id, prompt, response_preview, cost_usd, duration_ms, error_message, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO activity_events (id, type, bot_name, chat_id, user_id, prompt, response_preview, cost_usd, duration_ms, error_message, timestamp, turn_id, attempt_id, instance_id, phase, error_class)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, event.type, event.botName, event.chatId,
       event.userId || null, event.prompt?.slice(0, 200) || null,
       event.responsePreview?.slice(0, 200) || null,
       event.costUsd || null, event.durationMs || null,
       event.errorMessage?.slice(0, 500) || null, event.timestamp,
+      event.turnId || null, event.attemptId || null, event.instanceId || null,
+      event.phase || null, event.errorClass || null,
     );
 
     // Add to ring buffer
@@ -144,6 +160,11 @@ export class ActivityStore {
       costUsd: row.cost_usd || undefined,
       durationMs: row.duration_ms || undefined,
       errorMessage: row.error_message || undefined,
+      turnId: row.turn_id || undefined,
+      attemptId: row.attempt_id || undefined,
+      instanceId: row.instance_id || undefined,
+      phase: row.phase || undefined,
+      errorClass: row.error_class || undefined,
       timestamp: row.timestamp,
     };
   }
