@@ -7,6 +7,7 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   private queue: T[] = [];
   private resolve: (() => void) | null = null;
   private finished = false;
+  private failure: unknown;
 
   enqueue(item: T): void {
     if (this.finished) return;
@@ -25,12 +26,25 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
     }
   }
 
+  fail(error: unknown): void {
+    if (this.finished) return;
+    this.failure = error;
+    this.finished = true;
+    if (this.resolve) {
+      this.resolve();
+      this.resolve = null;
+    }
+  }
+
   async *[Symbol.asyncIterator](): AsyncIterator<T> {
     while (true) {
       while (this.queue.length > 0) {
         yield this.queue.shift()!;
       }
-      if (this.finished) return;
+      if (this.finished) {
+        if (this.failure !== undefined) throw this.failure;
+        return;
+      }
       await new Promise<void>((r) => {
         this.resolve = r;
       });
