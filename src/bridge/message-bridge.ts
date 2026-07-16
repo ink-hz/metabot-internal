@@ -24,6 +24,7 @@ import {
 import { listClaudeSessions, type SessionSummary } from '../engines/claude/session-lister.js';
 import { assertAllowedClaudeModel } from '../engines/claude/compatibility/profile.js';
 import { ExecutorRegistry } from '../engines/claude/executor-registry.js';
+import { isClaudeProcessExitError } from '../engines/claude/pty/process-exit-error.js';
 import { RateLimiter } from './rate-limiter.js';
 import { OutputsManager } from './outputs-manager.js';
 import { shouldRemindRestart, markReminded, restartSecondsAgo } from './restart-notice.js';
@@ -45,6 +46,7 @@ import {
 import { CodexCommandController } from './codex-command-controller.js';
 import { buildCodexGoalPrompt } from './codex-goal-policy.js';
 import { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
+import { decideClaudeTurnRecovery } from './claude-turn-recovery.js';
 import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
 import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
 import { sendCompletionNotice } from './notification-policy.js';
@@ -2416,13 +2418,39 @@ export class MessageBridge {
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'Claude execution error');
 
-      // Auto-retry with fresh session when Claude can't find the conversation or context overflows
       const errMsg: string = err.message || '';
-      if ((isStaleSessionError(errMsg) || isContextOverflowError(errMsg)) && session.sessionId) {
+      const processExit = isClaudeProcessExitError(err);
+      const processExitHasSideEffect = processExit
+        ? err.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+        : false;
+      const processExitDecision = processExit
+        ? decideClaudeTurnRecovery({
+          completedOutputRecovered: err.details.completedOutputRecovered,
+          sideEffectSeen: processExitHasSideEffect,
+          replayCount: 0,
+          stopping: abortController.signal.aborted,
+        })
+        : undefined;
+      const retryProcessExit = processExitDecision === 'replay_fresh_once';
+      const retrySessionError = (isStaleSessionError(errMsg) || isContextOverflowError(errMsg)) && Boolean(session.sessionId);
+      let reportedError = processExit
+        ? (processExitHasSideEffect
+          ? '本轮执行中断。为避免重复执行工具操作，系统没有自动重放。'
+          : 'Claude 服务本轮未能完成，请稍后重试。')
+        : (err.message || 'Unknown error');
+
+      if (retryProcessExit || retrySessionError) {
         const isOverflow = isContextOverflowError(errMsg);
-        this.logger.info({ chatId, isOverflow }, isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session');
+        this.logger.info(
+          { chatId, isOverflow, processExit: retryProcessExit },
+          retryProcessExit
+            ? 'Claude process exited before side effects, replaying once in fresh session'
+            : (isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session'),
+        );
         this.sessionManager.resetSession(chatId);
-        const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
+        const retryMsg = retryProcessExit
+          ? '_Claude 进程已安全重启，正在继续本轮请求..._'
+          : (isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._');
         await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
 
         try {
@@ -2476,24 +2504,27 @@ export class MessageBridge {
           await this.outputHandler.sendOutputFiles(chatId, outputsDir, processor, lastState);
           return; // skip the normal error handling below
         } catch (retryErr: any) {
-          this.logger.error({ err: retryErr, chatId }, 'Retry after stale session also failed');
-          lastState = { ...lastState, status: 'error', errorMessage: retryErr.message || 'Retry failed' };
+          this.logger.error({ err: retryErr, chatId }, 'Single fresh-session retry failed');
+          reportedError = isClaudeProcessExitError(retryErr)
+            ? 'Claude 服务本轮未能完成，请稍后重试。'
+            : (retryErr.message || reportedError);
+          lastState = { ...lastState, status: 'error', errorMessage: reportedError };
         }
       }
 
       const durationMs = Date.now() - startTime;
       this.audit.log({
         event: 'task_error', botName: this.config.name, chatId, userId, prompt: text,
-        durationMs, error: err.message || 'Unknown error',
+        durationMs, error: reportedError,
       });
       this.emitActivity({
         type: 'task_failed', botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
-        errorMessage: err.message || 'Unknown error', durationMs, timestamp: Date.now(),
+        errorMessage: reportedError, durationMs, timestamp: Date.now(),
       });
       this.recordFlywheelTerminal(flywheelContext, processor, {
         ...lastState,
         status: 'error',
-        errorMessage: err.message || 'Unknown error',
+        errorMessage: reportedError,
       }, durationMs);
       this.costTracker.record({ botName: this.config.name, userId, success: false, durationMs });
       metrics.incCounter('metabot_tasks_total');
@@ -2504,7 +2535,7 @@ export class MessageBridge {
         userPrompt: displayPrompt,
         responseText: lastState.responseText,
         toolCalls: lastState.toolCalls,
-        errorMessage: err.message || 'Unknown error',
+        errorMessage: reportedError,
       };
       await rateLimiter.cancelAndWait();
       await this.sendFinalCard(messageId, errorState, chatId);
@@ -2856,13 +2887,41 @@ export class MessageBridge {
     } catch (err: any) {
       this.logger.error({ err, chatId, userId }, 'API task execution error');
 
-      // Auto-retry with fresh session when Claude can't find the conversation or context overflows
       const errMsg: string = err.message || '';
-      if ((isStaleSessionError(errMsg) || isContextOverflowError(errMsg)) && session.sessionId) {
+      const processExit = isClaudeProcessExitError(err);
+      const processExitHasSideEffect = processExit
+        ? err.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+        : false;
+      const processExitDecision = processExit
+        ? decideClaudeTurnRecovery({
+          completedOutputRecovered: err.details.completedOutputRecovered,
+          sideEffectSeen: processExitHasSideEffect,
+          replayCount: 0,
+          stopping: abortController.signal.aborted,
+        })
+        : undefined;
+      const retryProcessExit = processExitDecision === 'replay_fresh_once';
+      const retrySessionError = (isStaleSessionError(errMsg) || isContextOverflowError(errMsg)) && Boolean(session.sessionId);
+      let reportedError = processExit
+        ? (processExitHasSideEffect
+          ? '本轮执行中断。为避免重复执行工具操作，系统没有自动重放。'
+          : 'Claude 服务本轮未能完成，请稍后重试。')
+        : (err.message || 'Unknown error');
+
+      // A process crash is replayed at most once and only when no tool side effect
+      // could have happened. Stale/overflow sessions keep their existing recovery.
+      if (retryProcessExit || retrySessionError) {
         const isOverflow = isContextOverflowError(errMsg);
-        this.logger.info({ chatId, isOverflow }, isOverflow ? 'API task: context overflow in catch, retrying with fresh session' : 'API task: stale session in catch, retrying with fresh session');
+        this.logger.info(
+          { chatId, isOverflow, processExit: retryProcessExit },
+          retryProcessExit
+            ? 'API task: Claude process exited before side effects, replaying once in fresh session'
+            : (isOverflow ? 'API task: context overflow in catch, retrying with fresh session' : 'API task: stale session in catch, retrying with fresh session'),
+        );
         this.sessionManager.resetSession(chatId);
-        const retryMsg = isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._';
+        const retryMsg = retryProcessExit
+          ? '_Claude 进程已安全重启，正在继续本轮请求..._'
+          : (isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._');
         if (sendCards && messageId) {
           await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
         }
@@ -2912,8 +2971,10 @@ export class MessageBridge {
             error: lastState.errorMessage,
           };
         } catch (retryErr: any) {
-          this.logger.error({ err: retryErr, chatId }, 'API task retry after stale session also failed');
-          // Fall through to normal error handling
+          this.logger.error({ err: retryErr, chatId }, 'API task single fresh-session retry failed');
+          reportedError = isClaudeProcessExitError(retryErr)
+            ? 'Claude 服务本轮未能完成，请稍后重试。'
+            : (retryErr.message || reportedError);
         }
       }
 
@@ -2923,7 +2984,7 @@ export class MessageBridge {
           userPrompt: displayPrompt,
           responseText: lastState.responseText,
           toolCalls: lastState.toolCalls,
-          errorMessage: err.message || 'Unknown error',
+          errorMessage: reportedError,
         };
         await rateLimiter.cancelAndWait();
         await this.sendFinalCard(messageId, errorState, chatId);
@@ -2934,19 +2995,19 @@ export class MessageBridge {
         userPrompt: displayPrompt,
         responseText: lastState.responseText,
         toolCalls: lastState.toolCalls,
-        errorMessage: err.message || 'Unknown error',
+        errorMessage: reportedError,
       };
       options.onUpdate?.(catchErrorState, effectiveMessageId, true);
 
       this.emitActivity({
         type: 'task_failed', botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200),
-        errorMessage: err.message || 'Unknown error', durationMs: Date.now() - startTime, timestamp: Date.now(),
+        errorMessage: reportedError, durationMs: Date.now() - startTime, timestamp: Date.now(),
       });
 
       return {
         success: false,
         responseText: lastState.responseText,
-        error: err.message || 'Unknown error',
+        error: reportedError,
       };
     } finally {
       clearTimeout(timeoutId);
