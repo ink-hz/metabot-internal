@@ -9,5 +9,8 @@ describe('production PTY smoke contract', () => {
     expect(source).toContain("CLAUDE_CODE_DISABLE_1M_CONTEXT: '1'");
     expect(source).toContain("CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000'");
     expect(source).not.toContain("model: 'fable'");
+    expect(source).toContain("message.type === 'assistant'");
+    expect(source).toContain("message.subtype === 'success'");
+    expect(source).not.toContain('transcript.includes(marker)');
   });
 });
