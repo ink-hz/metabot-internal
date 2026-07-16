@@ -3,7 +3,8 @@
 ## Status
 
 - Date: 2026-07-14
-- Scope: MetaBot Claude engine, the `agentops` runtime, and all six Feishu bots
+- Scope: MetaBot Claude engine, the `agentops` runtime, all six production
+  Feishu bots, and the isolated Test Bot
 - Selected model: `claude-opus-4-8`
 - Selected approach: local request adapter for the exact broken image shape,
   while preserving Claude Code's native tools as the primary capability path
@@ -29,6 +30,52 @@ failure directly in Claude Code:
 5. While the provider repair is pending, a recoverable native tool failure
    must produce Claude Code's truthful final explanation instead of a red Bot
    process error.
+
+### 2026-07-16 Claude Code beta-header compatibility decision
+
+Production turns from Marketing Inbound, Marketing Voice, and the isolated
+Test Bot all reproduced the same terminal error with Claude Code 2.1.207:
+Bedrock `ValidationException: invalid beta flag`. The Test Bot reproduction
+used a clean workdir and a new PTY session, which excludes Bot prompts,
+business data, Feishu application identity, and persisted chat state as the
+failure source.
+
+Single-variable probes against the configured Nexcor Anthropic endpoint then
+proved the exact compatibility boundary:
+
+| Claude Code beta flag | Observed result |
+| --- | --- |
+| `redact-thinking-2026-02-12` | Rejected with `invalid beta flag` |
+| `prompt-caching-scope-2026-01-05` | Rejected with `invalid beta flag` |
+| `claude-code-20250219` | Accepted |
+| `interleaved-thinking-2025-05-14` | Accepted |
+| `thinking-token-count-2026-05-13` | Accepted |
+| `context-management-2025-06-27` | Accepted |
+| `mid-conversation-system-2026-04-07` | Accepted |
+| `effort-2025-11-24` | Accepted |
+| `structured-outputs-2025-12-15` | Accepted |
+
+The selected repair extends the existing loopback compatibility adapter. For
+`POST /v1/messages`, it filters only the two rejected values from the
+comma-separated `anthropic-beta` request header before forwarding upstream.
+It preserves the relative order and spelling of every other value and removes
+the header only when no values remain. It does not rewrite request bodies,
+thinking blocks, cache-control blocks, response bytes, or SSE ordering for
+this repair.
+
+The unsupported set is declared by the versioned compatibility profile rather
+than hard-coded as generic provider behavior. The adapter receives that set as
+an explicit option, so profiles for other gateways remain byte-for-byte
+pass-through. Production enables the existing
+`nexcor-opus-4-8-claude-code-2.1.207` profile for every Claude Bot through the
+shared runtime environment; Bot prompts and per-Bot configuration do not
+carry gateway policy.
+
+There is no adapter-level retry. Claude Code already attempted the rejected
+turn multiple times, and replaying a message POST in MetaBot could duplicate
+cost or tool side effects. Provider repair is detected by the capability
+probe; removing a flag from the profile requires a new single-flag probe and
+the full live acceptance sequence.
 
 ## Problem
 
@@ -455,6 +502,12 @@ globally disabling Claude Code's native tool.
 
 ### Unit tests
 
+- The versioned Nexcor profile declares exactly the two rejected beta flags.
+- Header filtering handles one value, multiple comma-separated values,
+  surrounding optional whitespace, repeated rejected values, and a header
+  containing only rejected values.
+- Profiles with no unsupported beta declaration preserve the original header
+  byte-for-byte.
 - Exact image promotion with one and multiple tool results.
 - Idempotency when the image already exists as a sibling.
 - Three-turn persistent-history replay with two distinct images, proving each
@@ -477,6 +530,10 @@ globally disabling Claude Code's native tool.
 
 A local fake Anthropic upstream verifies:
 
+- the adapter removes only the two profile-declared beta values and forwards
+  every accepted value in its original order;
+- a filtered header reaches the upstream on `/v1/messages`, while request body
+  bytes and the streamed response remain unchanged;
 - non-message requests pass through byte-for-byte;
 - ordinary JSON requests are unchanged;
 - transformed requests match the validated promoted-image wire shape;
@@ -505,24 +562,31 @@ A local fake Anthropic upstream verifies:
 Live probes always use the explicit model `claude-opus-4-8`. The acceptance
 sequence is:
 
-1. Start a test Claude executor through the real PTY backend and adapter.
-2. Require an exact text marker and one normal local tool call.
-3. Send the existing deterministic Feishu screenshot through `Read`; require
+1. Repeat the single-flag probe and require the two profile-declared flags to
+   fail while every retained flag succeeds; record no credentials or response
+   text.
+2. Start a Test Bot Claude executor through the real PTY backend and adapter;
+   require an exact text marker and no `invalid beta flag` error.
+3. Start a Marketing Prospecting Bot executor through the same backend and
+   require its correct role introduction with no terminal API error.
+4. Require one normal local tool call.
+5. Send the existing deterministic Feishu screenshot through `Read`; require
    the exact answer `Metabot` and no `Content block not found` error.
-4. Continue the same persistent session for three image turns using two
+6. Continue the same persistent session for three image turns using two
    different fixtures; require correct recognition, no duplicate promoted
    images, and non-zero `cache_read_input_tokens` after promotion.
-5. Send the deterministic PDF; require the exact code `ORBBEC-7429`.
-6. Before the gateway repair, invoke native WebSearch and require a truthful
+7. Send the deterministic PDF; require the exact code `ORBBEC-7429`.
+8. Before the gateway repair, invoke native WebSearch and require a truthful
    final explanation with no red MetaBot process error; evidence must classify
    the tool as `upstream_unsupported` and report zero completed search calls.
-7. After the gateway owner reports a repair, repeat the identical command and
+9. After the gateway owner reports a repair, repeat the identical command and
    require a positive native web-search request count plus cited live results.
-8. Test native WebFetch independently against a known safe URL and the original
+10. Test native WebFetch independently against a known safe URL and the original
    failing URL so domain verification is diagnosed separately.
-9. Restart MetaBot/PM2 without an interactive password and repeat the markers.
-10. Send one smoke message to each of the six Feishu bots.
-11. Confirm logs and flywheel records contain no credential, base64 attachment,
+11. Restart MetaBot/PM2 without an interactive password and repeat the markers.
+12. Send one smoke message to each of the six production Feishu bots; keep the
+    Test Bot result separate from production identity coverage.
+13. Confirm logs and flywheel records contain no credential, base64 attachment,
    thinking, or signature content.
 
 ## Deployment and rollback
@@ -538,6 +602,14 @@ Before deployment, back up:
 - private Claude settings;
 - bot configuration and bootstrap environment;
 - the current PM2 process description.
+
+Deployment adds
+`METABOT_CLAUDE_COMPAT_PROFILE=nexcor-opus-4-8-claude-code-2.1.207` to the
+private runtime environment and to the checked deployment contract's allowed
+environment list. The value is not a credential. Startup must log the selected
+profile ID and refuse to create Claude executors if the version check or
+loopback adapter startup fails. Rollback removes that environment selection,
+restores the previous runtime source, and restarts PM2 from the backup.
 
 Deployment first verifies the adapter with the real screenshot and PDF. It then
 removes the temporary image-stripping fallback, rebuilds, restarts PM2, and
