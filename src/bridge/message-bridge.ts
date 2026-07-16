@@ -57,6 +57,7 @@ import type { AgentTeamStore } from '../agent-teams/team-store.js';
 import { buildAgentTeamCardSnapshot } from '../agent-teams/card-snapshot.js';
 import type { FlywheelRecorder, RecordEventInput } from '../flywheel/index.js';
 import type { FlywheelConversation, FlywheelSender } from '../flywheel/envelope.js';
+import { getRuntimeInstanceId } from '../runtime/instance-identity.js';
 
 export { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
 export { normalizePromptForEngine } from './prompt-normalizer.js';
@@ -175,6 +176,11 @@ export interface ActivityEventData {
   costUsd?: number;
   durationMs?: number;
   errorMessage?: string;
+  turnId?: string;
+  attemptId?: string;
+  instanceId?: string;
+  phase?: string;
+  errorClass?: string;
   timestamp: number;
 }
 
@@ -2071,22 +2077,67 @@ export class MessageBridge {
       prompt = buildCodexGoalPrompt(prompt, activeGoal, codexGoalIteration, codexGoalMaxIterations);
     }
 
-    // All turn-starting paths (initial + retry) route through runOneTurn so
-    // persistent mode is enforced consistently and stale-session retries
-    // properly release the bound executor before reacquiring.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext,
-      model: session.model,
-      onTeamEvent,
-      flywheelContext,
+    const startTime = Date.now();
+    const lifecycleTurnId = randomUUID();
+    const instanceId = getRuntimeInstanceId();
+    let attemptId = randomUUID();
+    this.audit.log({ event: 'task_start', botName: this.config.name, chatId, userId, prompt: text });
+    this.emitActivity({
+      type: 'task_started', botName: this.config.name, chatId, userId,
+      prompt: text?.slice(0, 200), turnId: lifecycleTurnId, attemptId,
+      instanceId, phase: 'accepted', timestamp: startTime,
     });
 
+    // All turn-starting paths route through runOneTurn. Startup is inside the
+    // lifecycle boundary so an early Claude exit cannot disappear unrecorded.
+    let executionHandle: ExecutionHandle | undefined;
+    let launchError: any;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+        onTeamEvent, flywheelContext,
+      });
+    } catch (error: any) {
+      launchError = error;
+      if (isClaudeProcessExitError(error)
+        && decideClaudeTurnRecovery({
+          completedOutputRecovered: error.details.completedOutputRecovered,
+          sideEffectSeen: error.details.toolSideEffectSeen,
+          replayCount: 0,
+          stopping: abortController.signal.aborted,
+        }) === 'replay_fresh_once') {
+        this.sessionManager.resetSession(chatId);
+        attemptId = randomUUID();
+        try {
+          executionHandle = await this.runOneTurn(chatId, engineName, {
+            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+            onTeamEvent, freshSession: true, flywheelContext,
+          });
+        } catch (retryError: any) {
+          launchError = retryError;
+        }
+      }
+    }
+
+    if (!executionHandle) {
+      const processExit = isClaudeProcessExitError(launchError);
+      const errorMessage = processExit
+        ? 'Claude 服务本轮未能完成，请稍后重试。'
+        : '服务启动本轮任务失败，请稍后重试。';
+      const failureState: CardState = { ...initialState, status: 'error', errorMessage };
+      this.emitActivity({
+        type: 'task_failed', botName: this.config.name, chatId, userId,
+        turnId: lifecycleTurnId, attemptId, instanceId,
+        phase: processExit ? launchError.details.phase : 'process_starting',
+        errorClass: processExit ? 'claude_process_exit' : 'execution_start_failed',
+        durationMs: Date.now() - startTime, timestamp: Date.now(),
+      });
+      await this.sendFinalCard(messageId, failureState, chatId);
+      try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+      return;
+    }
+
     // Register running task
-    const startTime = Date.now();
     runningTask = {
       abortController,
       startTime,
@@ -2101,9 +2152,6 @@ export class MessageBridge {
     };
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
-
-    this.audit.log({ event: 'task_start', botName: this.config.name, chatId, userId, prompt: text });
-    this.emitActivity({ type: 'task_started', botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200), timestamp: startTime });
 
     // Setup timeout
     let timedOut = false;
@@ -2384,6 +2432,9 @@ export class MessageBridge {
         botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
         responsePreview: lastState.responseText?.slice(0, 200),
         costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
+        turnId: lifecycleTurnId, attemptId, instanceId,
+        phase: lastState.status === 'complete' ? 'completed' : 'output_started',
+        errorClass: lastState.status === 'complete' ? undefined : 'model_result_error',
         timestamp: Date.now(),
       });
       this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
@@ -2454,6 +2505,7 @@ export class MessageBridge {
         await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
 
         try {
+          attemptId = randomUUID();
           const retryHandle = await this.runOneTurn(chatId, engineName, {
             prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
             onTeamEvent, freshSession: true, flywheelContext,
@@ -2485,6 +2537,9 @@ export class MessageBridge {
             botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
             responsePreview: lastState.responseText?.slice(0, 200),
             costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
+            turnId: lifecycleTurnId, attemptId, instanceId,
+            phase: lastState.status === 'complete' ? 'completed' : 'output_started',
+            errorClass: lastState.status === 'complete' ? undefined : 'model_result_error',
             timestamp: Date.now(),
           });
           this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
@@ -2518,8 +2573,12 @@ export class MessageBridge {
         durationMs, error: reportedError,
       });
       this.emitActivity({
-        type: 'task_failed', botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
-        errorMessage: reportedError, durationMs, timestamp: Date.now(),
+        type: 'task_failed', botName: this.config.name, chatId, userId,
+        errorMessage: reportedError, durationMs,
+        turnId: lifecycleTurnId, attemptId, instanceId,
+        phase: processExit ? err.details.phase : 'output_started',
+        errorClass: processExit ? 'claude_process_exit' : 'execution_error',
+        timestamp: Date.now(),
       });
       this.recordFlywheelTerminal(flywheelContext, processor, {
         ...lastState,
@@ -2661,26 +2720,81 @@ export class MessageBridge {
       }
     };
 
-    // Persistent vs legacy executor — see executeQuery for the same pattern.
-    // API task path also honors the feature flag, but only for Claude engine
-    // and only when no per-turn maxTurns/allowedTools overrides are supplied
-    // (those mid-stream knobs are baked into the legacy executor's per-turn
-    // options; persistent executor would need additional plumbing to apply
-    // them per-turn — runOneTurn falls back to legacy spawn automatically
-    // when those are set.
-    const executionHandle = await this.runOneTurn(chatId, engineName, {
-      prompt,
-      cwd,
-      abortController,
-      outputsDir,
-      apiContext,
-      maxTurns: options.maxTurns,
-      model: options.model ?? session.model,
-      allowedTools: options.allowedTools,
-      onTeamEvent,
+    const startTime = Date.now();
+    const turnId = randomUUID();
+    const instanceId = getRuntimeInstanceId();
+    let attemptId = randomUUID();
+    this.audit.log({ event: 'api_task_start', botName: this.config.name, chatId, userId, prompt });
+    this.emitActivity({
+      type: 'task_started', botName: this.config.name, chatId, userId,
+      prompt: prompt?.slice(0, 200), turnId, attemptId, instanceId,
+      phase: 'accepted', timestamp: startTime,
     });
 
-    const startTime = Date.now();
+    // Process startup is part of the lifecycle boundary: a boot failure must
+    // still produce a terminal activity record. A typed pre-side-effect exit
+    // gets the same single fresh-session attempt as an in-stream exit.
+    let executionHandle: ExecutionHandle | undefined;
+    try {
+      executionHandle = await this.runOneTurn(chatId, engineName, {
+        prompt, cwd, abortController, outputsDir, apiContext,
+        maxTurns: options.maxTurns,
+        model: options.model ?? session.model,
+        allowedTools: options.allowedTools,
+        onTeamEvent,
+      });
+    } catch (launchError: any) {
+      if (isClaudeProcessExitError(launchError)
+        && decideClaudeTurnRecovery({
+          completedOutputRecovered: launchError.details.completedOutputRecovered,
+          sideEffectSeen: launchError.details.toolSideEffectSeen,
+          replayCount: 0,
+          stopping: abortController.signal.aborted,
+        }) === 'replay_fresh_once') {
+        this.sessionManager.resetSession(chatId);
+        attemptId = randomUUID();
+        try {
+          executionHandle = await this.runOneTurn(chatId, engineName, {
+            prompt, cwd, abortController, outputsDir, apiContext,
+            maxTurns: options.maxTurns,
+            model: options.model ?? session.model,
+            allowedTools: options.allowedTools,
+            onTeamEvent, freshSession: true,
+          });
+        } catch (retryError: any) {
+          launchError = retryError;
+          executionHandle = undefined;
+        }
+      } else {
+        this.emitActivity({
+          type: 'task_failed', botName: this.config.name, chatId, userId,
+          turnId, attemptId, instanceId, phase: 'process_starting',
+          errorClass: 'execution_start_failed', durationMs: Date.now() - startTime,
+          timestamp: Date.now(),
+        });
+        try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+        throw launchError;
+      }
+
+      if (!executionHandle) {
+        const errorClass = isClaudeProcessExitError(launchError) ? 'claude_process_exit' : 'execution_start_failed';
+        const errorMessage = isClaudeProcessExitError(launchError)
+          ? 'Claude 服务本轮未能完成，请稍后重试。'
+          : '服务启动本轮任务失败，请稍后重试。';
+        const failureState: CardState = { ...initialState, status: 'error', errorMessage };
+        if (sendCards && messageId) await this.sendFinalCard(messageId, failureState, chatId);
+        options.onUpdate?.(failureState, effectiveMessageId, true);
+        this.emitActivity({
+          type: 'task_failed', botName: this.config.name, chatId, userId,
+          turnId, attemptId, instanceId, phase: isClaudeProcessExitError(launchError)
+            ? launchError.details.phase : 'process_starting',
+          errorClass, durationMs: Date.now() - startTime, timestamp: Date.now(),
+        });
+        try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
+        return { success: false, responseText: '', error: errorMessage, durationMs: Date.now() - startTime };
+      }
+    }
+
     runningTask = {
       abortController,
       startTime,
@@ -2695,9 +2809,6 @@ export class MessageBridge {
     };
     this.runningTasks.set(chatId, runningTask);
     metrics.setGauge('metabot_active_tasks', this.runningTasks.size);
-
-    this.audit.log({ event: 'api_task_start', botName: this.config.name, chatId, userId, prompt });
-    this.emitActivity({ type: 'task_started', botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200), timestamp: startTime });
 
     let timedOut = false;
     let idledOut = false;
@@ -2866,6 +2977,9 @@ export class MessageBridge {
         botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200),
         responsePreview: lastState.responseText?.slice(0, 200),
         costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
+        turnId, attemptId, instanceId,
+        phase: lastState.status === 'complete' ? 'completed' : 'output_started',
+        errorClass: lastState.status === 'complete' ? undefined : 'model_result_error',
         timestamp: Date.now(),
       });
       this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
@@ -3000,8 +3114,12 @@ export class MessageBridge {
       options.onUpdate?.(catchErrorState, effectiveMessageId, true);
 
       this.emitActivity({
-        type: 'task_failed', botName: this.config.name, chatId, userId, prompt: prompt?.slice(0, 200),
-        errorMessage: reportedError, durationMs: Date.now() - startTime, timestamp: Date.now(),
+        type: 'task_failed', botName: this.config.name, chatId, userId,
+        errorMessage: reportedError, durationMs: Date.now() - startTime,
+        turnId, attemptId, instanceId,
+        phase: processExit ? err.details.phase : 'output_started',
+        errorClass: processExit ? 'claude_process_exit' : 'execution_error',
+        timestamp: Date.now(),
       });
 
       return {

@@ -178,6 +178,36 @@ describe('MessageBridge Claude process exit recovery', () => {
       bridge.destroy();
     }
   });
+
+  it('records task acceptance before Claude process startup fails', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const events: any[] = [];
+    bridge.onActivityEvent = (event: any) => events.push(event);
+    const startExecution = vi.fn(() => {
+      expect(events[0]).toMatchObject({ type: 'task_started', phase: 'accepted' });
+      throw new ClaudeProcessExitError({
+        exitCode: null, phase: 'process_starting', completedOutputRecovered: false,
+        toolSideEffectSeen: false,
+      });
+    });
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: 'secret prompt', chatId: 'startup-failure-chat', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({ success: false });
+      expect(events.at(-1)).toMatchObject({
+        type: 'task_failed', phase: 'process_starting', errorClass: 'claude_process_exit',
+      });
+      expect(events.at(-1).prompt).toBeUndefined();
+      expect(events.at(-1).turnId).toBeTruthy();
+      expect(events.at(-1).attemptId).toBeTruthy();
+      expect(events.at(-1).instanceId).toMatch(/^metabot-/);
+    } finally {
+      bridge.destroy();
+    }
+  });
 });
 
 function makeSender() {

@@ -28,6 +28,7 @@ import {
   type ClaudeCompatibilityRuntime,
 } from './engines/claude/compatibility/runtime.js';
 import type { ClaudeCompatibilityProfile } from './engines/claude/compatibility/profile.js';
+import { getRuntimeInstanceId } from './runtime/instance-identity.js';
 
 import { SessionRegistry } from './session/session-registry.js';
 
@@ -201,6 +202,7 @@ function applyBotFilter(appConfig: ReturnType<typeof loadAppConfig>, logger: Log
 async function main() {
   const appConfig = loadAppConfig();
   const logger = createLogger(appConfig.log.level);
+  logger.info({ instanceId: getRuntimeInstanceId() }, 'MetaBot runtime identity');
   applyBotFilter(appConfig, logger);
   const allBotConfigs = [
     ...appConfig.feishuBots,
