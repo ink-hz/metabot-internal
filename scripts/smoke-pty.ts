@@ -1,4 +1,9 @@
 import { ptyQuery } from '../src/engines/claude/pty/pty-query.js';
+import {
+  applyClaudeCompatibilityRuntime,
+  startClaudeCompatibilityRuntime,
+} from '../src/engines/claude/compatibility/runtime.js';
+import { loadClaudeCompatibilityProfile } from '../src/engines/claude/compatibility/profile.js';
 import { AsyncQueue } from '../src/utils/async-queue.js';
 import { createLogger } from '../src/utils/logger.js';
 import type { PtyUserMessage } from '../src/engines/claude/pty/contract.js';
@@ -6,19 +11,29 @@ import type { PtyUserMessage } from '../src/engines/claude/pty/contract.js';
 const marker = 'METABOT_PTY_OK_713';
 const claude = process.env.CLAUDE_BIN
   ?? new URL('../.tools/claude/node_modules/@anthropic-ai/claude-code/bin/claude.exe', import.meta.url).pathname;
+const logger = createLogger('warn');
+const profile = loadClaudeCompatibilityProfile();
+if (!profile) throw new Error('PTY smoke test requires METABOT_CLAUDE_COMPAT_PROFILE');
+const compatibilityRuntime = await startClaudeCompatibilityRuntime({
+  profile,
+  logger,
+  claudeExecutable: claude,
+});
 const prompts = new AsyncQueue<PtyUserMessage>();
+const queryOptions = {
+  cwd: process.cwd(),
+  model: 'claude-opus-4-8',
+  env: {
+    CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
+  },
+  pathToClaudeExecutable: claude,
+  logger,
+};
+applyClaudeCompatibilityRuntime(queryOptions, compatibilityRuntime);
 const stream = ptyQuery({
   prompt: prompts,
-  options: {
-    cwd: process.cwd(),
-    model: 'claude-opus-4-8',
-    env: {
-      CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
-    },
-    pathToClaudeExecutable: claude,
-    logger: createLogger('warn'),
-  },
+  options: queryOptions,
 });
 
 prompts.enqueue({
@@ -30,6 +45,7 @@ prompts.enqueue({
 
 const timer = setTimeout(async () => {
   await stream.dispose?.();
+  await compatibilityRuntime.close();
   console.error('PTY smoke test timed out');
   process.exit(2);
 }, 60_000);
@@ -46,6 +62,7 @@ for await (const message of stream) {
     successful = message.subtype === 'success' && message.is_error !== true;
     clearTimeout(timer);
     await stream.dispose?.();
+    await compatibilityRuntime.close();
     break;
   }
 }
