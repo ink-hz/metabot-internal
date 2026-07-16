@@ -90,6 +90,7 @@ export async function startClaudeCompatibilityRuntime(
   const adapter = await adapterStarter({
     upstreamBaseUrl,
     authToken,
+    unsupportedRequestBetas: options.profile.unsupportedRequestBetas,
     logger: options.logger,
   });
   const overrides = {

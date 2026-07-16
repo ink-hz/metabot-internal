@@ -35,7 +35,11 @@ function fakeLogger() {
 
 describe('Claude compatibility runtime', () => {
   it('uses settings URL precedence, asserts the CLI version, and overrides both env layers', async () => {
-    const starts: Array<{ upstreamBaseUrl: string; authToken: string }> = [];
+    const starts: Array<{
+      upstreamBaseUrl: string;
+      authToken: string;
+      unsupportedRequestBetas?: readonly string[];
+    }> = [];
     let closed = false;
     const runtime = await startClaudeCompatibilityRuntime({
       profile: OPUS_PROFILE,
@@ -51,7 +55,11 @@ describe('Claude compatibility runtime', () => {
       claudeExecutable: '/fake/claude',
       versionRunner: () => '2.1.207 (Claude Code)',
       adapterStarter: async (options) => {
-        starts.push({ upstreamBaseUrl: options.upstreamBaseUrl, authToken: options.authToken });
+        starts.push({
+          upstreamBaseUrl: options.upstreamBaseUrl,
+          authToken: options.authToken,
+          unsupportedRequestBetas: options.unsupportedRequestBetas,
+        });
         return { baseUrl: 'http://127.0.0.1:43123', close: async () => { closed = true; } };
       },
     });
@@ -59,6 +67,7 @@ describe('Claude compatibility runtime', () => {
     expect(starts).toEqual([{
       upstreamBaseUrl: 'https://settings.example',
       authToken: 'settings-token',
+      unsupportedRequestBetas: OPUS_PROFILE.unsupportedRequestBetas,
     }]);
     expect(runtime.childEnv).toMatchObject({
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
