@@ -85,6 +85,10 @@ describe('Claude compatibility profile', () => {
       allowedModels: ['claude-opus-4-8'],
       contextWindow: 200_000,
       promoteToolResultImages: true,
+      unsupportedRequestBetas: [
+        'redact-thinking-2026-02-12',
+        'prompt-caching-scope-2026-01-05',
+      ],
       nativeWebTools: ['WebSearch', 'WebFetch'],
       nativeToolFailureMode: 'recoverable-turn',
       capabilities: [
@@ -97,6 +101,7 @@ describe('Claude compatibility profile', () => {
     });
     expect(Object.isFrozen(profile)).toBe(true);
     expect(Object.isFrozen(profile?.allowedModels)).toBe(true);
+    expect(Object.isFrozen(profile?.unsupportedRequestBetas)).toBe(true);
     expect(Object.isFrozen(profile?.capabilities)).toBe(true);
   });
 

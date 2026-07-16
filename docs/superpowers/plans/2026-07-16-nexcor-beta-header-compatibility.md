@@ -117,7 +117,7 @@ git commit -m "fix: apply gateway beta policy at runtime"
 - Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/reliability/runtime-contract.mjs`
 - Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/reliability/generate-ecosystem.mjs`
 - Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/reliability/tests/runtime-contract.test.mjs`
-- Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/reliability/tests/generate-ecosystem.test.mjs`
+- Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/reliability/tests/deploy-gate.test.mjs`
 - Modify: `/Users/neo/Developer/work/Orbbec-Agent-Team/scripts/deploy_metabot_pty_fix.sh`
 
 **Interfaces:**
@@ -130,7 +130,7 @@ Require the checked contract to contain the exact profile, require `allowedEnvir
 
 - [ ] **Step 2: Verify the Agent-Team tests fail**
 
-Run: `node --test scripts/reliability/tests/runtime-contract.test.mjs scripts/reliability/tests/generate-ecosystem.test.mjs`
+Run: `node --test scripts/reliability/tests/runtime-contract.test.mjs scripts/reliability/tests/deploy-gate.test.mjs`
 
 Expected: FAIL because the contract and PM2 generator do not yet select the profile.
 
@@ -146,7 +146,7 @@ src/engines/claude/compatibility/runtime.ts
 
 - [ ] **Step 4: Verify Agent-Team focused and full tests**
 
-Run: `node --test scripts/reliability/tests/runtime-contract.test.mjs scripts/reliability/tests/generate-ecosystem.test.mjs && npm test`
+Run: `node --test scripts/reliability/tests/runtime-contract.test.mjs scripts/reliability/tests/deploy-gate.test.mjs && node --test scripts/reliability/tests/*.test.mjs`
 
 Expected: all tests pass.
 
