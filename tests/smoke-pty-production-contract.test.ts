@@ -17,4 +17,11 @@ describe('production PTY smoke contract', () => {
     expect(source).toContain("message.subtype === 'success'");
     expect(source).not.toContain('transcript.includes(marker)');
   });
+
+  it('uses a hard deadline that cannot wait forever on cleanup', () => {
+    const source = readFileSync(new URL('../scripts/smoke-pty.ts', import.meta.url), 'utf8');
+
+    expect(source).not.toContain('setTimeout(async () =>');
+    expect(source).toMatch(/setTimeout\(\(\) => \{[\s\S]*process\.exit\(2\);[\s\S]*\}, 60_000\)/u);
+  });
 });
