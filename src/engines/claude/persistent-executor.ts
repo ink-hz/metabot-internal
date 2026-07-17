@@ -526,6 +526,12 @@ export class PersistentClaudeExecutor extends EventEmitter {
           ? createGatewayTurnLease({
               lockDir: process.env.METABOT_CLAUDE_GATEWAY_LOCK_DIR.trim(),
               instanceName: process.env.METABOT_INSTANCE_NAME,
+              globalCapacity: process.env.METABOT_CLAUDE_GATEWAY_GLOBAL_CAPACITY
+                ? Number(process.env.METABOT_CLAUDE_GATEWAY_GLOBAL_CAPACITY)
+                : 1,
+              instanceCapacity: process.env.METABOT_CLAUDE_GATEWAY_INSTANCE_CAPACITY
+                ? Number(process.env.METABOT_CLAUDE_GATEWAY_INSTANCE_CAPACITY)
+                : 1,
             })
           : undefined,
       };
