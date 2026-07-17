@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const capturedPtyOptions: Array<Record<string, unknown>> = [];
 
@@ -23,6 +23,10 @@ describe('PersistentClaudeExecutor PTY context environment', () => {
     capturedPtyOptions.length = 0;
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it('passes the 200k context guard to the interactive Claude process', async () => {
     const executor = new PersistentClaudeExecutor({
       cwd: '/tmp',
@@ -39,5 +43,21 @@ describe('PersistentClaudeExecutor PTY context environment', () => {
       CLAUDE_CODE_DISABLE_1M_CONTEXT: '1',
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '200000',
     });
+  });
+
+  it('constructs a shared gateway turn lease only when the fleet lock directory is configured', async () => {
+    vi.stubEnv('METABOT_CLAUDE_GATEWAY_LOCK_DIR', '/tmp/metabot-shared-gateway-lock');
+    vi.stubEnv('METABOT_INSTANCE_NAME', 'metabot-marketing-prospecting');
+    const executor = new PersistentClaudeExecutor({
+      cwd: '/tmp',
+      logger,
+      model: 'claude-opus-4-8',
+      backend: 'pty',
+      idleTimeoutMs: 0,
+    });
+
+    await executor.start();
+
+    expect(capturedPtyOptions[0].gatewayTurnLease).toMatchObject({ acquire: expect.any(Function) });
   });
 });

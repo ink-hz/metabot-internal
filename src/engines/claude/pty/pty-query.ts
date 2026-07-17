@@ -40,6 +40,7 @@ import type {
   PtyHookBridge,
   RawJsonlRecord,
 } from './contract.js';
+import type { GatewayTurnLeaseHandle } from './gateway-turn-lease.js';
 import { createPtyClaudeSession } from './pty-session.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
@@ -224,6 +225,8 @@ export const ptyQuery = (args: {
   // Exit recovery reads only records after this boundary, so a previous
   // turn's completed answer can never turn a new crashed turn into success.
   let turnJsonlStartOffset = 0;
+  let activeGatewayLease: GatewayTurnLeaseHandle | undefined;
+  let pendingGatewayTurn: { cancelled: boolean } | undefined;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
@@ -263,6 +266,7 @@ export const ptyQuery = (args: {
       // Mark the turn complete IMMEDIATELY (not in the drain timeout below) so
       // the slash-command idle watchdog stands down and never double-emits.
       turnInFlight = false;
+      void releaseGatewayTurn();
       turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
       const usage = { ...lastUsage };
       // Reset for the next turn.
@@ -322,6 +326,7 @@ export const ptyQuery = (args: {
           const usage = { ...lastUsage };
           lastUsage = {};
           turnInFlight = false;
+          void releaseGatewayTurn();
           turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
           logger.warn(
             { apiErrorStatus: typeof rec.apiErrorStatus === 'number' ? rec.apiErrorStatus : undefined },
@@ -382,6 +387,7 @@ export const ptyQuery = (args: {
         if (turnInFlight && !disposed) {
           logger.info('ptyQuery: keep-planning — synthesizing terminal result to end turn');
           turnInFlight = false;
+          void releaseGatewayTurn();
           const usage = { ...lastUsage };
           lastUsage = {};
           out.enqueue(
@@ -500,6 +506,39 @@ export const ptyQuery = (args: {
     accumulatePtyUsage(lastUsage, rec);
   }
 
+  async function releaseGatewayTurn(): Promise<void> {
+    const held = activeGatewayLease;
+    activeGatewayLease = undefined;
+    if (!held) return;
+    try {
+      await held.release();
+    } catch (err) {
+      logger.warn({ err }, 'ptyQuery: failed to release gateway turn lease');
+    }
+  }
+
+  async function acquireGatewayTurn(): Promise<boolean> {
+    if (!options.gatewayTurnLease) return true;
+    const pending = { cancelled: false };
+    pendingGatewayTurn = pending;
+    try {
+      const held = await options.gatewayTurnLease.acquire({
+        cancelled: () => disposed || pending.cancelled,
+      });
+      if (disposed || pending.cancelled) {
+        await held.release();
+        return false;
+      }
+      activeGatewayLease = held;
+      return true;
+    } catch (err) {
+      if (disposed || pending.cancelled) return false;
+      throw err;
+    } finally {
+      if (pendingGatewayTurn === pending) pendingGatewayTurn = undefined;
+    }
+  }
+
   // ── Prompt loop ──────────────────────────────────────────────────────────
   async function runPromptLoop(): Promise<void> {
     try {
@@ -514,6 +553,8 @@ export const ptyQuery = (args: {
         }
         if (!session) await boot; // ensure session exists
         if (!session || disposed) break;
+        const acquired = await acquireGatewayTurn();
+        if (!acquired) continue;
         try {
           turnJsonlStartOffset = statSync(session.jsonlPath).size;
         } catch {
@@ -523,7 +564,13 @@ export const ptyQuery = (args: {
         toolSideEffectSeen = false;
         turnInFlight = true; // a new turn starts the moment we submit the prompt
         turnPhase = advanceClaudeTurnPhase(turnPhase, 'prompt_dispatched');
-        await session.typePrompt(text);
+        try {
+          await session.typePrompt(text);
+        } catch (error) {
+          turnInFlight = false;
+          await releaseGatewayTurn();
+          throw error;
+        }
         // Client-side slash commands (/effort, /model, /status, …) change a
         // setting WITHOUT a model turn → no assistant record, no Stop hook, so
         // no `result` would ever be synthesized and the caller's turn hangs.
@@ -566,6 +613,7 @@ export const ptyQuery = (args: {
       if (elapsed > SLASH_GRACE_MS) {
         // No model turn ever started → client-side command. Complete the turn.
         turnInFlight = false;
+        void releaseGatewayTurn();
         logger.info('ptyQuery: slash command ran with no model turn — synthesizing result');
         out.enqueue(
           synthesizeResult({
@@ -596,6 +644,7 @@ export const ptyQuery = (args: {
     logger.warn({ ...info, turnInFlight }, 'ptyQuery: claude exited unexpectedly');
     if (turnInFlight) {
       turnInFlight = false;
+      void releaseGatewayTurn();
       const completedText = session
         ? readCompletedAssistantTextSince(session.jsonlPath, turnJsonlStartOffset)
         : null;
@@ -639,7 +688,9 @@ export const ptyQuery = (args: {
         /* ignore */
       }
     }
-    if (session) await session.interrupt();
+    const queuedTurn = pendingGatewayTurn;
+    if (queuedTurn) queuedTurn.cancelled = true;
+    if (session && !queuedTurn) await session.interrupt();
     // ESC + Ctrl-C cancels the in-flight model turn but, unlike a clean turn
     // end, fires NO Stop hook — and unlike a crash, the process stays alive, so
     // handleSessionExit never runs either. That means NO terminal `result` would
@@ -649,8 +700,9 @@ export const ptyQuery = (args: {
     // message wedges with "turn <id> is in flight" (blank reply in Feishu).
     // Synthesize the terminal result here, guarded by turnInFlight so we never
     // double-emit against the Stop-hook path (mirrors handleSessionExit).
-    if (turnInFlight && !disposed) {
+    if ((turnInFlight || queuedTurn) && !disposed) {
       turnInFlight = false;
+      await releaseGatewayTurn();
       logger.info('ptyQuery: turn interrupted — synthesizing terminal result');
       out.enqueue(
         synthesizeResult({
@@ -667,6 +719,8 @@ export const ptyQuery = (args: {
   async function dispose(): Promise<void> {
     if (disposed) return;
     disposed = true;
+    if (pendingGatewayTurn) pendingGatewayTurn.cancelled = true;
+    await releaseGatewayTurn();
     try {
       scanner?.stop();
     } catch {

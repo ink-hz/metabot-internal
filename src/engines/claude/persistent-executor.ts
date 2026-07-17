@@ -38,6 +38,7 @@ import type { SDKMessage, TeamEvent, ApiContext } from './executor.js';
 import { apply1MContextSettings } from './executor.js';
 import { makeCanUseTool } from './exit-plan-mode.js';
 import { ptyQuery } from './pty/pty-query.js';
+import { createGatewayTurnLease } from './pty/gateway-turn-lease.js';
 import type {
   PtyQueryOptions,
   PtyPromptSource,
@@ -521,6 +522,12 @@ export class PersistentClaudeExecutor extends EventEmitter {
         settingsEnv: compatibilityRuntime?.settingsEnv,
         pathToClaudeExecutable: CLAUDE_EXECUTABLE,
         onInteractiveTool: (tool) => this.handleInteractiveTool(tool),
+        gatewayTurnLease: process.env.METABOT_CLAUDE_GATEWAY_LOCK_DIR?.trim()
+          ? createGatewayTurnLease({
+              lockDir: process.env.METABOT_CLAUDE_GATEWAY_LOCK_DIR.trim(),
+              instanceName: process.env.METABOT_INSTANCE_NAME,
+            })
+          : undefined,
       };
       const stream = ptyQuery({
         prompt: this.inputQueue as unknown as PtyPromptSource,
