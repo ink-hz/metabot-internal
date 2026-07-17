@@ -44,9 +44,7 @@ prompts.enqueue({
   session_id: '',
 });
 
-const timer = setTimeout(async () => {
-  await stream.dispose?.();
-  await compatibilityRuntime.close();
+const timer = setTimeout(() => {
   console.error('PTY smoke test timed out');
   process.exit(2);
 }, 60_000);
