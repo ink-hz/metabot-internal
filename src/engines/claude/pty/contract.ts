@@ -40,6 +40,7 @@
 
 import type { SDKMessage } from '../executor.js';
 import type { Logger } from '../../../utils/logger.js';
+import type { GatewayTurnLease } from './gateway-turn-lease.js';
 
 // SDKUserMessage is the SDK's input shape. We re-declare the structural subset
 // the PTY backend consumes so the pty module has no hard dependency on the SDK
@@ -126,6 +127,8 @@ export interface PtyQueryOptions {
    * after the user answers (or the executor's 6-min timeout).
    */
   onInteractiveTool?: (tool: PtyInteractiveTool) => Promise<PtyInteractiveResponse>;
+  /** Cross-process lease held only while one active prompt uses the shared gateway. */
+  gatewayTurnLease?: GatewayTurnLease;
 }
 
 /** An interactive tool_use detected in the session jsonl. */

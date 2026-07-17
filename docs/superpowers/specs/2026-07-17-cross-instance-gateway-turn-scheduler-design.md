@@ -40,7 +40,7 @@ Only the active model turn holds the lease. An idle persistent Claude process do
 
 ### Deployment contract
 
-Every generated PM2 instance receives the same absolute lock directory. The deployment creates it with `agentops` ownership and mode `0700`. The compatibility Profile remains mandatory and unchanged.
+Every generated PTY PM2 instance receives the same absolute active-lock path. The path is absent while idle and is atomically created with mode `0700` while held. Deployment creates only its protected parent with `agentops` ownership and mode `0700`; SDK instances receive no scheduler variable. The compatibility Profile remains mandatory and unchanged.
 
 ## Failure behavior
 
