@@ -216,7 +216,7 @@ git commit -m "fix: serialize active PTY turns at the shared gateway"
 
 **Interfaces:**
 - Consumes: `METABOT_CLAUDE_GATEWAY_LOCK_DIR` from Task 2.
-- Produces: one shared `/Users/agentops/AgentRuntime/locks/claude-gateway` directory, owned by `agentops`, mode `0700`.
+- Produces: one shared `/Users/agentops/AgentRuntime/locks/claude-gateway` active-lock path; its `/Users/agentops/AgentRuntime/locks` parent is owned by `agentops`, mode `0700`.
 
 - [ ] **Step 1: Write failing contract and ecosystem tests**
 
@@ -237,7 +237,7 @@ Expected: FAIL because the contract and generated PTY environment lack the share
 
 - [ ] **Step 3: Add the protected shared lock directory**
 
-Add `claude.gatewayTurnLockDir` to schema validation. Generate `METABOT_CLAUDE_GATEWAY_LOCK_DIR` only when `bot.backend === 'pty'`. During deployment create the parent and lock namespace root as `agentops:staff` mode `0700` before PM2 starts.
+Add `claude.gatewayTurnLockDir` to schema validation. Generate `METABOT_CLAUDE_GATEWAY_LOCK_DIR` only when `bot.backend === 'pty'`. During deployment create only its parent as `agentops:staff` mode `0700`; the lease module creates and removes the active-lock path.
 
 - [ ] **Step 4: Verify all repository tests**
 
