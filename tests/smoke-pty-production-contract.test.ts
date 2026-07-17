@@ -24,4 +24,10 @@ describe('production PTY smoke contract', () => {
     expect(source).not.toContain('setTimeout(async () =>');
     expect(source).toMatch(/setTimeout\(\(\) => \{[\s\S]*process\.exit\(2\);[\s\S]*\}, 60_000\)/u);
   });
+
+  it('terminates successfully after emitting the exact marker', () => {
+    const source = readFileSync(new URL('../scripts/smoke-pty.ts', import.meta.url), 'utf8');
+
+    expect(source).toMatch(/console\.log\(marker\);\s*process\.exit\(0\);/u);
+  });
 });

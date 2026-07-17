@@ -71,3 +71,4 @@ if (!successful || assistantText.trim() !== marker) {
   process.exit(1);
 }
 console.log(marker);
+process.exit(0);
