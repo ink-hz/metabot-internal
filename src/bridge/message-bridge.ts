@@ -46,7 +46,10 @@ import {
 import { CodexCommandController } from './codex-command-controller.js';
 import { buildCodexGoalPrompt } from './codex-goal-policy.js';
 import { isContextOverflowError, isStaleSessionError } from './error-classifiers.js';
-import { decideClaudeTurnRecovery } from './claude-turn-recovery.js';
+import {
+  claudeTurnReplayDelayMs,
+  decideClaudeTurnRecovery,
+} from './claude-turn-recovery.js';
 import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
 import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
 import { sendCompletionNotice } from './notification-policy.js';
@@ -70,8 +73,24 @@ export { isContextOverflowError, isStaleSessionError } from './error-classifiers
 export { normalizePromptForEngine } from './prompt-normalizer.js';
 export { extractSpontaneousSnippet, formatSpontaneousCardBody } from './spontaneous-activity.js';
 
+interface RunOneTurnOptions {
+  prompt: string;
+  cwd: string;
+  abortController: AbortController;
+  outputsDir: string;
+  apiContext?: ApiContext;
+  model?: string;
+  reasoningEffort?: import('../config.js').CodexReasoningEffort;
+  onTeamEvent?: (event: TeamEvent) => void;
+  maxTurns?: number;
+  allowedTools?: string[];
+  freshSession?: boolean;
+  flywheelContext?: FlywheelTurnContext;
+}
+
 const TASK_TIMEOUT_MS = 24 * 60 * 60 * 1000; // 24 hours
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for user to answer
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 /**
  * Window during which a freshly-resolved between-turn question card is reused
  * (updated in place) for the next sub-question of the same AskUserQuestion
@@ -1352,23 +1371,45 @@ export class MessageBridge {
    * sessionId, so `acquire()` would otherwise hand back the same broken
    * instance.
    */
+  private async runOneTurnWithStartupRecovery(
+    chatId: string,
+    engineName: EngineName,
+    opts: RunOneTurnOptions,
+    onReplay?: (replayCount: number) => void,
+  ): Promise<ExecutionHandle> {
+    let replayCount = 0;
+    let freshSession = opts.freshSession;
+    while (true) {
+      try {
+        return await this.runOneTurn(chatId, engineName, { ...opts, freshSession });
+      } catch (error) {
+        if (!isClaudeProcessExitError(error)
+          || decideClaudeTurnRecovery({
+            completedOutputRecovered: error.details.completedOutputRecovered,
+            sideEffectSeen: error.details.toolSideEffectSeen,
+            replayCount,
+            stopping: opts.abortController.signal.aborted,
+          }) !== 'replay_fresh_once') {
+          throw error;
+        }
+        const backoffMs = claudeTurnReplayDelayMs(replayCount);
+        replayCount += 1;
+        this.logger.warn(
+          { chatId, replayCount, backoffMs, phase: error.details.phase },
+          'Claude process exited during startup, retrying in fresh session',
+        );
+        this.sessionManager.resetSession(chatId);
+        onReplay?.(replayCount);
+        await delay(backoffMs);
+        freshSession = true;
+      }
+    }
+  }
+
   private async runOneTurn(
     chatId: string,
     engineName: EngineName,
-    opts: {
-      prompt: string;
-      cwd: string;
-      abortController: AbortController;
-      outputsDir: string;
-      apiContext?: ApiContext;
-      model?: string;
-      reasoningEffort?: import('../config.js').CodexReasoningEffort;
-      onTeamEvent?: (event: TeamEvent) => void;
-      maxTurns?: number;
-      allowedTools?: string[];
-      freshSession?: boolean;
-      flywheelContext?: FlywheelTurnContext;
-    },
+    opts: RunOneTurnOptions,
   ): Promise<ExecutionHandle> {
     const compatibilityProfile = this.config.claude.compatibilityProfile;
     if (engineName === 'claude' && compatibilityProfile) {
@@ -2143,30 +2184,14 @@ export class MessageBridge {
     let executionHandle: ExecutionHandle | undefined;
     let launchError: any;
     try {
-      executionHandle = await this.runOneTurn(chatId, engineName, {
+      executionHandle = await this.runOneTurnWithStartupRecovery(chatId, engineName, {
         prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
         onTeamEvent, flywheelContext,
+      }, () => {
+        attemptId = randomUUID();
       });
     } catch (error: any) {
       launchError = error;
-      if (isClaudeProcessExitError(error)
-        && decideClaudeTurnRecovery({
-          completedOutputRecovered: error.details.completedOutputRecovered,
-          sideEffectSeen: error.details.toolSideEffectSeen,
-          replayCount: 0,
-          stopping: abortController.signal.aborted,
-        }) === 'replay_fresh_once') {
-        this.sessionManager.resetSession(chatId);
-        attemptId = randomUUID();
-        try {
-          executionHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
-            onTeamEvent, freshSession: true, flywheelContext,
-          });
-        } catch (retryError: any) {
-          launchError = retryError;
-        }
-      }
     }
 
     if (!executionHandle) {
@@ -2213,7 +2238,7 @@ export class MessageBridge {
     const timeoutId = setTimeout(() => {
       this.logger.warn({ chatId, userId }, 'Task timeout, aborting');
       timedOut = true;
-      executionHandle.finish();
+      executionHandle?.finish();
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
@@ -2226,7 +2251,7 @@ export class MessageBridge {
       idleTimerId = setTimeout(() => {
         this.logger.warn({ chatId, userId }, 'Task idle timeout (1h no stream), aborting');
         idledOut = true;
-        executionHandle.finish();
+        executionHandle?.finish();
         abortController.abort();
       }, IDLE_TIMEOUT_MS);
     };
@@ -2554,87 +2579,113 @@ export class MessageBridge {
 
       if (retryProcessExit || retrySessionError) {
         const isOverflow = isContextOverflowError(errMsg);
-        this.logger.info(
-          { chatId, isOverflow, processExit: retryProcessExit },
-          retryProcessExit
-            ? 'Claude process exited before side effects, replaying once in fresh session'
-            : (isOverflow ? 'Context overflow in catch, retrying with fresh session' : 'Stale session detected in catch, retrying with fresh session'),
-        );
-        this.sessionManager.resetSession(chatId);
         const retryMsg = retryProcessExit
           ? '_Claude 进程已安全重启，正在继续本轮请求..._'
           : (isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._');
         await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
 
-        try {
-          attemptId = randomUUID();
-          const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
-            onTeamEvent, freshSession: true, flywheelContext,
-          });
-          executionHandle.finish();
-          runningTask.executionHandle = retryHandle;
-
-          for await (const message of retryHandle.stream) {
-            if (abortController.signal.aborted) break;
-            resetIdleTimer();
-            const state = processor.processMessage(message);
-            lastState = state;
-            const newSid = processor.getSessionId();
-            if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
-            if (state.status === 'complete' || state.status === 'error') break;
-            rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
+        let replayCount = 0;
+        let shouldReplayProcessExit = retryProcessExit;
+        do {
+          if (shouldReplayProcessExit) {
+            const backoffMs = claudeTurnReplayDelayMs(replayCount);
+            this.logger.info(
+              { chatId, replayCount: replayCount + 1, backoffMs },
+              'Claude process exited before side effects, replaying in fresh session',
+            );
+            await delay(backoffMs);
+          } else {
+            this.logger.info(
+              { chatId, isOverflow },
+              isOverflow
+                ? 'Context overflow in catch, retrying with fresh session'
+                : 'Stale session detected in catch, retrying with fresh session',
+            );
           }
-          await rateLimiter.cancelAndWait();
-          this.recordProbeTerminal(probe, processor, lastState);
-          const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
-          this.recordProbeTextDelivery(probe, messageId, textDelivered);
+          this.sessionManager.resetSession(chatId);
 
-          const durationMs = Date.now() - startTime;
-          this.audit.log({
-            event: lastState.status === 'error' ? 'task_error' : 'task_complete',
-            botName: this.config.name, chatId, userId, prompt: text,
-            durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
-          });
-          this.emitActivity({
-            type: lastState.status === 'complete' ? 'task_completed' : 'task_failed',
-            botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
-            responsePreview: lastState.responseText?.slice(0, 200),
-            costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
-            turnId: lifecycleTurnId, attemptId, instanceId,
-            phase: lastState.status === 'complete' ? 'completed' : 'output_started',
-            errorClass: lastState.status === 'complete' ? undefined : 'model_result_error',
-            timestamp: Date.now(),
-          });
-          this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
-          this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
-          metrics.incCounter('metabot_tasks_total');
-          metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
+          try {
+            attemptId = randomUUID();
+            const retryHandle = await this.runOneTurn(chatId, engineName, {
+              prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+              onTeamEvent, freshSession: true, flywheelContext,
+            });
+            executionHandle.finish();
+            executionHandle = retryHandle;
+            runningTask.executionHandle = retryHandle;
 
-          this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
-          await sendCompletionNotice({
-            sender: this.sender,
-            config: this.config,
-            logger: this.logger,
-            chatId,
-            state: lastState,
-            durationMs,
-          });
-          await this.outputHandler.sendOutputFiles(
-            chatId,
-            outputsDir,
-            processor,
-            lastState,
-            probe ? (receipt) => this.probeObserver?.delivery(probe, receipt) : undefined,
-          );
-          return; // skip the normal error handling below
-        } catch (retryErr: any) {
-          this.logger.error({ err: retryErr, chatId }, 'Single fresh-session retry failed');
-          reportedError = isClaudeProcessExitError(retryErr)
-            ? 'Claude 服务本轮未能完成，请稍后重试。'
-            : (retryErr.message || reportedError);
-          lastState = { ...lastState, status: 'error', errorMessage: reportedError };
-        }
+            for await (const message of retryHandle.stream) {
+              if (abortController.signal.aborted) break;
+              resetIdleTimer();
+              const state = processor.processMessage(message);
+              lastState = state;
+              const newSid = processor.getSessionId();
+              if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+              if (state.status === 'complete' || state.status === 'error') break;
+              rateLimiter.schedule(() => { this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId)); });
+            }
+            await rateLimiter.cancelAndWait();
+            this.recordProbeTerminal(probe, processor, lastState);
+            const textDelivered = await this.sendFinalCard(messageId, lastState, chatId);
+            this.recordProbeTextDelivery(probe, messageId, textDelivered);
+
+            const durationMs = Date.now() - startTime;
+            this.audit.log({
+              event: lastState.status === 'error' ? 'task_error' : 'task_complete',
+              botName: this.config.name, chatId, userId, prompt: text,
+              durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
+            });
+            this.emitActivity({
+              type: lastState.status === 'complete' ? 'task_completed' : 'task_failed',
+              botName: this.config.name, chatId, userId, prompt: text?.slice(0, 200),
+              responsePreview: lastState.responseText?.slice(0, 200),
+              costUsd: lastState.costUsd, durationMs, errorMessage: lastState.errorMessage,
+              turnId: lifecycleTurnId, attemptId, instanceId,
+              phase: lastState.status === 'complete' ? 'completed' : 'output_started',
+              errorClass: lastState.status === 'complete' ? undefined : 'model_result_error',
+              timestamp: Date.now(),
+            });
+            this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
+            this.costTracker.record({ botName: this.config.name, userId, success: lastState.status === 'complete', costUsd: lastState.costUsd, durationMs });
+            metrics.incCounter('metabot_tasks_total');
+            metrics.incCounter('metabot_tasks_by_status', lastState.status === 'complete' ? 'success' : 'error');
+
+            this.recordSession(chatId, displayPrompt, lastState.responseText, processor.getSessionId(), lastState.costUsd, durationMs);
+            await sendCompletionNotice({
+              sender: this.sender,
+              config: this.config,
+              logger: this.logger,
+              chatId,
+              state: lastState,
+              durationMs,
+            });
+            await this.outputHandler.sendOutputFiles(
+              chatId,
+              outputsDir,
+              processor,
+              lastState,
+              probe ? (receipt) => this.probeObserver?.delivery(probe, receipt) : undefined,
+            );
+            return; // skip the normal error handling below
+          } catch (retryErr: any) {
+            this.logger.error({ err: retryErr, chatId, replayCount }, 'Fresh-session retry failed');
+            reportedError = isClaudeProcessExitError(retryErr)
+              ? 'Claude 服务本轮未能完成，请稍后重试。'
+              : (retryErr.message || reportedError);
+            replayCount += 1;
+            const retryHasSideEffect = isClaudeProcessExitError(retryErr)
+              ? retryErr.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+              : false;
+            shouldReplayProcessExit = isClaudeProcessExitError(retryErr)
+              && decideClaudeTurnRecovery({
+                completedOutputRecovered: retryErr.details.completedOutputRecovered,
+                sideEffectSeen: retryHasSideEffect,
+                replayCount,
+                stopping: abortController.signal.aborted,
+              }) === 'replay_fresh_once';
+            lastState = { ...lastState, status: 'error', errorMessage: reportedError };
+          }
+        } while (shouldReplayProcessExit);
       }
 
       const durationMs = Date.now() - startTime;
@@ -2827,39 +2878,22 @@ export class MessageBridge {
 
     // Process startup is part of the lifecycle boundary: a boot failure must
     // still produce a terminal activity record. A typed pre-side-effect exit
-    // gets the same single fresh-session attempt as an in-stream exit.
+    // gets the same capped fresh-session recovery as an in-stream exit.
     let executionHandle: ExecutionHandle | undefined;
+    let launchError: any;
     try {
-      executionHandle = await this.runOneTurn(chatId, engineName, {
+      executionHandle = await this.runOneTurnWithStartupRecovery(chatId, engineName, {
         prompt, cwd, abortController, outputsDir, apiContext,
         maxTurns: options.maxTurns,
         model: options.model ?? session.model,
         allowedTools: options.allowedTools,
         onTeamEvent,
-      });
-    } catch (launchError: any) {
-      if (isClaudeProcessExitError(launchError)
-        && decideClaudeTurnRecovery({
-          completedOutputRecovered: launchError.details.completedOutputRecovered,
-          sideEffectSeen: launchError.details.toolSideEffectSeen,
-          replayCount: 0,
-          stopping: abortController.signal.aborted,
-        }) === 'replay_fresh_once') {
-        this.sessionManager.resetSession(chatId);
+      }, () => {
         attemptId = randomUUID();
-        try {
-          executionHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext,
-            maxTurns: options.maxTurns,
-            model: options.model ?? session.model,
-            allowedTools: options.allowedTools,
-            onTeamEvent, freshSession: true,
-          });
-        } catch (retryError: any) {
-          launchError = retryError;
-          executionHandle = undefined;
-        }
-      } else {
+      });
+    } catch (error: any) {
+      launchError = error;
+      if (!isClaudeProcessExitError(launchError)) {
         this.probeObserver?.stage(probe, {
           stage: 'failed', at: new Date().toISOString(),
           errorClass: classifyFlywheelError(launchError instanceof Error ? launchError.message : String(launchError)),
@@ -2917,7 +2951,7 @@ export class MessageBridge {
     const timeoutId = setTimeout(() => {
       this.logger.warn({ chatId, userId }, 'API task timeout, aborting');
       timedOut = true;
-      executionHandle.finish();
+      executionHandle?.finish();
       abortController.abort();
     }, TASK_TIMEOUT_MS);
 
@@ -2927,7 +2961,7 @@ export class MessageBridge {
       idleTimerId = setTimeout(() => {
         this.logger.warn({ chatId, userId }, 'API task idle timeout (1h no stream), aborting');
         idledOut = true;
-        executionHandle.finish();
+        executionHandle?.finish();
         abortController.abort();
       }, IDLE_TIMEOUT_MS);
     };
@@ -3132,17 +3166,11 @@ export class MessageBridge {
           : 'Claude 服务本轮未能完成，请稍后重试。')
         : (err.message || 'Unknown error');
 
-      // A process crash is replayed at most once and only when no tool side effect
-      // could have happened. Stale/overflow sessions keep their existing recovery.
+      // Process crashes are replayed with a capped exponential backoff only
+      // while no tool side effect could have happened. Stale/overflow sessions
+      // keep their existing single fresh-session recovery.
       if (retryProcessExit || retrySessionError) {
         const isOverflow = isContextOverflowError(errMsg);
-        this.logger.info(
-          { chatId, isOverflow, processExit: retryProcessExit },
-          retryProcessExit
-            ? 'API task: Claude process exited before side effects, replaying once in fresh session'
-            : (isOverflow ? 'API task: context overflow in catch, retrying with fresh session' : 'API task: stale session in catch, retrying with fresh session'),
-        );
-        this.sessionManager.resetSession(chatId);
         const retryMsg = retryProcessExit
           ? '_Claude 进程已安全重启，正在继续本轮请求..._'
           : (isOverflow ? '_Context limit reached, starting fresh session..._' : '_Session expired, retrying..._');
@@ -3150,56 +3178,89 @@ export class MessageBridge {
           await this.sender.updateCard(messageId, { ...lastState, status: 'running', responseText: retryMsg });
         }
 
-        try {
-          const retryHandle = await this.runOneTurn(chatId, engineName, {
-            prompt, cwd, abortController, outputsDir, apiContext,
-            model: options.model ?? session.model,
-            onTeamEvent, freshSession: true,
-          });
-          executionHandle.finish();
-          runningTask.executionHandle = retryHandle;
+        let replayCount = 0;
+        let shouldReplayProcessExit = retryProcessExit;
+        do {
+          if (shouldReplayProcessExit) {
+            const backoffMs = claudeTurnReplayDelayMs(replayCount);
+            this.logger.info(
+              { chatId, replayCount: replayCount + 1, backoffMs },
+              'API task: Claude process exited before side effects, replaying in fresh session',
+            );
+            await delay(backoffMs);
+          } else {
+            this.logger.info(
+              { chatId, isOverflow },
+              isOverflow
+                ? 'API task: context overflow in catch, retrying with fresh session'
+                : 'API task: stale session in catch, retrying with fresh session',
+            );
+          }
+          this.sessionManager.resetSession(chatId);
+          try {
+            attemptId = randomUUID();
+            const retryHandle = await this.runOneTurn(chatId, engineName, {
+              prompt, cwd, abortController, outputsDir, apiContext,
+              model: options.model ?? session.model,
+              onTeamEvent, freshSession: true,
+            });
+            executionHandle.finish();
+            executionHandle = retryHandle;
+            runningTask.executionHandle = retryHandle;
 
-          for await (const message of retryHandle.stream) {
-            if (abortController.signal.aborted) break;
-            resetIdleTimer();
-            const state = processor.processMessage(message);
-            lastState = state;
-            const newSid = processor.getSessionId();
-            if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
-            if (state.status === 'complete' || state.status === 'error') break;
-            if (sendCards && messageId) {
-              rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
+            for await (const message of retryHandle.stream) {
+              if (abortController.signal.aborted) break;
+              resetIdleTimer();
+              const state = processor.processMessage(message);
+              lastState = state;
+              const newSid = processor.getSessionId();
+              if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+              if (state.status === 'complete' || state.status === 'error') break;
+              if (sendCards && messageId) {
+                rateLimiter.schedule(() => { this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId)); });
+              }
+              options.onUpdate?.(state, effectiveMessageId, false);
             }
-            options.onUpdate?.(state, effectiveMessageId, false);
+            await rateLimiter.cancelAndWait();
+
+            if (sendCards && messageId) {
+              await this.sendFinalCard(messageId, lastState, deliveryChatId);
+            }
+            options.onUpdate?.(lastState, effectiveMessageId, true);
+
+            await this.outputHandler.sendOutputFiles(deliveryChatId, outputsDir, processor, lastState);
+
+            if (options.onOutputFiles) {
+              const outputFiles = this.outputsManager.scanOutputs(outputsDir);
+              if (outputFiles.length > 0) options.onOutputFiles(outputFiles);
+            }
+
+            return {
+              success: lastState.status === 'complete',
+              responseText: lastState.responseText,
+              sessionId: processor.getSessionId(),
+              costUsd: lastState.costUsd,
+              durationMs: Date.now() - startTime,
+              error: lastState.errorMessage,
+            };
+          } catch (retryErr: any) {
+            this.logger.error({ err: retryErr, chatId, replayCount }, 'API task fresh-session retry failed');
+            reportedError = isClaudeProcessExitError(retryErr)
+              ? 'Claude 服务本轮未能完成，请稍后重试。'
+              : (retryErr.message || reportedError);
+            replayCount += 1;
+            const retryHasSideEffect = isClaudeProcessExitError(retryErr)
+              ? retryErr.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+              : false;
+            shouldReplayProcessExit = isClaudeProcessExitError(retryErr)
+              && decideClaudeTurnRecovery({
+                completedOutputRecovered: retryErr.details.completedOutputRecovered,
+                sideEffectSeen: retryHasSideEffect,
+                replayCount,
+                stopping: abortController.signal.aborted,
+              }) === 'replay_fresh_once';
           }
-          await rateLimiter.cancelAndWait();
-
-          if (sendCards && messageId) {
-            await this.sendFinalCard(messageId, lastState, deliveryChatId);
-          }
-          options.onUpdate?.(lastState, effectiveMessageId, true);
-
-          await this.outputHandler.sendOutputFiles(deliveryChatId, outputsDir, processor, lastState);
-
-          if (options.onOutputFiles) {
-            const outputFiles = this.outputsManager.scanOutputs(outputsDir);
-            if (outputFiles.length > 0) options.onOutputFiles(outputFiles);
-          }
-
-          return {
-            success: lastState.status === 'complete',
-            responseText: lastState.responseText,
-            sessionId: processor.getSessionId(),
-            costUsd: lastState.costUsd,
-            durationMs: Date.now() - startTime,
-            error: lastState.errorMessage,
-          };
-        } catch (retryErr: any) {
-          this.logger.error({ err: retryErr, chatId }, 'API task single fresh-session retry failed');
-          reportedError = isClaudeProcessExitError(retryErr)
-            ? 'Claude 服务本轮未能完成，请稍后重试。'
-            : (retryErr.message || reportedError);
-        }
+        } while (shouldReplayProcessExit);
       }
 
       if (sendCards && messageId) {

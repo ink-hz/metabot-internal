@@ -1,14 +1,27 @@
 import { describe, expect, it } from 'vitest';
-import { decideClaudeTurnRecovery } from '../src/bridge/claude-turn-recovery.js';
+import {
+  claudeTurnReplayDelayMs,
+  decideClaudeTurnRecovery,
+  MAX_CLAUDE_TURN_ATTEMPTS,
+} from '../src/bridge/claude-turn-recovery.js';
 
 describe('Claude turn recovery policy', () => {
-  it('replays once only before any side effect', () => {
+  it('allows two safe replays before any side effect', () => {
     expect(decideClaudeTurnRecovery({
       completedOutputRecovered: false,
       sideEffectSeen: false,
       replayCount: 0,
       stopping: false,
     })).toBe('replay_fresh_once');
+    expect(decideClaudeTurnRecovery({
+      completedOutputRecovered: false,
+      sideEffectSeen: false,
+      replayCount: 1,
+      stopping: false,
+    })).toBe('replay_fresh_once');
+    expect(MAX_CLAUDE_TURN_ATTEMPTS).toBe(3);
+    expect(claudeTurnReplayDelayMs(0)).toBe(500);
+    expect(claudeTurnReplayDelayMs(1)).toBe(1000);
   });
 
   it('never replays after a possible side effect', () => {
@@ -24,7 +37,7 @@ describe('Claude turn recovery policy', () => {
     expect(decideClaudeTurnRecovery({
       completedOutputRecovered: false,
       sideEffectSeen: false,
-      replayCount: 1,
+      replayCount: 2,
       stopping: false,
     })).toBe('stop_without_replay');
     expect(decideClaudeTurnRecovery({

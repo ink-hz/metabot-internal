@@ -24,9 +24,9 @@
 - Modify: `src/bridge/claude-turn-recovery.ts`
 - Test: `tests/claude-turn-recovery.test.ts`
 
-- [ ] Write a failing test proving replay counts 0 and 1 are retryable and replay count 2 stops.
-- [ ] Add the three-attempt cap and exponential delay calculation.
-- [ ] Run `vitest run tests/claude-turn-recovery.test.ts` and confirm it passes.
+- [x] Write a failing test proving replay counts 0 and 1 are retryable and replay count 2 stops.
+- [x] Add the three-attempt cap and exponential delay calculation.
+- [x] Run `vitest run tests/claude-turn-recovery.test.ts` and confirm it passes.
 
 ### Task 2: MessageBridge safe replay loop
 
@@ -34,17 +34,17 @@
 - Modify: `src/bridge/message-bridge.ts`
 - Test: `tests/message-bridge.test.ts`
 
-- [ ] Change the existing process-exit test to crash twice before succeeding and verify three executions.
-- [ ] Replace single fresh-session replay branches with capped loops using the shared policy and backoff.
-- [ ] Verify a tool-side-effect exit still runs exactly once.
-- [ ] Run `vitest run tests/message-bridge.test.ts tests/claude-turn-recovery.test.ts`.
+- [x] Change the existing process-exit test to crash twice before succeeding and verify three executions.
+- [x] Replace single fresh-session replay branches with capped loops using the shared policy and backoff.
+- [x] Verify a tool-side-effect exit still runs exactly once.
+- [x] Run `vitest run tests/message-bridge.test.ts tests/claude-turn-recovery.test.ts`.
 
 ### Task 3: Regression and deployment
 
 **Files:**
 - No additional source files.
 
-- [ ] Run the complete MetaBot test suite and TypeScript build.
+- [x] Run the complete MetaBot test suite and TypeScript build.
 - [ ] Commit and merge the isolated branch.
 - [ ] Deploy through the existing AgentOS deployment gate.
 - [ ] Run concurrent Claude smoke tests and verify no process-exit error.
