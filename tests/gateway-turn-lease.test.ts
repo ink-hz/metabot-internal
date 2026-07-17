@@ -15,19 +15,28 @@ async function lockPath(): Promise<string> {
 }
 
 async function seedOwner(
-  lockDir: string,
+  slotDir: string,
   owner: { pid: number; nonce: string; instanceName?: string },
 ): Promise<void> {
-  await mkdir(lockDir, { recursive: true });
-  await writeFile(path.join(lockDir, 'owner.json'), JSON.stringify({
+  await mkdir(slotDir, { recursive: true });
+  await writeFile(path.join(slotDir, 'owner.json'), JSON.stringify({
     ...owner,
     instanceName: owner.instanceName ?? 'seed',
     acquiredAt: Date.now(),
   }));
 }
 
-async function readOwner(lockDir: string): Promise<{ pid: number; nonce: string }> {
-  return JSON.parse(await readFile(path.join(lockDir, 'owner.json'), 'utf8'));
+function globalSlot(lockDir: string, slot = 0): string {
+  return path.join(lockDir, 'global', `slot-${slot}`);
+}
+
+function instanceSlot(lockDir: string, instanceName: string, slot = 0): string {
+  const key = Buffer.from(instanceName, 'utf8').toString('base64url');
+  return path.join(lockDir, 'instances', key, `slot-${slot}`);
+}
+
+async function readOwner(slotDir: string): Promise<{ pid: number; nonce: string }> {
+  return JSON.parse(await readFile(path.join(slotDir, 'owner.json'), 'utf8'));
 }
 
 afterEach(async () => {
@@ -69,7 +78,8 @@ describe('GatewayTurnLease', () => {
 
   it('recovers a lease whose owner process is dead', async () => {
     const lockDir = await lockPath();
-    await seedOwner(lockDir, { pid: 101, nonce: 'old' });
+    await seedOwner(instanceSlot(lockDir, 'voice'), { pid: 101, nonce: 'old-instance' });
+    await seedOwner(globalSlot(lockDir), { pid: 101, nonce: 'old' });
     const lease = createGatewayTurnLease({
       lockDir,
       pid: 202,
@@ -79,7 +89,7 @@ describe('GatewayTurnLease', () => {
     });
 
     const handle = await lease.acquire();
-    expect(await readOwner(lockDir)).toMatchObject({ pid: 202 });
+    expect(await readOwner(globalSlot(lockDir))).toMatchObject({ pid: 202 });
     await handle.release();
   });
 
@@ -93,11 +103,11 @@ describe('GatewayTurnLease', () => {
     });
     const old = await first.acquire();
 
-    await rm(lockDir, { recursive: true, force: true });
-    await seedOwner(lockDir, { pid: 202, nonce: 'new-owner' });
+    await rm(globalSlot(lockDir), { recursive: true, force: true });
+    await seedOwner(globalSlot(lockDir), { pid: 202, nonce: 'new-owner' });
     await old.release();
 
-    expect(await readOwner(lockDir)).toMatchObject({ pid: 202, nonce: 'new-owner' });
+    expect(await readOwner(globalSlot(lockDir))).toMatchObject({ pid: 202, nonce: 'new-owner' });
   });
 
   it('cancels a queued acquisition without touching the active owner', async () => {
@@ -123,7 +133,85 @@ describe('GatewayTurnLease', () => {
     await delay(10);
     cancelled = true;
     await expect(waiting).rejects.toThrow('gateway turn lease acquisition cancelled');
-    expect(await readOwner(lockDir)).toMatchObject({ pid: 101 });
+    expect(await readOwner(globalSlot(lockDir))).toMatchObject({ pid: 101 });
     await held.release();
+  });
+
+  it('allows three turns for one instance and queues its fourth', async () => {
+    const lockDir = await lockPath();
+    const leases = Array.from({ length: 4 }, (_, index) => createGatewayTurnLease({
+      lockDir,
+      pid: 300 + index,
+      instanceName: 'marketing-prospecting',
+      instanceCapacity: 3,
+      globalCapacity: 15,
+      isProcessAlive: () => true,
+      pollMs: 5,
+    }));
+    const held = await Promise.all(leases.slice(0, 3).map((lease) => lease.acquire()));
+    let fourthEntered = false;
+    const fourth = leases[3].acquire().then((handle) => {
+      fourthEntered = true;
+      return handle;
+    });
+
+    await delay(25);
+    expect(fourthEntered).toBe(false);
+    await held[0].release();
+    const fourthHandle = await fourth;
+    expect(fourthEntered).toBe(true);
+    await Promise.all([...held.slice(1), fourthHandle].map((handle) => handle.release()));
+  });
+
+  it('allows fifteen fleet turns and queues the sixteenth', async () => {
+    const lockDir = await lockPath();
+    const leases = Array.from({ length: 16 }, (_, index) => createGatewayTurnLease({
+      lockDir,
+      pid: 400 + index,
+      instanceName: `bot-${index}`,
+      instanceCapacity: 3,
+      globalCapacity: 15,
+      isProcessAlive: () => true,
+      pollMs: 5,
+    }));
+    const held = await Promise.all(leases.slice(0, 15).map((lease) => lease.acquire()));
+    let sixteenthEntered = false;
+    const sixteenth = leases[15].acquire().then((handle) => {
+      sixteenthEntered = true;
+      return handle;
+    });
+
+    await delay(25);
+    expect(sixteenthEntered).toBe(false);
+    await held[0].release();
+    const lastHandle = await sixteenth;
+    expect(sixteenthEntered).toBe(true);
+    await Promise.all([...held.slice(1), lastHandle].map((handle) => handle.release()));
+  });
+
+  it('releases an instance slot when cancelled while waiting for a global slot', async () => {
+    const lockDir = await lockPath();
+    const globalHolder = createGatewayTurnLease({
+      lockDir, pid: 501, instanceName: 'holder', instanceCapacity: 1, globalCapacity: 1,
+      isProcessAlive: () => true, pollMs: 5,
+    });
+    const waiting = createGatewayTurnLease({
+      lockDir, pid: 502, instanceName: 'waiting', instanceCapacity: 1, globalCapacity: 1,
+      isProcessAlive: () => true, pollMs: 5,
+    });
+    const replacement = createGatewayTurnLease({
+      lockDir, pid: 503, instanceName: 'waiting', instanceCapacity: 1, globalCapacity: 1,
+      isProcessAlive: () => true, pollMs: 5,
+    });
+    const held = await globalHolder.acquire();
+    let cancelled = false;
+    const blocked = waiting.acquire({ cancelled: () => cancelled });
+    await delay(20);
+    cancelled = true;
+    await expect(blocked).rejects.toThrow('gateway turn lease acquisition cancelled');
+    await held.release();
+
+    const next = await replacement.acquire();
+    await next.release();
   });
 });

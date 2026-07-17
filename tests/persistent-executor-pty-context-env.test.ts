@@ -48,6 +48,8 @@ describe('PersistentClaudeExecutor PTY context environment', () => {
   it('constructs a shared gateway turn lease only when the fleet lock directory is configured', async () => {
     vi.stubEnv('METABOT_CLAUDE_GATEWAY_LOCK_DIR', '/tmp/metabot-shared-gateway-lock');
     vi.stubEnv('METABOT_INSTANCE_NAME', 'metabot-marketing-prospecting');
+    vi.stubEnv('METABOT_CLAUDE_GATEWAY_GLOBAL_CAPACITY', '15');
+    vi.stubEnv('METABOT_CLAUDE_GATEWAY_INSTANCE_CAPACITY', '3');
     const executor = new PersistentClaudeExecutor({
       cwd: '/tmp',
       logger,
@@ -59,5 +61,15 @@ describe('PersistentClaudeExecutor PTY context environment', () => {
     await executor.start();
 
     expect(capturedPtyOptions[0].gatewayTurnLease).toMatchObject({ acquire: expect.any(Function) });
+  });
+
+  it('rejects an invalid configured gateway capacity', async () => {
+    vi.stubEnv('METABOT_CLAUDE_GATEWAY_LOCK_DIR', '/tmp/metabot-invalid-gateway-capacity');
+    vi.stubEnv('METABOT_CLAUDE_GATEWAY_GLOBAL_CAPACITY', 'many');
+    const executor = new PersistentClaudeExecutor({
+      cwd: '/tmp', logger, model: 'claude-opus-4-8', backend: 'pty', idleTimeoutMs: 0,
+    });
+
+    await expect(executor.start()).rejects.toThrow('global capacity must be an integer');
   });
 });
