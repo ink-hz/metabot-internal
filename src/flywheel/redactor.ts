@@ -1,7 +1,16 @@
-const SENSITIVE_KEY = /(password|token|secret|credential)/i;
+const SENSITIVE_KEY = /(password|secret|credential|authorization|api[_-]?token|access[_-]?token|refresh[_-]?token|auth[_-]?token|token$)/i;
+const SENSITIVE_STRING_PATTERNS = [
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/,
+  /\bsk-[A-Za-z0-9_-]{8,}\b/,
+  /\bxoxb-[A-Za-z0-9_-]{8,}\b/,
+  /\bBearer\s+[A-Za-z0-9._~+/-]+/i,
+  /\bAKIA[A-Z0-9]{16}\b/,
+  /(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?):\/\/[^:\s/@]+:[^@\s/]+@/i,
+];
 
 export interface Redactor {
   sanitize<T>(value: T): T | null;
+  containsSensitive(value: unknown): boolean;
 }
 
 export function createRedactor(knownSecrets: string[]): Redactor {
@@ -9,7 +18,8 @@ export function createRedactor(knownSecrets: string[]): Redactor {
     .sort((a, b) => b.length - a.length);
 
   const sanitize = <T>(value: T): T | null => sanitizeValue(value, secrets) as T | null;
-  return { sanitize };
+  const containsSensitive = (value: unknown): boolean => containsSensitiveValue(value, secrets);
+  return { sanitize, containsSensitive };
 }
 
 export function collectKnownSecrets(env: NodeJS.ProcessEnv): string[] {
@@ -35,6 +45,17 @@ function sanitizeValue(value: unknown, secrets: string[]): unknown {
     if (sanitized !== null) clean[key] = sanitized;
   }
   return clean;
+}
+
+function containsSensitiveValue(value: unknown, secrets: string[]): boolean {
+  if (typeof value === 'string') {
+    return secrets.some((secret) => value.includes(secret))
+      || SENSITIVE_STRING_PATTERNS.some((pattern) => pattern.test(value));
+  }
+  if (Array.isArray(value)) return value.some((item) => containsSensitiveValue(item, secrets));
+  if (!value || typeof value !== 'object') return false;
+  return Object.entries(value as Record<string, unknown>)
+    .some(([key, child]) => SENSITIVE_KEY.test(key) || containsSensitiveValue(child, secrets));
 }
 
 function redactString(value: string, secrets: string[]): string {

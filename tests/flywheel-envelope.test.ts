@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { EventEnvelopeFactory, FLYWHEEL_EVENT_TYPES } from '../src/flywheel/envelope.js';
 
 describe('flywheel event envelope', () => {
+  it('includes the typed explicit-feedback event', () => {
+    expect(FLYWHEEL_EVENT_TYPES).toContain('feedback_received');
+  });
+
   it('assigns a stable recorder instance and monotonic sequence', () => {
     const factory = new EventEnvelopeFactory('00000000-0000-4000-8000-000000000001');
     const first = factory.create(baseInput('message_received'));
@@ -54,7 +58,9 @@ function baseInput(eventType: (typeof FLYWHEEL_EVENT_TYPES)[number]) {
     botId: 'hr-bot',
     businessDomain: 'hr',
     turnId: '10000000-0000-4000-8000-000000000001',
-    runId: eventType === 'message_received' ? null : '20000000-0000-4000-8000-000000000002',
+    runId: ['message_received', 'feedback_received'].includes(eventType)
+      ? null
+      : '20000000-0000-4000-8000-000000000002',
     sender: { provider: 'feishu' as const, union_id: 'union-1', open_id: 'open-1' },
     conversation: { platform: 'feishu' as const, platform_id: 'chat-1', type: 'direct' as const },
     payload: { content: '完整正文' },

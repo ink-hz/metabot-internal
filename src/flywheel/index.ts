@@ -10,14 +10,31 @@ import { FlywheelQueue } from './queue.js';
 import { collectKnownSecrets, createRedactor } from './redactor.js';
 import { PgFlywheelWriter, type FlywheelWriter } from './writer.js';
 
-const BUSINESS_DOMAINS: Record<string, string> = {
+export const FLYWHEEL_BUSINESS_DOMAINS = Object.freeze({
   'feishu-default': 'general',
   'hr-bot': 'hr',
-  'marketing-bot': 'marketing',
-  'pc-bot': 'product-commercialization',
-  'quality-bot': 'quality',
+  'marketing-prospecting-bot': 'marketing_prospecting',
+  'marketing-inbound-bot': 'marketing_inbound',
+  'marketing-voice-bot': 'marketing_voice',
+  'marketing-intelligence-bot': 'marketing_intelligence',
+  'marketing-gtm-bot': 'marketing_gtm',
   'fae-bot': 'fae',
-};
+  'test-bot': 'test',
+} as const);
+
+export class UnknownFlywheelBotError extends Error {
+  constructor() {
+    super('UnknownFlywheelBotError');
+    this.name = 'UnknownFlywheelBotError';
+  }
+}
+
+export function businessDomainForBot(botId: string): string {
+  if (!Object.hasOwn(FLYWHEEL_BUSINESS_DOMAINS, botId)) {
+    throw new UnknownFlywheelBotError();
+  }
+  return FLYWHEEL_BUSINESS_DOMAINS[botId as keyof typeof FLYWHEEL_BUSINESS_DOMAINS];
+}
 
 export type RecordEventInput = Omit<EventEnvelopeInput, 'eventType' | 'businessDomain'>;
 
@@ -28,6 +45,7 @@ export interface FlywheelRecorder {
   recordRunCompleted(input: RecordEventInput): void;
   recordRunFailed(input: RecordEventInput): void;
   recordEvidence(input: RecordEventInput): void;
+  recordFeedbackReceived(input: RecordEventInput): void;
   flush(): Promise<void>;
   close(): Promise<void>;
 }
@@ -41,7 +59,7 @@ export interface RecorderOptions {
 
 const NOOP_RECORDER: FlywheelRecorder = {
   recordMessageReceived() {}, recordRunStarted() {}, recordToolCall() {},
-  recordRunCompleted() {}, recordRunFailed() {}, recordEvidence() {},
+  recordRunCompleted() {}, recordRunFailed() {}, recordEvidence() {}, recordFeedbackReceived() {},
   async flush() {}, async close() {},
 };
 
@@ -69,11 +87,21 @@ export function createFlywheelRecorder(options: RecorderOptions): FlywheelRecord
   const redactor = createRedactor([...collectKnownSecrets(env), ...(options.knownSecrets ?? [])]);
 
   const record = (eventType: FlywheelEventType, input: RecordEventInput): void => {
-    const businessDomain = BUSINESS_DOMAINS[input.botId] ?? 'general';
-    if (!(input.botId in BUSINESS_DOMAINS)) {
+    let businessDomain: string;
+    try {
+      businessDomain = businessDomainForBot(input.botId);
+    } catch (error) {
       metrics.incCounter('flywheel_events_rejected_total');
-      options.logger.warn({ bot_id: input.botId, event_type: eventType, failure_category: 'unknown_bot' },
-        'Flywheel event uses general domain');
+      metrics.incCounter('flywheel_events_dropped_total');
+      options.logger.warn({ error_class: error instanceof Error ? error.name : 'FlywheelBotContractError' },
+        'Flywheel event rejected');
+      return;
+    }
+    if (redactor.containsSensitive(input)) {
+      metrics.incCounter('flywheel_events_rejected_total');
+      metrics.incCounter('flywheel_events_dropped_total');
+      options.logger.warn({ error_class: 'SensitiveFlywheelEventError' }, 'Flywheel event rejected');
+      return;
     }
     const clean = redactor.sanitize(factory.create({ ...input, eventType, businessDomain }));
     if (!clean) {
@@ -90,6 +118,7 @@ export function createFlywheelRecorder(options: RecorderOptions): FlywheelRecord
     recordRunCompleted: (input) => record('run_completed', input),
     recordRunFailed: (input) => record('run_failed', input),
     recordEvidence: (input) => record('evidence', input),
+    recordFeedbackReceived: (input) => record('feedback_received', input),
     flush: () => queue.flush(),
     close: () => queue.close(),
   };

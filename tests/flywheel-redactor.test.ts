@@ -26,6 +26,17 @@ describe('flywheel redactor', () => {
     });
   });
 
+  it('distinguishes credential tokens from model token usage', () => {
+    const redactor = createRedactor([]);
+    expect(redactor.containsSensitive({ input_tokens: 11, output_tokens: 22 })).toBe(false);
+    expect(redactor.sanitize({ input_tokens: 11, output_tokens: 22 })).toEqual({
+      input_tokens: 11,
+      output_tokens: 22,
+    });
+    expect(redactor.containsSensitive({ access_token: 'credential-value' })).toBe(true);
+    expect(redactor.containsSensitive({ authorization: 'Bearer credential-value' })).toBe(true);
+  });
+
   it('drops thinking structures', () => {
     const redactor = createRedactor([]);
     expect(redactor.sanitize({ type: 'thinking', thinking: 'private chain' })).toBeNull();

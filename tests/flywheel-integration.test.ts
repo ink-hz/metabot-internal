@@ -13,7 +13,7 @@ let owner = enabled ? new pg.Pool({ connectionString: ownerUrl }) : undefined;
 describe.skipIf(!enabled)('flywheel PostgreSQL integration', () => {
   afterAll(async () => { await owner?.end(); });
 
-  it('writes a complete six-event turn and remains non-blocking when PostgreSQL stops', async () => {
+  it('writes a complete turn with explicit feedback and remains non-blocking when PostgreSQL stops', async () => {
     const recorder = createFlywheelRecorder({
       env: {
         FLYWHEEL_ENABLED: 'true',
@@ -39,6 +39,16 @@ describe.skipIf(!enabled)('flywheel PostgreSQL integration', () => {
     recorder.recordRunCompleted({ ...base, payload: { content: '完整回答', input_tokens: 11, output_tokens: 22, duration_ms: 3, cost_usd: 0.01 } });
     recorder.recordRunStarted({ ...base, runId: failedRunId, payload: { engine: 'claude', backend: 'pty' } });
     recorder.recordRunFailed({ ...base, runId: failedRunId, payload: { error_class: 'provider_error', error_message: 'synthetic failure' } });
+    recorder.recordFeedbackReceived({
+      ...base,
+      runId: null,
+      payload: {
+        kind: 'correction',
+        raw_text: '请保留完整纠正内容。',
+        target_platform_message_id: 'integration-message',
+        ability_key: 'integration_ability',
+      },
+    });
     await recorder.flush();
 
     const chain = await owner!.query(`
@@ -53,8 +63,13 @@ describe.skipIf(!enabled)('flywheel PostgreSQL integration', () => {
     const types = await owner!.query<{ event_type: string }>(
       'select distinct event_type from flywheel_trace.events where turn_id = $1', [turnId]);
     expect(types.rows.map((row) => row.event_type).sort()).toEqual([
-      'evidence', 'message_received', 'run_completed', 'run_failed', 'run_started', 'tool_call',
+      'evidence', 'feedback_received', 'message_received', 'run_completed', 'run_failed', 'run_started', 'tool_call',
     ]);
+    const feedback = await owner!.query<{ count: number }>(
+      "select count(*)::int as count from flywheel_core.feedback where turn_id = $1 and raw_text = '请保留完整纠正内容。'",
+      [turnId],
+    );
+    expect(feedback.rows[0].count).toBe(1);
 
     const before = counterValue('flywheel_events_dropped_total');
     await owner!.end();

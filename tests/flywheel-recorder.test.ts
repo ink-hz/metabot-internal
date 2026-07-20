@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { FlywheelEventEnvelope } from '../src/flywheel/envelope.js';
 import { FlywheelQueue } from '../src/flywheel/queue.js';
 import { createFlywheelRecorder } from '../src/flywheel/index.js';
+import { metrics } from '../src/utils/metrics.js';
 
 const event = (): FlywheelEventEnvelope => ({
   event_id: crypto.randomUUID(), event_type: 'tool_call', seq: 1,
@@ -50,6 +51,101 @@ describe('flywheel recorder feature flag', () => {
     recorder.recordRunCompleted({} as any);
     recorder.recordRunFailed({} as any);
     recorder.recordEvidence({} as any);
+    recorder.recordFeedbackReceived({} as any);
     expect(writerFactory).not.toHaveBeenCalled();
   });
+
+  it('queues a typed feedback event after removing private thinking structures', async () => {
+    const writer = { write: vi.fn(async () => 'committed' as const), close: vi.fn() };
+    const recorder = createFlywheelRecorder({
+      env: enabledEnv(),
+      logger: { warn: vi.fn() } as any,
+      writerFactory: () => writer,
+    });
+
+    recorder.recordFeedbackReceived({
+      botId: 'marketing-intelligence-bot',
+      turnId: '70000000-0000-4000-8000-000000000001',
+      runId: null,
+      conversation: { platform: 'feishu', platform_id: 'feedback-chat', type: 'direct' },
+      payload: {
+        kind: 'correction',
+        raw_text: '请改成按区域汇总。',
+        ability_key: 'market_analysis',
+        private_trace: { type: 'thinking', text: 'must not persist' },
+      },
+    });
+    await recorder.flush();
+
+    expect(writer.write).toHaveBeenCalledOnce();
+    expect(writer.write.mock.calls[0][0]).toMatchObject({
+      event_type: 'feedback_received',
+      bot_id: 'marketing-intelligence-bot',
+      business_domain: 'marketing_intelligence',
+      payload: {
+        kind: 'correction',
+        raw_text: '请改成按区域汇总。',
+        ability_key: 'market_analysis',
+      },
+    });
+    expect(JSON.stringify(writer.write.mock.calls[0][0])).not.toContain('must not persist');
+    await recorder.close();
+  });
+
+  it('rejects credential-bearing feedback before it reaches the writer', async () => {
+    const writer = { write: vi.fn(async () => 'committed' as const), close: vi.fn() };
+    const logger = { warn: vi.fn() };
+    const counter = vi.spyOn(metrics, 'incCounter');
+    const recorder = createFlywheelRecorder({
+      env: enabledEnv(), logger: logger as any, writerFactory: () => writer,
+    });
+
+    recorder.recordFeedbackReceived({
+      botId: 'hr-bot',
+      turnId: '70000000-0000-4000-8000-000000000002',
+      runId: null,
+      conversation: { platform: 'feishu', platform_id: 'credential-chat', type: 'direct' },
+      payload: { kind: 'correction', raw_text: 'Bearer abc.def-123' },
+    });
+    await recorder.flush();
+
+    expect(writer.write).not.toHaveBeenCalled();
+    expect(counter).toHaveBeenCalledWith('flywheel_events_rejected_total');
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('abc.def-123');
+    counter.mockRestore();
+    await recorder.close();
+  });
+
+  it('drops an unknown Bot without logging its ID or payload', async () => {
+    const writer = { write: vi.fn(async () => 'committed' as const), close: vi.fn() };
+    const logger = { warn: vi.fn() };
+    const recorder = createFlywheelRecorder({
+      env: enabledEnv(), logger: logger as any, writerFactory: () => writer,
+    });
+
+    recorder.recordMessageReceived({
+      botId: 'unknown-sensitive-bot-id',
+      turnId: '70000000-0000-4000-8000-000000000003',
+      runId: null,
+      conversation: { platform: 'feishu', platform_id: 'unknown-chat', type: 'direct' },
+      payload: { content: 'unknown-sensitive-payload' },
+    });
+    await recorder.flush();
+
+    expect(writer.write).not.toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(
+      { error_class: 'UnknownFlywheelBotError' },
+      'Flywheel event rejected',
+    );
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain('unknown-sensitive');
+    await recorder.close();
+  });
 });
+
+function enabledEnv(): NodeJS.ProcessEnv {
+  return {
+    FLYWHEEL_ENABLED: 'true',
+    FLYWHEEL_DATABASE_URL: 'postgresql://flywheel_ingest@127.0.0.1/flywheel',
+    FLYWHEEL_RETRY_BASE_MS: '1',
+  };
+}
