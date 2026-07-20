@@ -2801,21 +2801,58 @@ export class MessageBridge {
     const { session, engineName } = this.prepareSessionForApiExecution(chatId, options.engine);
     const cwd = session.workingDirectory;
     const abortController = new AbortController();
+    const turnId = randomUUID();
+    const flywheelContext: FlywheelTurnContext | undefined = this.flywheel && probe
+      ? {
+        turnId,
+        runId: randomUUID(),
+        conversation: { platform: 'feishu', platform_id: chatId, type: 'direct' },
+        isSynthetic: probe?.isSynthetic,
+        probeId: probe?.probeId,
+      }
+      : undefined;
+
+    if (this.flywheel && flywheelContext) {
+      const releaseVersion = readReleaseVersion(cwd);
+      this.flywheel.recordMessageReceived(this.flywheelInput(flywheelContext, {
+        platform_message_id: `api-${turnId}`,
+        content: prompt,
+      }));
+      this.flywheel.recordRunStarted(this.flywheelInput(flywheelContext, {
+        engine: engineName,
+        backend: engineName === 'claude' ? this.config.claude.backend : undefined,
+        model: options.model ?? session.model,
+        claude_session_id: session.sessionId,
+        agent_version: readMetabotVersion(),
+        prompt_version: releaseVersion,
+        knowledge_version: releaseVersion,
+      }));
+    }
 
     const outputsDir = this.outputsManager.prepareDir(chatId);
 
     const displayPrompt = prompt;
-    const processor = new StreamProcessor(displayPrompt, probe ? {
-      recordToolCall: (payload) => {
-        if (payload.status === 'completed') {
-          this.probeObserver?.stage(probe, {
-            stage: 'tool_completed',
-            at: new Date().toISOString(),
-          });
-        }
-      },
-      recordEvidence: () => {},
-    } : undefined);
+    const processor = new StreamProcessor(
+      displayPrompt,
+      (this.flywheel && flywheelContext) || probe ? {
+        recordToolCall: (payload) => {
+          if (this.flywheel && flywheelContext) {
+            this.flywheel.recordToolCall(this.flywheelInput(flywheelContext, payload));
+          }
+          if (payload.status === 'completed') {
+            this.probeObserver?.stage(probe, {
+              stage: 'tool_completed',
+              at: new Date().toISOString(),
+            });
+          }
+        },
+        recordEvidence: (payload) => {
+          if (this.flywheel && flywheelContext) {
+            this.flywheel.recordEvidence(this.flywheelInput(flywheelContext, payload));
+          }
+        },
+      } : undefined,
+    );
     const rateLimiter = new RateLimiter(1500);
     const activeGoal = session.activeGoal;
 
@@ -2860,7 +2897,6 @@ export class MessageBridge {
     };
 
     const startTime = Date.now();
-    const turnId = randomUUID();
     const instanceId = getRuntimeInstanceId();
     let attemptId = randomUUID();
     this.audit.log({ event: 'api_task_start', botName: this.config.name, chatId, userId, prompt });
@@ -2887,7 +2923,7 @@ export class MessageBridge {
         maxTurns: options.maxTurns,
         model: options.model ?? session.model,
         allowedTools: options.allowedTools,
-        onTeamEvent,
+        onTeamEvent, flywheelContext,
       }, () => {
         attemptId = randomUUID();
       });
@@ -2904,6 +2940,11 @@ export class MessageBridge {
           errorClass: 'execution_start_failed', durationMs: Date.now() - startTime,
           timestamp: Date.now(),
         });
+        this.recordFlywheelTerminal(flywheelContext, processor, {
+          ...initialState,
+          status: 'error',
+          errorMessage: 'execution_start_failed',
+        }, Date.now() - startTime);
         try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
         throw launchError;
       }
@@ -2926,6 +2967,7 @@ export class MessageBridge {
             ? launchError.details.phase : 'process_starting',
           errorClass, durationMs: Date.now() - startTime, timestamp: Date.now(),
         });
+        this.recordFlywheelTerminal(flywheelContext, processor, failureState, Date.now() - startTime);
         try { this.outputsManager.cleanup(outputsDir); } catch { /* ignore */ }
         return { success: false, responseText: '', error: errorMessage, durationMs: Date.now() - startTime };
       }
@@ -3069,7 +3111,7 @@ export class MessageBridge {
         const retryHandle = await this.runOneTurn(chatId, engineName, {
           prompt, cwd, abortController, outputsDir, apiContext,
           model: options.model ?? session.model,
-          onTeamEvent, freshSession: true,
+          onTeamEvent, freshSession: true, flywheelContext,
         });
         executionHandle.finish();
         runningTask.executionHandle = retryHandle;
@@ -3112,6 +3154,7 @@ export class MessageBridge {
       }
 
       const durationMs = Date.now() - startTime;
+      this.recordFlywheelTerminal(flywheelContext, processor, lastState, durationMs);
       this.audit.log({
         event: 'api_task_complete', botName: this.config.name, chatId, userId, prompt,
         durationMs, costUsd: lastState.costUsd, error: lastState.errorMessage,
@@ -3202,7 +3245,7 @@ export class MessageBridge {
             const retryHandle = await this.runOneTurn(chatId, engineName, {
               prompt, cwd, abortController, outputsDir, apiContext,
               model: options.model ?? session.model,
-              onTeamEvent, freshSession: true,
+              onTeamEvent, freshSession: true, flywheelContext,
             });
             executionHandle.finish();
             executionHandle = retryHandle;
@@ -3235,12 +3278,14 @@ export class MessageBridge {
               if (outputFiles.length > 0) options.onOutputFiles(outputFiles);
             }
 
+            const retryDurationMs = Date.now() - startTime;
+            this.recordFlywheelTerminal(flywheelContext, processor, lastState, retryDurationMs);
             return {
               success: lastState.status === 'complete',
               responseText: lastState.responseText,
               sessionId: processor.getSessionId(),
               costUsd: lastState.costUsd,
-              durationMs: Date.now() - startTime,
+              durationMs: retryDurationMs,
               error: lastState.errorMessage,
             };
           } catch (retryErr: any) {
@@ -3283,6 +3328,7 @@ export class MessageBridge {
         errorMessage: reportedError,
       };
       this.recordProbeTerminal(probe, processor, catchErrorState);
+      this.recordFlywheelTerminal(flywheelContext, processor, catchErrorState, Date.now() - startTime);
       options.onUpdate?.(catchErrorState, effectiveMessageId, true);
 
       this.emitActivity({

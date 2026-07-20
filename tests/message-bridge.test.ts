@@ -187,7 +187,18 @@ describe('MessageBridge synthetic probe receipts', () => {
     config.claude.model = 'claude-opus-4-8';
     const store = new ProbeReceiptStore();
     const sender = makeSender();
-    const bridge = new MessageBridge(config, mockLogger, sender as any, undefined, store) as any;
+    const flywheel = {
+      recordMessageReceived: vi.fn(),
+      recordRunStarted: vi.fn(),
+      recordToolCall: vi.fn(),
+      recordRunCompleted: vi.fn(),
+      recordRunFailed: vi.fn(),
+      recordEvidence: vi.fn(),
+      recordFeedbackReceived: vi.fn(),
+      flush: vi.fn(),
+      close: vi.fn(),
+    };
+    const bridge = new MessageBridge(config, mockLogger, sender as any, flywheel, store) as any;
     bridge.runOneTurn = vi.fn(async () => ({
       stream: (async function* () {
         yield {
@@ -252,6 +263,24 @@ describe('MessageBridge synthetic probe receipts', () => {
       }));
       expect(JSON.stringify(receipt)).not.toContain('private API prompt');
       expect(JSON.stringify(receipt)).not.toContain('private API response');
+      expect(flywheel.recordMessageReceived).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'test-bot',
+        isSynthetic: true,
+        probeId: probe.probeId,
+        conversation: {
+          platform: 'feishu',
+          platform_id: 'oc_api_canary',
+          type: 'direct',
+        },
+        payload: expect.objectContaining({ content: 'private API prompt' }),
+      }));
+      expect(flywheel.recordToolCall).toHaveBeenCalled();
+      expect(flywheel.recordRunCompleted).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'test-bot',
+        isSynthetic: true,
+        probeId: probe.probeId,
+        payload: expect.objectContaining({ content: 'private API response' }),
+      }));
     } finally {
       bridge.destroy();
       fs.rmSync(rootDir, { recursive: true, force: true });
