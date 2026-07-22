@@ -6,6 +6,11 @@ import type {
   ToolCall,
   PendingQuestion,
 } from '../../feishu/card-builder.js';
+import {
+  classifyToolEffect,
+  strongestToolEffect,
+  type ToolEffect,
+} from '../../bridge/tool-effect.js';
 
 const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.svg', '.tiff']);
 
@@ -54,6 +59,8 @@ export class StreamProcessor {
   private _currentOutputTokens = 0;
   // Live background tasks (Monitor, etc.) — task_id → latest rollup.
   private _backgroundEvents: Map<string, BackgroundEvent> = new Map();
+  private _turnToolEffect: ToolEffect = 'read_only';
+  private _hasUsableTerminalAnswer = false;
 
   constructor(private userPrompt: string, private flywheel?: FlywheelStreamHooks) {}
 
@@ -323,6 +330,7 @@ export class StreamProcessor {
     const isError = message.subtype !== 'success';
     // SDK sometimes wraps API errors as "success" with the error text as result
     const isApiError = !isError && isApiErrorResult(resultText);
+    this._hasUsableTerminalAnswer = !isError && !isApiError && Boolean(resultText.trim());
 
     return {
       status: (isError || isApiError) ? 'error' : 'complete',
@@ -349,6 +357,10 @@ export class StreamProcessor {
 
     this.currentToolName = name;
     this.currentToolStartedAt = Date.now();
+    this._turnToolEffect = strongestToolEffect(
+      this._turnToolEffect,
+      classifyToolEffect(name, input),
+    );
     const detail = formatToolDetail(name, input);
     this.toolCalls.push({ name, detail, status: 'running' });
     try {
@@ -461,6 +473,21 @@ export class StreamProcessor {
 
   getSessionId(): string | undefined {
     return this.sessionId;
+  }
+
+  getTurnRecoveryEvidence(): {
+    hasUsableTerminalAnswer: boolean;
+    toolEffect: ToolEffect;
+  } {
+    return {
+      hasUsableTerminalAnswer: this._hasUsableTerminalAnswer,
+      toolEffect: this._turnToolEffect,
+    };
+  }
+
+  resetTurnRecoveryEvidence(): void {
+    this._hasUsableTerminalAnswer = false;
+    this._turnToolEffect = 'read_only';
   }
 
   getTokenUsage(): {

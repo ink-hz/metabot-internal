@@ -50,6 +50,10 @@ import {
   claudeTurnReplayDelayMs,
   decideClaudeTurnRecovery,
 } from './claude-turn-recovery.js';
+import {
+  decideProviderTurnRecovery,
+  providerTurnReplayDelayMs,
+} from './provider-turn-recovery.js';
 import { sendFinalCardWithRetry, sendPlanContent } from './final-delivery.js';
 import { isDefaultMediaText, mergeBatchMessages, mergeBatchWithText, type PendingBatch } from './media-batch.js';
 import { sendCompletionNotice } from './notification-policy.js';
@@ -2435,6 +2439,60 @@ export class MessageBridge {
         }
       }
 
+      // Retry one transient provider failure at the turn coordinator, where
+      // tool effects and cancellation state are visible. The HTTP adapter must
+      // never replay POST requests because it lacks this evidence.
+      if (engineName === 'claude' && lastState.status === 'error') {
+        const evidence = processor.getTurnRecoveryEvidence();
+        const providerErrorClass = classifyReliabilityError(lastState.errorMessage);
+        const decision = decideProviderTurnRecovery({
+          errorClass: providerErrorClass,
+          errorMessage: lastState.errorMessage,
+          toolEffect: evidence.toolEffect,
+          retryCount: 0,
+          stopping: abortController.signal.aborted,
+          hasUsableTerminalAnswer: evidence.hasUsableTerminalAnswer,
+        });
+        if (decision === 'replay_fresh_once') {
+          const backoffMs = providerTurnReplayDelayMs();
+          this.logger.warn(
+            { chatId, errorClass: providerErrorClass, attempt: 2, backoffMs, toolEffect: evidence.toolEffect },
+            'Transient provider failure, replaying once in a fresh Claude session',
+          );
+          await this.sender.updateCard(messageId, {
+            ...lastState,
+            status: 'running',
+            errorMessage: undefined,
+            responseText: '_模型服务短暂中断，正在安全重试一次..._',
+          });
+          await delay(backoffMs);
+          this.sessionManager.resetSession(chatId);
+          processor.resetTurnRecoveryEvidence();
+          attemptId = randomUUID();
+          const retryHandle = await this.runOneTurn(chatId, engineName, {
+            prompt, cwd, abortController, outputsDir, apiContext, model: session.model,
+            onTeamEvent, freshSession: true, flywheelContext,
+          });
+          executionHandle.finish();
+          executionHandle = retryHandle;
+          runningTask.executionHandle = retryHandle;
+
+          for await (const message of retryHandle.stream) {
+            if (abortController.signal.aborted) break;
+            resetIdleTimer();
+            const state = processor.processMessage(message);
+            lastState = state;
+            const newSid = processor.getSessionId();
+            if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+            if (state.status === 'complete' || state.status === 'error') break;
+            rateLimiter.schedule(() => {
+              this.sender.updateCard(messageId, this.enrichWithAgentTeams(state, chatId));
+            });
+          }
+          await rateLimiter.cancelAndWait();
+        }
+      }
+
       // Auto-retry with fresh session when Claude can't find the conversation
       if (lastState.status === 'error' && isStaleSessionError(lastState.errorMessage) && session.sessionId) {
         this.logger.info({ chatId }, 'Stale session detected, retrying with fresh session');
@@ -2559,7 +2617,8 @@ export class MessageBridge {
       const errMsg: string = err.message || '';
       const processExit = isClaudeProcessExitError(err);
       const processExitHasSideEffect = processExit
-        ? err.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+        ? err.details.toolSideEffectSeen
+          || processor.getTurnRecoveryEvidence().toolEffect !== 'read_only'
         : false;
       const processExitDecision = processExit
         ? decideClaudeTurnRecovery({
@@ -2674,7 +2733,8 @@ export class MessageBridge {
               : (retryErr.message || reportedError);
             replayCount += 1;
             const retryHasSideEffect = isClaudeProcessExitError(retryErr)
-              ? retryErr.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+              ? retryErr.details.toolSideEffectSeen
+                || processor.getTurnRecoveryEvidence().toolEffect !== 'read_only'
               : false;
             shouldReplayProcessExit = isClaudeProcessExitError(retryErr)
               && decideClaudeTurnRecovery({
@@ -3098,6 +3158,65 @@ export class MessageBridge {
         }
       }
 
+      // Retry one transient provider failure only at this coordinator layer,
+      // after checking that the attempt observed no replay-blocking tool effect.
+      if (engineName === 'claude' && lastState.status === 'error') {
+        const evidence = processor.getTurnRecoveryEvidence();
+        const providerErrorClass = classifyReliabilityError(lastState.errorMessage);
+        const decision = decideProviderTurnRecovery({
+          errorClass: providerErrorClass,
+          errorMessage: lastState.errorMessage,
+          toolEffect: evidence.toolEffect,
+          retryCount: 0,
+          stopping: abortController.signal.aborted,
+          hasUsableTerminalAnswer: evidence.hasUsableTerminalAnswer,
+        });
+        if (decision === 'replay_fresh_once') {
+          const backoffMs = providerTurnReplayDelayMs();
+          this.logger.warn(
+            { chatId, errorClass: providerErrorClass, attempt: 2, backoffMs, toolEffect: evidence.toolEffect },
+            'API task transient provider failure, replaying once in a fresh Claude session',
+          );
+          if (sendCards && messageId) {
+            await this.sender.updateCard(messageId, {
+              ...lastState,
+              status: 'running',
+              errorMessage: undefined,
+              responseText: '_模型服务短暂中断，正在安全重试一次..._',
+            });
+          }
+          await delay(backoffMs);
+          this.sessionManager.resetSession(chatId);
+          processor.resetTurnRecoveryEvidence();
+          attemptId = randomUUID();
+          const retryHandle = await this.runOneTurn(chatId, engineName, {
+            prompt, cwd, abortController, outputsDir, apiContext,
+            model: options.model ?? session.model,
+            onTeamEvent, freshSession: true, flywheelContext,
+          });
+          executionHandle.finish();
+          executionHandle = retryHandle;
+          runningTask.executionHandle = retryHandle;
+
+          for await (const message of retryHandle.stream) {
+            if (abortController.signal.aborted) break;
+            resetIdleTimer();
+            const state = processor.processMessage(message);
+            lastState = state;
+            const newSid = processor.getSessionId();
+            if (newSid) this.sessionManager.setSessionId(chatId, newSid, engineName);
+            if (state.status === 'complete' || state.status === 'error') break;
+            if (sendCards && messageId) {
+              rateLimiter.schedule(() => {
+                this.sender.updateCard(messageId!, this.enrichWithAgentTeams(state, chatId));
+              });
+            }
+            options.onUpdate?.(state, effectiveMessageId, false);
+          }
+          await rateLimiter.cancelAndWait();
+        }
+      }
+
       // Auto-retry with fresh session when Claude can't find the conversation or context overflows
       if (lastState.status === 'error' && (isStaleSessionError(lastState.errorMessage) || isContextOverflowError(lastState.errorMessage)) && session.sessionId) {
         const isOverflow = isContextOverflowError(lastState.errorMessage);
@@ -3191,7 +3310,8 @@ export class MessageBridge {
       const errMsg: string = err.message || '';
       const processExit = isClaudeProcessExitError(err);
       const processExitHasSideEffect = processExit
-        ? err.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+        ? err.details.toolSideEffectSeen
+          || processor.getTurnRecoveryEvidence().toolEffect !== 'read_only'
         : false;
       const processExitDecision = processExit
         ? decideClaudeTurnRecovery({
@@ -3295,7 +3415,8 @@ export class MessageBridge {
               : (retryErr.message || reportedError);
             replayCount += 1;
             const retryHasSideEffect = isClaudeProcessExitError(retryErr)
-              ? retryErr.details.toolSideEffectSeen || lastState.toolCalls.length > 0
+              ? retryErr.details.toolSideEffectSeen
+                || processor.getTurnRecoveryEvidence().toolEffect !== 'read_only'
               : false;
             shouldReplayProcessExit = isClaudeProcessExitError(retryErr)
               && decideClaudeTurnRecovery({

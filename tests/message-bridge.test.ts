@@ -387,6 +387,138 @@ describe('MessageBridge Claude process exit recovery', () => {
     })();
   }
 
+  function providerTimeoutStream(withUnknownTool = false) {
+    return (async function* () {
+      if (withUnknownTool) {
+        yield {
+          type: 'assistant', parent_tool_use_id: null,
+          message: { content: [{ type: 'tool_use', name: 'FutureUnknownTool', input: {} }] },
+        };
+      }
+      yield {
+        type: 'result', subtype: 'error', result: '',
+        errors: ['API Error: The operation timed out.'], session_id: 'timed-out-session',
+      };
+    })();
+  }
+
+  function crashedAfterToolStream(name: string, input: unknown) {
+    return (async function* () {
+      yield {
+        type: 'assistant', parent_tool_use_id: null,
+        message: { content: [{ type: 'tool_use', name, input }] },
+      };
+      throw new ClaudeProcessExitError({
+        exitCode: 1,
+        phase: 'output_started',
+        completedOutputRecovered: false,
+        toolSideEffectSeen: false,
+      });
+    })();
+  }
+
+  it('replays one provider timeout in a fresh session and completes the API task', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn()
+      .mockImplementationOnce(() => handleFrom(providerTimeoutStream()))
+      .mockImplementationOnce(() => handleFrom(completedStream('超时恢复完成')));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '生成文档', chatId: 'provider-timeout-replay', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({ success: true, responseText: '超时恢复完成' });
+      expect(startExecution).toHaveBeenCalledTimes(2);
+      expect(startExecution.mock.calls[1][0].sessionId).toBeUndefined();
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('stops after a second provider timeout without a third attempt', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn(() => handleFrom(providerTimeoutStream()));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '生成文档', chatId: 'provider-timeout-twice', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({
+        success: false,
+        error: 'API Error: The operation timed out.',
+      });
+      expect(startExecution).toHaveBeenCalledTimes(2);
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('does not replay a provider timeout after an unknown tool effect', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn(() => handleFrom(providerTimeoutStream(true)));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '执行操作', chatId: 'provider-timeout-effect', engine: 'claude', maxTurns: 1,
+      });
+      expect(result.success).toBe(false);
+      expect(startExecution).toHaveBeenCalledTimes(1);
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('replays a process exit after a read-only preflight tool', async () => {
+    const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
+    const startExecution = vi.fn()
+      .mockImplementationOnce(() => handleFrom(crashedAfterToolStream('Bash', { command: 'which pandoc' })))
+      .mockImplementationOnce(() => handleFrom(completedStream('预检后恢复完成')));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: '生成文档', chatId: 'read-only-process-exit', engine: 'claude', maxTurns: 1,
+      });
+      expect(result).toMatchObject({ success: true, responseText: '预检后恢复完成' });
+      expect(startExecution).toHaveBeenCalledTimes(2);
+    } finally {
+      bridge.destroy();
+    }
+  });
+
+  it('replays one provider timeout for a Feishu turn', async () => {
+    const sender = makeSender();
+    const bridge = new MessageBridge(
+      { ...makeConfig(), persistentExecutor: { enabled: false } },
+      mockLogger,
+      sender as any,
+    ) as any;
+    const startExecution = vi.fn()
+      .mockImplementationOnce(() => handleFrom(providerTimeoutStream()))
+      .mockImplementationOnce(() => handleFrom(completedStream('飞书模型超时恢复完成')));
+    bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
+
+    try {
+      await bridge.executeQuery({
+        messageId: 'om_feishu_provider_timeout',
+        chatId: 'oc_feishu_provider_timeout',
+        chatType: 'private',
+        userId: 'on_test',
+        text: '生成演示文稿',
+      });
+      expect(startExecution).toHaveBeenCalledTimes(2);
+      expect(sender.updated.at(-1)?.state).toMatchObject({
+        status: 'complete',
+        responseText: '飞书模型超时恢复完成',
+      });
+    } finally {
+      bridge.destroy();
+    }
+  });
+
   it('replays once with a fresh session when Claude exits before any side effect', async () => {
     const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
     const startExecution = vi.fn()

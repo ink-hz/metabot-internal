@@ -90,6 +90,35 @@ describe('StreamProcessor', () => {
     expect(state.errorMessage).toBe('Something failed; Another error');
   });
 
+  it('tracks bounded turn recovery evidence and resets it between attempts', () => {
+    const p = new StreamProcessor('inspect then continue');
+    p.processMessage(msg({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/tmp/a' } }] },
+    }));
+    expect(p.getTurnRecoveryEvidence()).toEqual({
+      hasUsableTerminalAnswer: false,
+      toolEffect: 'read_only',
+    });
+
+    p.processMessage(msg({
+      type: 'assistant',
+      parent_tool_use_id: null,
+      message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: '/tmp/a' } }] },
+    }));
+    expect(p.getTurnRecoveryEvidence().toolEffect).toBe('local_idempotent');
+
+    p.resetTurnRecoveryEvidence();
+    expect(p.getTurnRecoveryEvidence()).toEqual({
+      hasUsableTerminalAnswer: false,
+      toolEffect: 'read_only',
+    });
+
+    p.processMessage(msg({ type: 'result', subtype: 'success', result: 'done' }));
+    expect(p.getTurnRecoveryEvidence().hasUsableTerminalAnswer).toBe(true);
+  });
+
   it('delivers a recovered completed assistant explanation as a normal answer', () => {
     const p = new StreamProcessor('search current news');
     const state = p.processMessage(msg({
