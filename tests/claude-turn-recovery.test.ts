@@ -6,7 +6,7 @@ import {
 } from '../src/bridge/claude-turn-recovery.js';
 
 describe('Claude turn recovery policy', () => {
-  it('allows two safe replays before any side effect', () => {
+  it('allows one safe replay before any side effect', () => {
     expect(decideClaudeTurnRecovery({
       completedOutputRecovered: false,
       sideEffectSeen: false,
@@ -18,10 +18,9 @@ describe('Claude turn recovery policy', () => {
       sideEffectSeen: false,
       replayCount: 1,
       stopping: false,
-    })).toBe('replay_fresh_once');
-    expect(MAX_CLAUDE_TURN_ATTEMPTS).toBe(3);
-    expect(claudeTurnReplayDelayMs(0)).toBe(500);
-    expect(claudeTurnReplayDelayMs(1)).toBe(1000);
+    })).toBe('stop_without_replay');
+    expect(MAX_CLAUDE_TURN_ATTEMPTS).toBe(2);
+    expect(claudeTurnReplayDelayMs(0)).toBe(2_000);
   });
 
   it('never replays after a possible side effect', () => {
@@ -37,7 +36,7 @@ describe('Claude turn recovery policy', () => {
     expect(decideClaudeTurnRecovery({
       completedOutputRecovered: false,
       sideEffectSeen: false,
-      replayCount: 2,
+      replayCount: 1,
       stopping: false,
     })).toBe('stop_without_replay');
     expect(decideClaudeTurnRecovery({

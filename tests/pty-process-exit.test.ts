@@ -5,7 +5,10 @@ import {
   isClaudeProcessExitError,
 } from '../src/engines/claude/pty/process-exit-error.js';
 import { AsyncQueue } from '../src/utils/async-queue.js';
-import { isTerminalApiErrorRecord } from '../src/engines/claude/pty/pty-query.js';
+import {
+  isTerminalApiErrorRecord,
+  recordContainsReplayBlockingToolUse,
+} from '../src/engines/claude/pty/pty-query.js';
 
 describe('Claude PTY process exit contract', () => {
   it('recognizes a top-level Claude API error as a terminal turn record', () => {
@@ -25,6 +28,21 @@ describe('Claude PTY process exit contract', () => {
       type: 'user',
       message: { content: [{ type: 'tool_result', content: 'API Error: 400' }] },
     })).toBe(false);
+  });
+
+  it('does not treat read-only inspection as a replay-blocking side effect', () => {
+    const assistantTool = (name: string, input: unknown) => ({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name, input }] },
+    });
+    expect(recordContainsReplayBlockingToolUse(assistantTool('Read', { file_path: '/tmp/a' })))
+      .toBe(false);
+    expect(recordContainsReplayBlockingToolUse(assistantTool('Bash', { command: 'which pandoc' })))
+      .toBe(false);
+    expect(recordContainsReplayBlockingToolUse(assistantTool('Write', { file_path: '/tmp/a' })))
+      .toBe(true);
+    expect(recordContainsReplayBlockingToolUse(assistantTool('FutureUnknownTool', {})))
+      .toBe(true);
   });
 
   it('allows only monotonic turn-phase advances', () => {

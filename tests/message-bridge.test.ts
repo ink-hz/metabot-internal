@@ -387,10 +387,9 @@ describe('MessageBridge Claude process exit recovery', () => {
     })();
   }
 
-  it('replays twice with fresh sessions when Claude exits before any side effect', async () => {
+  it('replays once with a fresh session when Claude exits before any side effect', async () => {
     const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
     const startExecution = vi.fn()
-      .mockImplementationOnce(() => handleFrom(crashedStream(false)))
       .mockImplementationOnce(() => handleFrom(crashedStream(false)))
       .mockImplementationOnce(() => handleFrom(completedStream('你好，我在。')));
     bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
@@ -400,9 +399,8 @@ describe('MessageBridge Claude process exit recovery', () => {
         prompt: '你好呀', chatId: 'safe-replay-chat', engine: 'claude', maxTurns: 1,
       });
       expect(result).toMatchObject({ success: true, responseText: '你好，我在。' });
-      expect(startExecution).toHaveBeenCalledTimes(3);
+      expect(startExecution).toHaveBeenCalledTimes(2);
       expect(startExecution.mock.calls[1][0].sessionId).toBeUndefined();
-      expect(startExecution.mock.calls[2][0].sessionId).toBeUndefined();
     } finally {
       bridge.destroy();
     }
@@ -426,7 +424,7 @@ describe('MessageBridge Claude process exit recovery', () => {
     }
   });
 
-  it('retries twice when Claude exits during process startup', async () => {
+  it('retries once when Claude exits during process startup', async () => {
     const bridge = new MessageBridge({ ...makeConfig(), persistentExecutor: { enabled: false } }, mockLogger, makeSender() as any) as any;
     const startupExit = () => {
       throw new ClaudeProcessExitError({
@@ -438,7 +436,6 @@ describe('MessageBridge Claude process exit recovery', () => {
     };
     const startExecution = vi.fn()
       .mockImplementationOnce(startupExit)
-      .mockImplementationOnce(startupExit)
       .mockImplementationOnce(() => handleFrom(completedStream('启动恢复完成')));
     bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
 
@@ -447,13 +444,13 @@ describe('MessageBridge Claude process exit recovery', () => {
         prompt: '启动', chatId: 'startup-replay-chat', engine: 'claude', maxTurns: 1,
       });
       expect(result).toMatchObject({ success: true, responseText: '启动恢复完成' });
-      expect(startExecution).toHaveBeenCalledTimes(3);
+      expect(startExecution).toHaveBeenCalledTimes(2);
     } finally {
       bridge.destroy();
     }
   });
 
-  it('replays a Feishu turn twice when Claude exits before any side effect', async () => {
+  it('replays a Feishu turn once when Claude exits before any side effect', async () => {
     const sender = makeSender();
     const bridge = new MessageBridge(
       { ...makeConfig(), persistentExecutor: { enabled: false } },
@@ -461,7 +458,6 @@ describe('MessageBridge Claude process exit recovery', () => {
       sender as any,
     ) as any;
     const startExecution = vi.fn()
-      .mockImplementationOnce(() => handleFrom(crashedStream(false)))
       .mockImplementationOnce(() => handleFrom(crashedStream(false)))
       .mockImplementationOnce(() => handleFrom(completedStream('飞书恢复完成')));
     bridge.engineCache.set('claude', { engine: { name: 'claude' }, executor: { startExecution } });
@@ -474,7 +470,7 @@ describe('MessageBridge Claude process exit recovery', () => {
         userId: 'on_test',
         text: '请介绍下自己',
       });
-      expect(startExecution).toHaveBeenCalledTimes(3);
+      expect(startExecution).toHaveBeenCalledTimes(2);
       expect(sender.updated.at(-1)?.state).toMatchObject({
         status: 'complete',
         responseText: '飞书恢复完成',
@@ -509,7 +505,7 @@ describe('MessageBridge Claude process exit recovery', () => {
       expect(events.at(-1).turnId).toBeTruthy();
       expect(events.at(-1).attemptId).toBeTruthy();
       expect(events.at(-1).instanceId).toMatch(/^metabot-/);
-      expect(startExecution).toHaveBeenCalledTimes(3);
+      expect(startExecution).toHaveBeenCalledTimes(2);
     } finally {
       bridge.destroy();
     }

@@ -32,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SDKMessage } from '../executor.js';
 import { AsyncQueue } from '../../../utils/async-queue.js';
+import { classifyToolEffect } from '../../../bridge/tool-effect.js';
 import type {
   PtyQuery,
   PtyQueryOptions,
@@ -324,7 +325,7 @@ export const ptyQuery = (args: {
       for await (const rec of scanner) {
         if (disposed) break;
         trackUsage(rec);
-        if (turnInFlight && recordContainsToolUse(rec)) {
+        if (turnInFlight && recordContainsReplayBlockingToolUse(rec)) {
           toolSideEffectSeen = true;
           turnPhase = advanceClaudeTurnPhase(turnPhase, 'side_effect_started');
         } else if (turnInFlight && rec.type === 'assistant' && turnPhase !== 'side_effect_started') {
@@ -764,14 +765,19 @@ export const ptyQuery = (args: {
   return query;
 };
 
-function recordContainsToolUse(record: RawJsonlRecord): boolean {
+export function recordContainsReplayBlockingToolUse(record: RawJsonlRecord): boolean {
   if (record.type !== 'assistant') return false;
   const message = record.message as { content?: unknown } | undefined;
   if (!Array.isArray(message?.content)) return false;
-  return message.content.some((block) => Boolean(
-    block && typeof block === 'object' && !Array.isArray(block)
-      && (block as { type?: unknown }).type === 'tool_use',
-  ));
+  return message.content.some((block) => {
+    if (!block || typeof block !== 'object' || Array.isArray(block)) return false;
+    const tool = block as { type?: unknown; name?: unknown; input?: unknown };
+    if (tool.type !== 'tool_use') return false;
+    return classifyToolEffect(
+      typeof tool.name === 'string' ? tool.name : undefined,
+      tool.input,
+    ) !== 'read_only';
+  });
 }
 
 export function isTerminalApiErrorRecord(record: RawJsonlRecord): boolean {

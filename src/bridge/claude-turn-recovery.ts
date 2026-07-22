@@ -10,8 +10,8 @@ export type ClaudeTurnRecoveryDecision =
   | 'replay_fresh_once'
   | 'stop_without_replay';
 
-export const MAX_CLAUDE_TURN_ATTEMPTS = 3;
-const CLAUDE_TURN_REPLAY_BASE_DELAY_MS = 500;
+export const MAX_CLAUDE_TURN_ATTEMPTS = 2;
+const CLAUDE_TURN_REPLAY_BASE_DELAY_MS = 2_000;
 
 export function claudeTurnReplayDelayMs(replayCount: number): number {
   return CLAUDE_TURN_REPLAY_BASE_DELAY_MS * 2 ** replayCount;
