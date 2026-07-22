@@ -44,6 +44,7 @@ import type { GatewayTurnLeaseHandle } from './gateway-turn-lease.js';
 import { createPtyClaudeSession } from './pty-session.js';
 import { createJsonlScanner } from './jsonl-scanner.js';
 import { adaptJsonlRecord, synthesizeResult } from './message-adapter.js';
+import { extractProviderError } from './provider-error.js';
 import { createHookBridge } from './hook-bridge.js';
 import { driveInteractiveTool, isExitPlanMenu, parseAskMenuFromScreen } from './interactive-driver.js';
 import {
@@ -323,18 +324,20 @@ export const ptyQuery = (args: {
           if (sid) sessionId = sid;
         }
         if (turnInFlight && isTerminalApiErrorRecord(rec)) {
+          const providerError = extractProviderError(rec);
           const usage = { ...lastUsage };
           lastUsage = {};
           turnInFlight = false;
           void releaseGatewayTurn();
           turnPhase = advanceClaudeTurnPhase(turnPhase, 'completed');
           logger.warn(
-            { apiErrorStatus: typeof rec.apiErrorStatus === 'number' ? rec.apiErrorStatus : undefined },
+            { apiErrorStatus: providerError.status },
             'ptyQuery: Claude API error ended the turn without a Stop hook',
           );
           out.enqueue(synthesizeResult({
             sessionId,
             isError: true,
+            errors: [providerError.message],
             model: usage.model,
             usage,
           }));

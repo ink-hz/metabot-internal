@@ -201,6 +201,10 @@ export const synthesizeResult: SynthesizeResult = (args) => {
     num_turns: args.numTurns,
   };
 
+  if (args.errors?.length) {
+    msg.errors = args.errors;
+  }
+
   if (args.usage) {
     if (args.usage.costUSD !== undefined) {
       msg.total_cost_usd = args.usage.costUSD;

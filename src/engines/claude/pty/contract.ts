@@ -306,6 +306,8 @@ export interface SynthesizeResultArgs {
   /** Accumulated assistant text for the `result` field (optional). */
   resultText?: string;
   isError?: boolean;
+  /** Bounded, sanitized terminal errors safe for downstream classification. */
+  errors?: string[];
   numTurns?: number;
   /** Real model name (from the assistant jsonl records), e.g. claude-opus-4-8. */
   model?: string;
