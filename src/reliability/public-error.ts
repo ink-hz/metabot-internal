@@ -13,6 +13,7 @@ export const RELIABILITY_ERROR_CLASSES = Object.freeze([
   'claude_preflight',
   'claude_session',
   'gateway_transport',
+  'provider_error',
   'gateway_capability_required',
   'gateway_capability_optional',
   'model_mismatch',
@@ -53,6 +54,7 @@ const PUBLIC_ERRORS = Object.freeze({
   claude_preflight: { code: 'CLAUDE_NOT_READY', message: 'Claude 运行环境暂未就绪，维护者已收到通知。' },
   claude_session: { code: 'CLAUDE_SESSION_FAILED', message: 'Claude 会话状态异常，请稍后重试。' },
   gateway_transport: { code: 'MODEL_GATEWAY_UNAVAILABLE', message: '模型服务连接暂时不可用，请稍后重试。' },
+  provider_error: { code: 'MODEL_PROVIDER_ERROR', message: '模型服务未能完成本次请求，请稍后重试。' },
   gateway_capability_required: { code: 'REQUIRED_CAPABILITY_UNAVAILABLE', message: '本次任务所需的模型能力暂不可用，维护者已收到通知。' },
   gateway_capability_optional: { code: 'OPTIONAL_CAPABILITY_UNAVAILABLE', message: '一项可选模型能力当前不可用，其他已完成结果仍然有效。' },
   model_mismatch: { code: 'MODEL_MISMATCH', message: '实际模型与已验证配置不一致，维护者已收到通知。' },
@@ -95,12 +97,13 @@ export function classifyReliabilityError(message: string | undefined): Reliabili
   if (/ENOSPC|no space left|disk.*full/i.test(value)) return 'resource_disk';
   if (/heap out of memory|ENOMEM|memory pressure/i.test(value)) return 'resource_memory';
   if (/budget|spend limit|max[_ ]budget/i.test(value)) return 'budget_exhausted';
-  if (/timeout|timed out/i.test(value)) return 'timeout';
   if (/pandoc|docx|document generation|pdf generation/i.test(value)) return 'doc_toolchain';
   if (/checksum|signature|empty file|file validation/i.test(value)) return 'file_validation';
   if (/tool[_ ](?:use|execution)|tool .*failed/i.test(value)) return 'tool_exec';
-  if (/ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|socket hang up|gateway.*(?:502|503|504)|(?:502|503|504).*gateway/i.test(value)) {
+  if (/ECONNRESET|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|socket hang up|(?:\b429\b|rate limit|provider capacity)|\b(?:502|503|504)\b/i.test(value)) {
     return 'gateway_transport';
   }
+  if (/timeout|timed out/i.test(value)) return 'timeout';
+  if (/\bAPI Error\s*:/i.test(value)) return 'provider_error';
   return 'unknown';
 }
