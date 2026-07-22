@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildProviderStreamDryRunReport,
   evaluateProviderStreamLifetime,
+  formatProviderProbeFailure,
 } from '../scripts/verify-provider-stream-lifetime.js';
 import { resolveClaudeApiTimeoutSettings } from '../src/engines/claude/compatibility/timeout-policy.js';
 
@@ -55,5 +56,7 @@ describe('provider stream lifetime rollout gate', () => {
       eligibleToRaiseTimeout: false,
     });
     expect(JSON.stringify(report)).not.toMatch(/token|authorization|secret/i);
+    expect(formatProviderProbeFailure(new Error('https://secret.example/?token=private')))
+      .toBe('Provider stream probe infrastructure failed');
   });
 });

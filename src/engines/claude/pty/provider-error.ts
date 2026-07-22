@@ -1,4 +1,5 @@
 import type { RawJsonlRecord } from './contract.js';
+import { collectKnownSecrets, createRedactor } from '../../../flywheel/redactor.js';
 
 const MAX_PROVIDER_ERROR_CHARS = 500;
 const SECRET_VALUE = String.raw`[^\s,;"']+`;
@@ -10,7 +11,8 @@ export interface ProviderErrorEnvelope {
 }
 
 function sanitizeProviderMessage(value: string): string {
-  const redacted = value
+  const patternRedacted = createRedactor(collectKnownSecrets(process.env)).sanitize(value) ?? '';
+  const redacted = patternRedacted
     .replace(/\bBearer\s+[^\s,;"']+/gi, 'Bearer [REDACTED]')
     .replace(
       new RegExp(`\\b(x-api-key|api[_-]?key|auth(?:orization)?[_-]?token|access[_-]?token)(\\s*[:=]\\s*)${SECRET_VALUE}`, 'gi'),

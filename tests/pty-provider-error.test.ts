@@ -25,13 +25,14 @@ describe('Claude PTY provider error envelope', () => {
       message: {
         content: [{
           type: 'text',
-          text: `API Error: Authorization: Bearer secret-bearer-token x-api-key=secret-api-key ${'x'.repeat(800)}`,
+          text: `API Error: Authorization: Bearer secret-bearer-token x-api-key=secret-api-key sk-supersecret123456 ${'x'.repeat(800)}`,
         }],
       },
     });
 
     expect(extracted.message).not.toContain('secret-bearer-token');
     expect(extracted.message).not.toContain('secret-api-key');
+    expect(extracted.message).not.toContain('sk-supersecret123456');
     expect(extracted.message).toContain('[REDACTED]');
     expect(extracted.message.length).toBeLessThanOrEqual(500);
   });

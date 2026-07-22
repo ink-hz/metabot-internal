@@ -37,6 +37,11 @@ export function buildProviderStreamDryRunReport() {
   };
 }
 
+export function formatProviderProbeFailure(error: unknown): string {
+  void error;
+  return 'Provider stream probe infrastructure failed';
+}
+
 async function probeProviderStream(args: {
   url: string;
   authToken: string;
@@ -125,7 +130,7 @@ async function main(): Promise<void> {
 const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : '';
 if (import.meta.url === invokedPath) {
   main().catch((error) => {
-    console.error(`Provider stream probe failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+    console.error(formatProviderProbeFailure(error));
     process.exitCode = 1;
   });
 }
