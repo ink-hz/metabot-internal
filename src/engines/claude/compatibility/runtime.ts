@@ -13,6 +13,7 @@ import {
   assertCompatibleClaudeVersion,
   type ClaudeVersionRunner,
 } from './version.js';
+import { resolveClaudeApiTimeoutSettings } from './timeout-policy.js';
 
 export interface ClaudeCompatibilityRuntime {
   profile: ClaudeCompatibilityProfile;
@@ -94,6 +95,7 @@ export async function startClaudeCompatibilityRuntime(
     logger: options.logger,
   });
   const overrides = {
+    ...resolveClaudeApiTimeoutSettings(effectiveEnv),
     ANTHROPIC_BASE_URL: adapter.baseUrl,
     [authName]: authToken,
   };

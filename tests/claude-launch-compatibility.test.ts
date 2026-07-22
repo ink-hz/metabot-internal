@@ -70,10 +70,12 @@ describe('Claude compatibility runtime', () => {
       unsupportedRequestBetas: OPUS_PROFILE.unsupportedRequestBetas,
     }]);
     expect(runtime.childEnv).toMatchObject({
+      API_TIMEOUT_MS: '300000',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
       ANTHROPIC_AUTH_TOKEN: 'settings-token',
     });
     expect(runtime.settingsEnv).toEqual({
+      API_TIMEOUT_MS: '300000',
       ANTHROPIC_BASE_URL: 'http://127.0.0.1:43123',
       ANTHROPIC_AUTH_TOKEN: 'settings-token',
     });
