@@ -138,34 +138,79 @@ function proxyRequest(args: {
   if (body) headers['content-length'] = String(body.length);
   const transport = target.protocol === 'https:' ? https : http;
   let upstreamResponded = false;
+  let responseBytes = 0;
+  let lastChunkAt = startedAt;
+  let terminalLogged = false;
+  let activeUpstreamResponse: IncomingMessage | undefined;
+
+  logger.info({
+    method: request.method,
+    path: target.pathname,
+    requestBytes: args.requestBytes,
+    promotedCount,
+  }, 'Claude gateway adapter request started');
+
+  const logTerminal = (
+    transportState: 'completed' | 'upstream_unavailable' | 'response_aborted'
+      | 'response_closed' | 'downstream_closed',
+    status?: number,
+  ): void => {
+    if (terminalLogged) return;
+    terminalLogged = true;
+    const fields = {
+      method: request.method,
+      path: target.pathname,
+      status,
+      durationMs: Date.now() - startedAt,
+      idleMs: Date.now() - lastChunkAt,
+      requestBytes: args.requestBytes,
+      responseBytes,
+      promotedCount,
+      transportState,
+    };
+    if (transportState === 'completed') {
+      logger.info(fields, 'Claude gateway adapter request completed');
+    } else {
+      logger.warn(fields, 'Claude gateway adapter request terminated');
+    }
+  };
 
   const upstreamRequest = transport.request(target, {
     method: request.method,
     headers,
   }, (upstreamResponse) => {
     upstreamResponded = true;
+    activeUpstreamResponse = upstreamResponse;
     const responseHeaders = sanitizedHeaders(upstreamResponse.headers);
     response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+    upstreamResponse.on('data', (chunk) => {
+      responseBytes += Buffer.byteLength(chunk);
+      lastChunkAt = Date.now();
+    });
+    upstreamResponse.once('aborted', () => {
+      logTerminal('response_aborted', upstreamResponse.statusCode);
+      if (!response.destroyed) response.destroy();
+    });
+    upstreamResponse.once('close', () => {
+      if (upstreamResponse.complete) return;
+      logTerminal('response_closed', upstreamResponse.statusCode);
+      if (!response.destroyed) response.destroy();
+    });
     upstreamResponse.pipe(response);
     response.once('finish', () => {
-      logger.info({
-        method: request.method,
-        path: target.pathname,
-        status: upstreamResponse.statusCode,
-        durationMs: Date.now() - startedAt,
-        requestBytes: args.requestBytes,
-        promotedCount,
-      }, 'Claude gateway adapter request completed');
+      logTerminal('completed', upstreamResponse.statusCode);
     });
   });
 
+  response.once('close', () => {
+    if (response.writableFinished) return;
+    logTerminal('downstream_closed', activeUpstreamResponse?.statusCode);
+    activeUpstreamResponse?.destroy();
+    upstreamRequest.destroy();
+  });
+
   upstreamRequest.once('error', (error) => {
-    logger.warn({
-      method: request.method,
-      path: target.pathname,
-      durationMs: Date.now() - startedAt,
-      errorCategory: 'upstream_unavailable',
-    }, 'Claude gateway adapter upstream unavailable');
+    logTerminal('upstream_unavailable', activeUpstreamResponse?.statusCode);
     if (upstreamResponded || response.headersSent) {
       response.destroy(error);
       return;

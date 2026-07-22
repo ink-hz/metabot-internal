@@ -59,6 +59,14 @@ function loggerCapture() {
   return { logger, entries };
 }
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 500): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition timeout');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
 async function requestAdapter(
   baseUrl: string,
   path: string,
@@ -237,6 +245,53 @@ describe('Claude gateway loopback adapter', () => {
       expect(result.response.status).toBe(201);
       expect(result.response.headers.get('x-upstream')).toBe('yes');
       expect(result.body).toEqual(Buffer.concat(chunks));
+    } finally {
+      await adapter.close();
+      await close(upstream.server);
+    }
+  });
+
+  it('logs one bounded terminal record when an upstream SSE response aborts', async () => {
+    const partial = Buffer.from('event: message_start\ndata: {"type":"message_start"}\n\n');
+    const upstream = captureUpstream((_request, response) => {
+      response.writeHead(200, {
+        'content-type': 'text/event-stream',
+        'content-length': String(partial.length + 1_000),
+      });
+      response.write(partial);
+      setImmediate(() => response.socket?.destroy());
+    });
+    const upstreamUrl = await listen(upstream.server);
+    const { logger, entries } = loggerCapture();
+    const adapter = await startClaudeGatewayAdapter({
+      upstreamBaseUrl: upstreamUrl,
+      authToken: TOKEN,
+      logger,
+    });
+
+    try {
+      await expect(requestAdapter(adapter.baseUrl, '/v1/messages', {
+        method: 'POST',
+        body: Buffer.from(JSON.stringify({ prompt: secretMarker })),
+      })).rejects.toThrow();
+      await waitUntil(() => JSON.stringify(entries).includes('response_aborted'));
+
+      const terminal = entries.filter((entry) => {
+        const fields = Array.isArray(entry) ? entry[0] : undefined;
+        return Boolean(fields && typeof fields === 'object'
+          && 'transportState' in (fields as Record<string, unknown>));
+      });
+      expect(terminal).toHaveLength(1);
+      expect(terminal[0][0]).toMatchObject({
+        transportState: 'response_aborted',
+        responseBytes: partial.length,
+      });
+      expect(terminal[0][0]).toHaveProperty('durationMs');
+      expect(terminal[0][0]).toHaveProperty('idleMs');
+      const logs = JSON.stringify(entries);
+      expect(logs).not.toContain(TOKEN);
+      expect(logs).not.toContain(secretMarker);
+      expect(upstream.requests).toHaveLength(1);
     } finally {
       await adapter.close();
       await close(upstream.server);
