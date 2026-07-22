@@ -228,6 +228,7 @@ export const ptyQuery = (args: {
   let turnJsonlStartOffset = 0;
   let activeGatewayLease: GatewayTurnLeaseHandle | undefined;
   let pendingGatewayTurn: { cancelled: boolean } | undefined;
+  let terminalFailureSignaled = false;
   let session: ReturnType<typeof createPtyClaudeSession> | null = null;
   let scanner: ReturnType<typeof createJsonlScanner> | null = null;
   // Map the SDK-style systemPrompt ({type:'preset', append}) → --append flag.
@@ -297,14 +298,24 @@ export const ptyQuery = (args: {
 
   boot.catch(() => {
     logger.error({ errorClass: 'claude_boot' }, 'ptyQuery: boot failed');
+    void failTurn();
+  });
+
+  async function failTurn(exit?: { exitCode: number; signal?: number }): Promise<void> {
+    if (terminalFailureSignaled || disposed) return;
+    terminalFailureSignaled = true;
+    turnInFlight = false;
+    await releaseGatewayTurn();
     out.fail(new ClaudeProcessExitError({
-      exitCode: null,
+      exitCode: exit?.exitCode ?? null,
+      signal: exit?.signal,
       phase: turnPhase,
       sessionRef: sessionId ? sessionId.slice(0, 8) : undefined,
       completedOutputRecovered: false,
       toolSideEffectSeen,
     }));
-  });
+    await dispose();
+  }
 
   // ── Scanner loop ─────────────────────────────────────────────────────────
   async function runScanner(): Promise<void> {
@@ -353,6 +364,7 @@ export const ptyQuery = (args: {
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: scanner loop ended with error');
+      await failTurn();
     }
   }
 
@@ -585,6 +597,7 @@ export const ptyQuery = (args: {
       }
     } catch (err) {
       logger.warn({ err }, 'ptyQuery: prompt loop ended with error');
+      await failTurn();
     }
     // Prompt source finished → no more turns will be started. Tear down.
     await dispose();

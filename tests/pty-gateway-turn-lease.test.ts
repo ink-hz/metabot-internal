@@ -12,6 +12,8 @@ const harness = vi.hoisted(() => ({
   onExit: undefined as undefined | ((info: { exitCode: number; signal?: number }) => void),
   stopScanner: false,
   records: [] as Array<Record<string, unknown>>,
+  typePromptError: undefined as Error | undefined,
+  disposeCount: 0,
 }));
 
 vi.mock('../src/engines/claude/pty/pty-session.js', () => ({
@@ -20,12 +22,18 @@ vi.mock('../src/engines/claude/pty/pty-session.js', () => ({
     return {
       sessionId: 'session-test',
       jsonlPath: '/tmp/metabot-lease-test-missing.jsonl',
-      typePrompt: async () => { harness.events.push('typePrompt'); },
+      typePrompt: async () => {
+        harness.events.push('typePrompt');
+        if (harness.typePromptError) throw harness.typePromptError;
+      },
       sendKeys: () => {},
       snapshot: () => '',
       screen: () => '',
       interrupt: async () => { harness.events.push('session:interrupt'); },
-      dispose: async () => { harness.events.push('session:dispose'); },
+      dispose: async () => {
+        harness.disposeCount += 1;
+        harness.events.push('session:dispose');
+      },
     };
   },
 }));
@@ -101,9 +109,36 @@ beforeEach(() => {
   harness.onExit = undefined;
   harness.stopScanner = false;
   harness.records.length = 0;
+  harness.typePromptError = undefined;
+  harness.disposeCount = 0;
 });
 
 describe('ptyQuery gateway turn lease lifecycle', () => {
+  it('rejects the stream and disposes exactly once when prompt dispatch fails', async () => {
+    harness.typePromptError = new Error('readiness timeout with private screen contents');
+    const input = new AsyncQueue<PtyUserMessage>();
+    const hooks = hookBridge();
+    let releases = 0;
+    const query = ptyQuery({
+      prompt: input,
+      options: {
+        cwd: '/tmp', logger, hookBridge: hooks.bridge,
+        gatewayTurnLease: { acquire: async () => ({ release: async () => { releases += 1; } }) },
+      },
+    });
+    const terminal = query[Symbol.asyncIterator]().next();
+
+    input.enqueue(prompt());
+
+    await expect(terminal).rejects.toMatchObject({
+      code: 'CLAUDE_PROCESS_EXIT',
+      details: { phase: 'prompt_dispatched', toolSideEffectSeen: false },
+    });
+    await waitUntil(() => harness.disposeCount === 1);
+    expect(releases).toBe(1);
+    expect(harness.disposeCount).toBe(1);
+  });
+
   it('waits for the lease before dispatch and releases on Stop completion', async () => {
     const input = new AsyncQueue<PtyUserMessage>();
     const hooks = hookBridge();
