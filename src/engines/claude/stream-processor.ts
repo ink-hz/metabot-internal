@@ -90,6 +90,10 @@ export class StreamProcessor {
         this.processAssistantMessage(message);
         break;
 
+      case 'user':
+        this.processUserMessage(message);
+        break;
+
       case 'result':
         return this.processResultMessage(message);
 
@@ -225,6 +229,13 @@ export class StreamProcessor {
       } else if (block.type === 'tool_result') {
         this.completeCurrentTool();
       }
+    }
+  }
+
+  private processUserMessage(message: SDKMessage): void {
+    if (!message.message?.content) return;
+    for (const block of message.message.content) {
+      if (block.type === 'tool_result') this.completeCurrentTool();
     }
   }
 

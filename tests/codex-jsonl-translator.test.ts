@@ -58,6 +58,12 @@ describe('Codex JSONL translator', () => {
     expect(cardState.model).toBe('gpt-5.5');
     expect(cardState.totalTokens).toBe(23181);
     expect(cardState.contextWindow).toBe(400000);
+    expect(processor.getTokenUsage()).toEqual({
+      inputTokens: 10311,
+      outputTokens: 70,
+      cacheReadTokens: 12800,
+      cacheCreationTokens: 0,
+    });
   });
 
   it('uses Codex token_count last_token_usage for ctx instead of cumulative totals', () => {

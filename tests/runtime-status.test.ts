@@ -161,4 +161,39 @@ describe('BotRegistry runtime sources', () => {
     });
     expect(JSON.stringify(sources)).not.toContain('must-not-leak');
   });
+
+  it('reports a model-unpinned Codex runtime as the CLI backend', () => {
+    const registry = new BotRegistry();
+    registry.register({
+      name: 'codex-assistant',
+      platform: 'feishu',
+      config: {
+        name: 'codex-assistant',
+        engine: 'codex',
+        codex: {},
+        claude: {
+          defaultWorkingDirectory: '/workspace/iris',
+          maxTurns: undefined,
+          maxBudgetUsd: undefined,
+          model: undefined,
+          apiKey: undefined,
+          outputsBaseDir: '/tmp/outputs',
+          downloadsDir: '/tmp/downloads',
+          backend: 'pty',
+        },
+      },
+      bridge: {} as never,
+      sender: {} as never,
+    });
+
+    expect(registry.listRuntimeSources()).toEqual([
+      expect.objectContaining({
+        name: 'codex-assistant',
+        engine: 'codex',
+        backend: 'cli',
+        workdirFingerprint: fingerprintRuntimePath('/workspace/iris'),
+      }),
+    ]);
+    expect(registry.listRuntimeSources()[0]).not.toHaveProperty('model');
+  });
 });

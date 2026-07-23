@@ -161,12 +161,17 @@ function buildResultMessage(
 ): SDKMessage {
   const reliableUsage = state.lastUsage ?? usage;
   const outputTokens = reliableUsage?.output_tokens ?? 0;
+  const cacheReadTokens = reliableUsage?.cached_input_tokens ?? 0;
   const totalTokens = reliableUsage?.total_tokens;
-  const inputTokens = typeof totalTokens === 'number'
+  const totalInputTokens = typeof totalTokens === 'number'
     ? Math.max(0, totalTokens - outputTokens)
     : reliableUsage?.input_tokens ?? 0;
+  // Codex reports cached input as a subset of input_tokens. The shared
+  // processor expects mutually exclusive buckets, so subtract the cached
+  // portion before publishing modelUsage and avoid double-counting totals.
+  const inputTokens = Math.max(0, totalInputTokens - cacheReadTokens);
   const contextWindow = state.contextWindow ?? 0;
-  const reportedTokens = inputTokens + outputTokens;
+  const reportedTokens = inputTokens + cacheReadTokens + outputTokens;
   // Codex turn.completed usage can be cumulative across the whole resumed
   // thread. If we did not see a token_count.last_token_usage event and the
   // reported total is larger than the model window, it is not a valid ctx
@@ -177,6 +182,7 @@ function buildResultMessage(
         [state.model]: {
           inputTokens: usageLooksCumulative ? 0 : inputTokens,
           outputTokens: usageLooksCumulative ? 0 : outputTokens,
+          cacheReadTokens: usageLooksCumulative ? 0 : cacheReadTokens,
           contextWindow: usageLooksCumulative ? 0 : contextWindow,
           costUSD: 0,
         },

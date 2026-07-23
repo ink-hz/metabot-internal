@@ -92,22 +92,25 @@ export class BotRegistry {
 
   /** Select the non-secret runtime facts consumed by authenticated status. */
   listRuntimeSources(): BotRuntimeSource[] {
-    return Array.from(this.bots.values()).map((bot) => ({
-      name: bot.name,
-      platform: bot.platform,
-      engine: resolveEngineName(bot.config),
-      ...(defaultModelForEngine(bot.config)
-        ? { model: defaultModelForEngine(bot.config) }
-        : {}),
-      backend: bot.config.claude.backend,
-      workdirFingerprint: fingerprintRuntimePath(bot.config.claude.defaultWorkingDirectory),
-      ...(bot.config.claude.compatibilityProfile?.capabilities
-        ? { capabilities: bot.config.claude.compatibilityProfile.capabilities }
-        : {}),
-      ...(bot.connectionStatus
-        ? { connectionStatus: bot.connectionStatus }
-        : {}),
-    }));
+    return Array.from(this.bots.values()).map((bot) => {
+      const engine = resolveEngineName(bot.config);
+      return {
+        name: bot.name,
+        platform: bot.platform,
+        engine,
+        ...(defaultModelForEngine(bot.config)
+          ? { model: defaultModelForEngine(bot.config) }
+          : {}),
+        backend: engine === 'codex' ? 'cli' : bot.config.claude.backend,
+        workdirFingerprint: fingerprintRuntimePath(bot.config.claude.defaultWorkingDirectory),
+        ...(bot.config.claude.compatibilityProfile?.capabilities
+          ? { capabilities: bot.config.claude.compatibilityProfile.capabilities }
+          : {}),
+        ...(bot.connectionStatus
+          ? { connectionStatus: bot.connectionStatus }
+          : {}),
+      };
+    });
   }
 
   list(): BotInfo[] {

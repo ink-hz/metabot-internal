@@ -12,6 +12,11 @@ import {
 } from '../src/bridge/message-bridge.js';
 import { CodexCommandController } from '../src/bridge/codex-command-controller.js';
 import { DEFAULT_CODEX_GOAL_MAX_ITERATIONS } from '../src/engines/index.js';
+import {
+  createCodexTranslatorState,
+  translateCodexJsonEvent,
+  type CodexJsonEvent,
+} from '../src/engines/codex/jsonl-translator.js';
 import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 import { classifyBurstSource } from '../src/engines/claude/persistent-executor.js';
 import { ClaudeProcessExitError } from '../src/engines/claude/pty/process-exit-error.js';
@@ -325,6 +330,117 @@ describe('MessageBridge synthetic probe receipts', () => {
         botName: 'test-bot',
       }));
       expect(JSON.stringify(receipt)).not.toMatch(/private|secret|token/iu);
+    } finally {
+      bridge.destroy();
+      fs.rmSync(rootDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MessageBridge Codex flywheel capture', () => {
+  it('records the Iris question, answer, tools, and reliable Codex usage fields', async () => {
+    const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metabot-iris-codex-'));
+    const config = makeCodexConfig();
+    config.name = 'codex-assistant';
+    config.persistentExecutor = { enabled: false };
+    config.claude.defaultWorkingDirectory = rootDir;
+    config.claude.outputsBaseDir = path.join(rootDir, 'outputs');
+    config.claude.downloadsDir = path.join(rootDir, 'downloads');
+    const flywheel = {
+      recordMessageReceived: vi.fn(),
+      recordRunStarted: vi.fn(),
+      recordToolCall: vi.fn(),
+      recordRunCompleted: vi.fn(),
+      recordRunFailed: vi.fn(),
+      recordEvidence: vi.fn(),
+      recordFeedbackReceived: vi.fn(),
+      flush: vi.fn(),
+      close: vi.fn(),
+    };
+    const bridge = new MessageBridge(
+      config,
+      mockLogger,
+      makeSender() as any,
+      flywheel,
+      new ProbeReceiptStore(),
+    ) as any;
+    const events: CodexJsonEvent[] = [
+      { type: 'thread.started', thread_id: 'iris-codex-thread' },
+      {
+        type: 'item.started',
+        item: { id: 'cmd-1', type: 'command_execution', command: '/bin/zsh -lc pwd' },
+      },
+      {
+        type: 'item.completed',
+        item: {
+          id: 'cmd-1', type: 'command_execution', command: '/bin/zsh -lc pwd',
+          aggregated_output: `${rootDir}\n`, exit_code: 0, status: 'completed',
+        },
+      },
+      { type: 'item.completed', item: { id: 'answer-1', type: 'agent_message', text: 'Codex answer' } },
+      {
+        type: 'event_msg',
+        payload: {
+          type: 'token_count',
+          info: {
+            last_token_usage: {
+              input_tokens: 120,
+              cached_input_tokens: 40,
+              output_tokens: 30,
+              total_tokens: 150,
+            },
+            model_context_window: 258400,
+          },
+        },
+      },
+      {
+        type: 'turn.completed',
+        usage: { input_tokens: 120, cached_input_tokens: 40, output_tokens: 30, total_tokens: 150 },
+      },
+    ];
+    bridge.runOneTurn = vi.fn(async () => ({
+      stream: (async function* () {
+        const state = createCodexTranslatorState({ model: 'gpt-5.5-codex', contextWindow: 258400 });
+        for (const event of events) {
+          for (const message of translateCodexJsonEvent(event, state)) yield message;
+        }
+      })(),
+      sendAnswer: vi.fn(),
+      resolveQuestion: vi.fn(),
+      finish: vi.fn(),
+    }));
+    const probe = {
+      isSynthetic: true as const,
+      probeId: '01J2Z9K2E8F5G9M6W4Q3T7R8Y1',
+      attemptId: '01J2Z9M77A68K8B1T4W5F6H9P0',
+    };
+
+    try {
+      const result = await bridge.executeApiTask({
+        prompt: 'Iris question',
+        chatId: 'oc_iris_codex',
+        engine: 'codex',
+        syntheticProbe: probe,
+      });
+
+      expect(result).toMatchObject({ success: true, responseText: 'Codex answer' });
+      expect(flywheel.recordMessageReceived).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'codex-assistant',
+        payload: expect.objectContaining({ content: 'Iris question' }),
+      }));
+      expect(flywheel.recordToolCall).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'codex-assistant',
+        payload: expect.objectContaining({ tool_name: 'Bash', status: 'completed' }),
+      }));
+      expect(flywheel.recordRunCompleted).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'codex-assistant',
+        payload: expect.objectContaining({
+          content: 'Codex answer',
+          input_tokens: 80,
+          cache_read_tokens: 40,
+          output_tokens: 30,
+        }),
+      }));
     } finally {
       bridge.destroy();
       fs.rmSync(rootDir, { recursive: true, force: true });
