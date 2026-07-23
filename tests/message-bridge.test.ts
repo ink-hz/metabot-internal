@@ -428,6 +428,10 @@ describe('MessageBridge Codex flywheel capture', () => {
         botId: 'codex-assistant',
         payload: expect.objectContaining({ content: 'Iris question' }),
       }));
+      expect(flywheel.recordRunStarted).toHaveBeenCalledWith(expect.objectContaining({
+        botId: 'codex-assistant',
+        payload: expect.objectContaining({ engine: 'codex', backend: 'cli' }),
+      }));
       expect(flywheel.recordToolCall).toHaveBeenCalledWith(expect.objectContaining({
         botId: 'codex-assistant',
         payload: expect.objectContaining({ tool_name: 'Bash', status: 'completed' }),

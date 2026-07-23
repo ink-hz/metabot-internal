@@ -1425,7 +1425,7 @@ export class MessageBridge {
       const releaseVersion = readReleaseVersion(opts.cwd);
       this.flywheel.recordRunStarted(this.flywheelInput(opts.flywheelContext, {
         engine: engineName,
-        backend: engineName === 'claude' ? this.config.claude.backend : undefined,
+        backend: engineName === 'claude' ? this.config.claude.backend : engineName === 'codex' ? 'cli' : engineName,
         model: opts.model,
         claude_session_id: session.sessionId,
         agent_version: readMetabotVersion(),
@@ -2880,7 +2880,7 @@ export class MessageBridge {
       }));
       this.flywheel.recordRunStarted(this.flywheelInput(flywheelContext, {
         engine: engineName,
-        backend: engineName === 'claude' ? this.config.claude.backend : undefined,
+        backend: engineName === 'claude' ? this.config.claude.backend : engineName === 'codex' ? 'cli' : engineName,
         model: options.model ?? session.model,
         claude_session_id: session.sessionId,
         agent_version: readMetabotVersion(),
