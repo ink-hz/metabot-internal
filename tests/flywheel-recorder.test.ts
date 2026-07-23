@@ -52,7 +52,36 @@ describe('flywheel recorder feature flag', () => {
     recorder.recordRunFailed({} as any);
     recorder.recordEvidence({} as any);
     recorder.recordFeedbackReceived({} as any);
+    recorder.recordIdentityObserved({} as any);
     expect(writerFactory).not.toHaveBeenCalled();
+  });
+
+  it('queues a content-free sender identity observation', async () => {
+    const writer = { write: vi.fn(async () => 'committed' as const), close: vi.fn() };
+    const recorder = createFlywheelRecorder({
+      env: enabledEnv(), logger: { warn: vi.fn() } as any, writerFactory: () => writer,
+    });
+
+    recorder.recordIdentityObserved({
+      botId: 'hr-bot',
+      turnId: '70000000-0000-4000-8000-000000000004',
+      runId: null,
+      sender: {
+        provider: 'feishu', union_id: 'on_sender', open_id: 'ou_sender', display_name: 'Lina',
+        attributes: { source: 'feishu_chat_members' },
+      },
+      conversation: { platform: 'feishu', platform_id: 'identity-chat', type: 'direct' },
+      payload: {},
+    });
+    await recorder.flush();
+
+    expect(writer.write).toHaveBeenCalledWith(expect.objectContaining({
+      event_type: 'identity_observed',
+      sender: expect.objectContaining({ display_name: 'Lina' }),
+      payload: {},
+    }));
+    expect(JSON.stringify(writer.write.mock.calls[0][0])).not.toContain('message content');
+    await recorder.close();
   });
 
   it('queues a typed feedback event after removing private thinking structures', async () => {

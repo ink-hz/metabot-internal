@@ -329,8 +329,10 @@ export function createEventDispatcher(
           mimeType, sizeBytes, extraMedia,
           ...(syntheticProbe ? { syntheticProbe } : {}),
         };
+        let flywheelRecord: RecordEventInput | undefined;
         if (flywheel) {
           const record = buildFlywheelMessageRecord(event, normalized, config.name);
+          flywheelRecord = record;
           try { flywheel.recordMessageReceived(record); } catch { /* Flywheel never controls message delivery. */ }
           try { flywheel.recordEvidence(buildFlywheelRawEventRecord(event, record)); } catch { /* same */ }
           normalized.turnId = record.turnId;
@@ -338,6 +340,32 @@ export function createEventDispatcher(
           normalized.flywheelConversation = record.conversation;
         }
         onMessage(normalized);
+        if (flywheel && flywheelRecord && messageSender) {
+          const identityRecord = flywheelRecord;
+          void messageSender.getChatMemberDisplayName(chatId, userId).then((displayName) => {
+            if (!displayName) return;
+            try {
+              flywheel.recordIdentityObserved({
+                ...identityRecord,
+                runId: null,
+                sender: {
+                  ...identityRecord.sender,
+                  provider: 'feishu',
+                  display_name: displayName,
+                  attributes: {
+                    source: 'feishu_chat_members',
+                    observed_at: new Date().toISOString(),
+                  },
+                },
+                payload: {},
+              });
+            } catch {
+              // Identity enrichment must never control message delivery.
+            }
+          }).catch(() => {
+            // The resolver is defensive, but keep rejection isolated as well.
+          });
+        }
       } catch (err) {
         logger.error({ err }, 'Error handling message event');
       }

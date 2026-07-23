@@ -157,4 +157,59 @@ describe('Feishu flywheel normalization', () => {
       messageId: 'om_probe',
     }]);
   });
+
+  it('delivers the message before asynchronously recording the Feishu display name', async () => {
+    let resolveName!: (name: string) => void;
+    const name = new Promise<string>((resolve) => { resolveName = resolve; });
+    const recordIdentityObserved = vi.fn();
+    const onMessage = vi.fn();
+    const dispatcher = createEventDispatcher(
+      {
+        name: 'hr-bot',
+        feishu: { appId: 'app', appSecret: 'secret' },
+        claude: {
+          defaultWorkingDirectory: '/tmp', maxTurns: undefined,
+          maxBudgetUsd: undefined, model: 'claude-opus-4-8', apiKey: undefined,
+          outputsBaseDir: '/tmp/outputs', downloadsDir: '/tmp/downloads', backend: 'pty',
+        },
+      },
+      { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never,
+      onMessage,
+      undefined,
+      { getChatMemberDisplayName: vi.fn(() => name) } as never,
+      undefined,
+      {
+        recordMessageReceived: vi.fn(),
+        recordEvidence: vi.fn(),
+        recordIdentityObserved,
+      } as never,
+    );
+
+    await dispatcher.invoke({
+      schema: '2.0',
+      header: { event_type: 'im.message.receive_v1' },
+      event: {
+        sender: { sender_id: { union_id: 'on_sender', open_id: 'ou_sender' } },
+        message: {
+          message_type: 'text', message_id: 'om_identity', chat_id: 'oc_identity',
+          chat_type: 'p2p', content: JSON.stringify({ text: 'hello' }),
+        },
+      },
+    }, { needCheck: false });
+
+    expect(onMessage).toHaveBeenCalledOnce();
+    expect(recordIdentityObserved).not.toHaveBeenCalled();
+
+    resolveName('Lina');
+    await name;
+    await Promise.resolve();
+    expect(recordIdentityObserved).toHaveBeenCalledWith(expect.objectContaining({
+      botId: 'hr-bot',
+      sender: expect.objectContaining({
+        union_id: 'on_sender', open_id: 'ou_sender', display_name: 'Lina',
+      }),
+      payload: {},
+    }));
+    expect(JSON.stringify(recordIdentityObserved.mock.calls)).not.toContain('hello');
+  });
 });

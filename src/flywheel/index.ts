@@ -47,6 +47,7 @@ export interface FlywheelRecorder {
   recordRunFailed(input: RecordEventInput): void;
   recordEvidence(input: RecordEventInput): void;
   recordFeedbackReceived(input: RecordEventInput): void;
+  recordIdentityObserved(input: RecordEventInput): void;
   flush(): Promise<void>;
   close(): Promise<void>;
 }
@@ -61,6 +62,7 @@ export interface RecorderOptions {
 const NOOP_RECORDER: FlywheelRecorder = {
   recordMessageReceived() {}, recordRunStarted() {}, recordToolCall() {},
   recordRunCompleted() {}, recordRunFailed() {}, recordEvidence() {}, recordFeedbackReceived() {},
+  recordIdentityObserved() {},
   async flush() {}, async close() {},
 };
 
@@ -120,6 +122,7 @@ export function createFlywheelRecorder(options: RecorderOptions): FlywheelRecord
     recordRunFailed: (input) => record('run_failed', input),
     recordEvidence: (input) => record('evidence', input),
     recordFeedbackReceived: (input) => record('feedback_received', input),
+    recordIdentityObserved: (input) => record('identity_observed', input),
     flush: () => queue.flush(),
     close: () => queue.close(),
   };

@@ -4,6 +4,7 @@ import { EventEnvelopeFactory, FLYWHEEL_EVENT_TYPES } from '../src/flywheel/enve
 describe('flywheel event envelope', () => {
   it('includes the typed explicit-feedback event', () => {
     expect(FLYWHEEL_EVENT_TYPES).toContain('feedback_received');
+    expect(FLYWHEEL_EVENT_TYPES).toContain('identity_observed');
   });
 
   it('assigns a stable recorder instance and monotonic sequence', () => {
@@ -58,7 +59,7 @@ function baseInput(eventType: (typeof FLYWHEEL_EVENT_TYPES)[number]) {
     botId: 'hr-bot',
     businessDomain: 'hr',
     turnId: '10000000-0000-4000-8000-000000000001',
-    runId: ['message_received', 'feedback_received'].includes(eventType)
+    runId: ['message_received', 'feedback_received', 'identity_observed'].includes(eventType)
       ? null
       : '20000000-0000-4000-8000-000000000002',
     sender: { provider: 'feishu' as const, union_id: 'union-1', open_id: 'open-1' },

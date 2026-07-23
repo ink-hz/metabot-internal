@@ -3,11 +3,51 @@ import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../utils/logger.js';
 import type { DeliveryReceipt } from '../reliability/probe-types.js';
 
+interface MessageSenderOptions {
+  now?: () => number;
+  identityCacheTtlMs?: number;
+}
+
+const DEFAULT_IDENTITY_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 export class MessageSender {
+  private readonly identityCache = new Map<string, { name: string; observedAt: number }>();
+  private readonly now: () => number;
+  private readonly identityCacheTtlMs: number;
+
   constructor(
     private client: lark.Client,
     private logger: Logger,
-  ) {}
+    options: MessageSenderOptions = {},
+  ) {
+    this.now = options.now ?? Date.now;
+    this.identityCacheTtlMs = options.identityCacheTtlMs ?? DEFAULT_IDENTITY_CACHE_TTL_MS;
+  }
+
+  async getChatMemberDisplayName(chatId: string, openId: string): Promise<string | undefined> {
+    const cacheKey = `${chatId}\u0000${openId}`;
+    const cached = this.identityCache.get(cacheKey);
+    if (cached && this.now() - cached.observedAt < this.identityCacheTtlMs) return cached.name;
+
+    try {
+      const pages = await this.client.im.v1.chatMembers.getWithIterator({
+        params: { member_id_type: 'open_id', page_size: 100 },
+        path: { chat_id: chatId },
+      });
+      for await (const page of pages) {
+        const member = page?.items?.find((item) => item.member_id === openId);
+        const name = member?.name?.trim();
+        if (name) {
+          this.identityCache.set(cacheKey, { name, observedAt: this.now() });
+          return name;
+        }
+      }
+      return undefined;
+    } catch {
+      this.logger.warn({ result: 'failed' }, 'Feishu sender identity lookup failed');
+      return undefined;
+    }
+  }
 
   async sendCard(chatId: string, cardContent: string): Promise<string | undefined> {
     try {

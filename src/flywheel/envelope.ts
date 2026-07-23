@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 export const FLYWHEEL_EVENT_TYPES = [
   'message_received', 'run_started', 'tool_call',
   'run_completed', 'run_failed', 'evidence', 'feedback_received',
+  'identity_observed',
 ] as const;
 
 export type FlywheelEventType = (typeof FLYWHEEL_EVENT_TYPES)[number];
