@@ -6,7 +6,7 @@ import {
 } from '../src/flywheel/index.js';
 
 describe('Flywheel current Bot identity contract', () => {
-  it('contains exactly the nine formal Bot/domain pairs', () => {
+  it('contains exactly the ten formal Bot/domain pairs', () => {
     expect(FLYWHEEL_BUSINESS_DOMAINS).toEqual({
       'feishu-default': 'general',
       'hr-bot': 'hr',
@@ -16,6 +16,7 @@ describe('Flywheel current Bot identity contract', () => {
       'marketing-intelligence-bot': 'marketing_intelligence',
       'marketing-gtm-bot': 'marketing_gtm',
       'fae-bot': 'fae',
+      'codex-assistant': 'personal_productivity',
       'test-bot': 'test',
     });
     expect(Object.isFrozen(FLYWHEEL_BUSINESS_DOMAINS)).toBe(true);

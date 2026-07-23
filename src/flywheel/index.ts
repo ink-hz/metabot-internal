@@ -19,6 +19,7 @@ export const FLYWHEEL_BUSINESS_DOMAINS = Object.freeze({
   'marketing-intelligence-bot': 'marketing_intelligence',
   'marketing-gtm-bot': 'marketing_gtm',
   'fae-bot': 'fae',
+  'codex-assistant': 'personal_productivity',
   'test-bot': 'test',
 } as const);
 
