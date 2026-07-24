@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   buildRuntimeStatus,
+  buildRuntimeObservation,
   fingerprintRuntimePath,
   resolveReleaseSha,
 } from '../src/reliability/runtime-status.js';
@@ -9,6 +10,57 @@ import { BotRegistry } from '../src/api/bot-registry.js';
 import { OPUS_PROFILE } from '../src/engines/claude/compatibility/profile.js';
 
 describe('buildRuntimeStatus', () => {
+  it('reports active turns without exposing executor identity', () => {
+    const result = buildRuntimeStatus({
+      releaseSha: 'abc123',
+      bots: [{
+        name: 'marketing-inbound-bot',
+        platform: 'feishu',
+        engine: 'claude',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+        activeTurns: () => 1,
+        connectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }),
+      }],
+    });
+
+    expect(result.bots[0]).toMatchObject({
+      activeTurns: 1,
+      ws: { state: 'connected' },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/chat|session|token|secret/iu);
+  });
+
+  it('builds a path-free observation for the loopback endpoint', () => {
+    const result = buildRuntimeObservation({
+      releaseSha: 'abc123',
+      bots: [{
+        name: 'marketing-inbound-bot',
+        platform: 'feishu',
+        engine: 'claude',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+        workdirFingerprint: fingerprintRuntimePath('/workspace/marketing'),
+        activeTurns: () => 0,
+        connectionStatus: () => ({ state: 'connected', reconnectAttempts: 0 }),
+      }],
+    });
+
+    expect(result).toEqual({
+      releaseSha: 'abc123',
+      bots: [{
+        name: 'marketing-inbound-bot',
+        platform: 'feishu',
+        engine: 'claude',
+        model: 'claude-opus-4-8',
+        backend: 'pty',
+        activeTurns: 0,
+        channel: { state: 'connected' },
+      }],
+    });
+    expect(JSON.stringify(result)).not.toMatch(/workdir|capabilit|reconnect|token|secret/iu);
+  });
+
   it('returns sanitized per-bot connection, model, backend, and release facts', () => {
     const result = buildRuntimeStatus({
       releaseSha: 'abc123',
@@ -159,7 +211,38 @@ describe('BotRegistry runtime sources', () => {
       state: 'connected',
       reconnectAttempts: 0,
     });
+    expect(sources[0].activeTurns?.()).toBe(0);
     expect(JSON.stringify(sources)).not.toContain('must-not-leak');
+  });
+
+  it('counts active turns only inside the registered Bot', () => {
+    const registry = new BotRegistry();
+    registry.register({
+      name: 'marketing-bot',
+      platform: 'feishu',
+      config: {
+        name: 'marketing-bot',
+        engine: 'claude',
+        claude: {
+          defaultWorkingDirectory: '/workspace/marketing',
+          maxTurns: undefined,
+          maxBudgetUsd: undefined,
+          model: 'claude-opus-4-8',
+          apiKey: undefined,
+          outputsBaseDir: '/tmp/outputs',
+          downloadsDir: '/tmp/downloads',
+          backend: 'pty',
+        },
+      },
+      bridge: {
+        getPersistentRegistry: () => ({
+          list: () => [{ hasActiveTurn: true }, { hasActiveTurn: false }],
+        }),
+      } as never,
+      sender: {} as never,
+    });
+
+    expect(registry.listRuntimeSources()[0].activeTurns?.()).toBe(1);
   });
 
   it('reports a model-unpinned Codex runtime as the CLI backend', () => {

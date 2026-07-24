@@ -26,6 +26,7 @@ import { metrics as _metrics } from '../utils/metrics.js';
 import type { SessionRegistry } from '../session/session-registry.js';
 import { ProbeReceiptStore } from '../reliability/probe-receipt-store.js';
 import {
+  buildRuntimeObservation,
   buildRuntimeStatus,
   resolveReleaseSha,
 } from '../reliability/runtime-status.js';
@@ -72,6 +73,16 @@ const startTime = Date.now();
 (globalThis as any).__metabot_start_time = startTime;
 
 const WHOAMI_VERIFY_TIMEOUT_MS = 5_000;
+
+export function isRuntimeObservationRoute(method: string, url: string): boolean {
+  return method === 'GET' && url === '/api/observability/runtime';
+}
+
+export function isLoopbackAddress(address: string | undefined): boolean {
+  return address === '127.0.0.1'
+    || address === '::1'
+    || address === '::ffff:127.0.0.1';
+}
 
 /**
  * Routes that accept the dual-auth gate: local secret OR a Bearer that
@@ -252,6 +263,13 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // bridge is typically NOT behind a trusted reverse proxy; X-Forwarded-For is
     // only honoured when METABOT_TRUST_PROXY=1 (see resolveClientIp).
     const clientIp = resolveClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for']);
+    const runtimeObservation = isRuntimeObservationRoute(method, url);
+    const localRuntimeObservation = runtimeObservation && isLoopbackAddress(req.socket.remoteAddress);
+
+    if (runtimeObservation && !localRuntimeObservation) {
+      jsonResponse(res, 403, { error: 'Forbidden' });
+      return;
+    }
 
     // Rate limiting (global per-IP ceiling + failed-auth backoff). GET
     // /api/health is exempt so liveness/readiness probes are never throttled.
@@ -275,7 +293,7 @@ export function startApiServer(options: ApiServerOptions): http.Server {
     // GET /api/health is exempt: it returns only minimal liveness info (see
     // handler below) so probes/load-balancers can hit it without a secret.
     const isPublicHealth = method === 'GET' && url === '/api/health';
-    if (secret && !isPublicHealth && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
+    if (secret && !isPublicHealth && !localRuntimeObservation && !url.startsWith('/web') && !url.startsWith('/api/files/')) {
       const auth = req.headers.authorization;
       const bearer = typeof auth === 'string' && /^Bearer\s+/i.test(auth)
         ? auth.replace(/^Bearer\s+/i, '')
@@ -322,6 +340,14 @@ export function startApiServer(options: ApiServerOptions): http.Server {
           status: 'ok',
           uptime: Math.floor((Date.now() - startTime) / 1000),
         });
+        return;
+      }
+
+      if (localRuntimeObservation) {
+        jsonResponse(res, 200, buildRuntimeObservation({
+          releaseSha: resolveReleaseSha(process.env.METABOT_RELEASE_SHA),
+          bots: registry.listRuntimeSources(),
+        }));
         return;
       }
 

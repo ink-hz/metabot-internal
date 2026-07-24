@@ -109,6 +109,11 @@ export class BotRegistry {
         ...(bot.connectionStatus
           ? { connectionStatus: bot.connectionStatus }
           : {}),
+        activeTurns: () => {
+          const registry = bot.bridge.getPersistentRegistry?.();
+          if (!registry) return 0;
+          return registry.list().filter((executor) => executor.hasActiveTurn).length;
+        },
       };
     });
   }
